@@ -41,7 +41,7 @@ pub struct Repl {
     #[allow(dead_code)] // Available for future direct IC queries
     core: Arc<IntelligenceCore>,
     orchestrator: Orchestrator,
-    session: SessionManager,
+    pub session: SessionManager,
     context: Vec<ConversationTurn>,
     token_tracker: TokenTracker,
     session_record: SessionRecord,

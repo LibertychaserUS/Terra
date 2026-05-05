@@ -259,10 +259,11 @@ max_candidates = 10
         }
 
         Some(Commands::Chat) => {
-            use std::io::BufRead;
             use terra_agents::repl::{Repl, ReplOutput};
             #[allow(unused_imports)]
             use ui::{auto_renderer, OutputRenderer};
+            use rustyline::error::ReadlineError;
+            use rustyline::{CompletionType, Config, EditMode, Editor};
 
             // Detect provider
             let (provider, provider_name): (Arc<dyn ProviderAdapter>, String) =
@@ -297,7 +298,7 @@ max_candidates = 10
             };
             let sandbox = match &constitution {
                 Some(c) => c.to_sandbox_guard(&project_root),
-                None => SandboxGuard::new(project_root, vec![]),
+                None => SandboxGuard::new(project_root.clone(), vec![]),
             };
             let caging = Arc::new(CagingEngine::new(vec![
                 Box::new(SpecificationCage),
@@ -316,32 +317,64 @@ max_candidates = 10
             let mut repl = Repl::new(executor, core);
             let renderer = auto_renderer(&provider_name);
 
+            // Rustyline config
+            let rl_config = Config::builder()
+                .completion_type(CompletionType::List)
+                .edit_mode(EditMode::Emacs)
+                .build();
+            let mut rl: Editor<(), _> = Editor::with_config(rl_config)?;
+
+            // Load history
+            let history_path = terra_dir.join("history.txt");
+            let _ = rl.load_history(&history_path);
+
             // Banner
             renderer.render_banner();
 
-            // Initial prompt
-            renderer.render(&ReplOutput::Prompt("terra > ".into()));
+            loop {
+                let prompt = if repl.session.mode().is_goal() { "goal > " } else { "terra > " };
 
-            let stdin = std::io::stdin();
-            for line in stdin.lock().lines() {
-                let input = match line {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
+                match rl.readline(prompt) {
+                    Ok(line) => {
+                        let _ = rl.add_history_entry(&line);
 
-                let outputs = repl.process_input(&input).await;
+                        let outputs = repl.process_input(&line).await;
 
-                if Repl::should_quit(&outputs) {
-                    for o in &outputs {
-                        renderer.render(o);
+                        if Repl::should_quit(&outputs) {
+                            for o in &outputs {
+                                renderer.render(o);
+                            }
+                            break;
+                        }
+
+                        // Render outputs (skip Prompt — rustyline handles it)
+                        for output in &outputs {
+                            match output {
+                                ReplOutput::Prompt(_) => {} // rustyline shows prompt
+                                other => renderer.render(other),
+                            }
+                        }
                     }
-                    break;
-                }
-
-                for output in &outputs {
-                    renderer.render(output);
+                    Err(ReadlineError::Interrupted) => {
+                        // Ctrl+C: cancel current, show new prompt
+                        println!("\n\x1b[33m[interrupted]\x1b[0m");
+                        continue;
+                    }
+                    Err(ReadlineError::Eof) => {
+                        // Ctrl+D: exit
+                        println!("Goodbye.");
+                        break;
+                    }
+                    Err(err) => {
+                        eprintln!("Error: {:?}", err);
+                        break;
+                    }
                 }
             }
+
+            // Save history
+            let _ = std::fs::create_dir_all(&terra_dir);
+            let _ = rl.save_history(&history_path);
         }
 
         Some(Commands::Doctor { as_json }) => {
