@@ -70,18 +70,44 @@ enum ConfigAction {
 }
 
 /// Bootstrap the Terra runtime: Memory, Caging, IC, Executor, Orchestrator.
+///
+/// Loads .terra/constitution.toml if present to configure sandbox and cage rules.
+/// Falls back to sensible defaults when no constitution file exists.
 fn bootstrap() -> Orchestrator {
-    // L2: Memory Database (in-memory for now, project-specific SQLite later)
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let terra_dir = project_root.join(".terra");
+
+    // Try loading constitution
+    let constitution_path = terra_dir.join("constitution.toml");
+    let constitution = terra_caging::Constitution::load(&constitution_path).ok();
+
+    if constitution.is_some() {
+        tracing::info!("Constitution loaded from {}", constitution_path.display());
+    }
+
+    // L2: Memory Database
     let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
 
-    // L2: Audit Trail
-    let audit = Arc::new(AuditLog::new());
+    // L2: Audit Trail (with persistence if .terra dir exists)
+    let audit = if terra_dir.exists() {
+        let audit_path = terra_dir.join("audit.db");
+        match AuditLog::with_persistence(&audit_path) {
+            Ok(log) => {
+                tracing::info!("Audit log: persistent ({})", audit_path.display());
+                Arc::new(log)
+            }
+            Err(_) => Arc::new(AuditLog::new()),
+        }
+    } else {
+        Arc::new(AuditLog::new())
+    };
 
-    // L4: Caging Engine with all 5 cages + sandbox
-    let sandbox = SandboxGuard::new(
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        vec![], // protected paths configured per project
-    );
+    // L4: Caging Engine — driven by constitution or defaults
+    let sandbox = match &constitution {
+        Some(c) => c.to_sandbox_guard(&project_root),
+        None => SandboxGuard::new(project_root.clone(), vec![]),
+    };
+
     let caging = Arc::new(CagingEngine::new(vec![
         Box::new(SpecificationCage),
         Box::new(MemoryCage),
@@ -91,8 +117,7 @@ fn bootstrap() -> Orchestrator {
     ]));
 
     // L2: Artifact Store
-    let artifacts_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".terra");
-    let artifacts = Arc::new(ArtifactStore::new(artifacts_root));
+    let artifacts = Arc::new(ArtifactStore::new(terra_dir));
 
     // L1: Provider
     let provider: Arc<dyn ProviderAdapter> = match OpenAICompatibleAdapter::from_env() {
@@ -100,10 +125,10 @@ fn bootstrap() -> Orchestrator {
         Err(_) => Arc::new(DryRunAdapter::new()),
     };
 
-    // L3+: Command Executor (the single gateway, includes provider)
+    // L3+: Command Executor
     let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
 
-    // L4: Intelligence Core with domain modules
+    // L4: Intelligence Core
     let mut core = IntelligenceCore::new();
     core.register(Box::new(CodingModule));
     core.register(Box::new(AlgorithmModule));
@@ -140,15 +165,25 @@ async fn main() -> anyhow::Result<()> {
                     Err(_) => (Arc::new(terra_providers::adapter::DryRunAdapter::new()), "dry_run".into()),
                 };
 
-            // Build runtime
+            // Build runtime (constitution-driven)
+            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let terra_dir = project_root.join(".terra");
+            let constitution_path = terra_dir.join("constitution.toml");
+            let constitution = terra_caging::Constitution::load(&constitution_path).ok();
+
             let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
-            let artifacts_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".terra");
-            let artifacts = Arc::new(ArtifactStore::new(artifacts_root));
-            let audit = Arc::new(AuditLog::new());
-            let sandbox = SandboxGuard::new(
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                vec![],
-            );
+            let artifacts = Arc::new(ArtifactStore::new(terra_dir.clone()));
+            let audit = if terra_dir.exists() {
+                AuditLog::with_persistence(&terra_dir.join("audit.db"))
+                    .map(Arc::new)
+                    .unwrap_or_else(|_| Arc::new(AuditLog::new()))
+            } else {
+                Arc::new(AuditLog::new())
+            };
+            let sandbox = match &constitution {
+                Some(c) => c.to_sandbox_guard(&project_root),
+                None => SandboxGuard::new(project_root, vec![]),
+            };
             let caging = Arc::new(CagingEngine::new(vec![
                 Box::new(SpecificationCage),
                 Box::new(MemoryCage),
