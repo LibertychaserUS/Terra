@@ -5,8 +5,7 @@ use tracing::{info, warn};
 
 use terra_caging::cage::{CageAction, CageContext};
 use terra_caging::engine::CagingEngine;
-use terra_memory::MemoryDatabase;
-use terra_memory::ArtifactStore;
+use terra_memory::{MemoryDatabase, ArtifactStore, VectorIndex};
 use terra_protocol::command::{Command, CommandOp, CommandResult, CommandStatus};
 use terra_trace::AuditLog;
 
@@ -24,6 +23,7 @@ use crate::router;
 pub struct CommandExecutor {
     memory: Arc<MemoryDatabase>,
     artifacts: Arc<ArtifactStore>,
+    search_index: std::sync::Mutex<VectorIndex>,
     audit: Arc<AuditLog>,
     caging: Arc<CagingEngine>,
     provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
@@ -37,7 +37,11 @@ impl CommandExecutor {
         caging: Arc<CagingEngine>,
         provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
     ) -> Self {
-        Self { memory, artifacts, audit, caging, provider }
+        Self {
+            memory, artifacts,
+            search_index: std::sync::Mutex::new(VectorIndex::new()),
+            audit, caging, provider,
+        }
     }
 
     /// Execute a command through the full pipeline.
@@ -80,7 +84,10 @@ impl CommandExecutor {
         }
 
         // 3. Execute via router
-        let mut result = router::route(&cmd.op, &agent, &self.memory, &self.artifacts, &self.provider).await;
+        let mut result = router::route(
+            &cmd.op, &agent, &self.memory, &self.artifacts,
+            &self.search_index, &self.provider,
+        ).await;
         result.command_id = cmd_id;
 
         // 4. Audit: record result with duration

@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use terra_memory::MemoryDatabase;
 use terra_memory::artifact::{ArtifactStore, ArtifactType};
+use terra_memory::search::VectorIndex;
 use terra_memory::types::{Level, Scope};
 use terra_protocol::command::{CommandOp, CommandResult, CommandStatus};
 use terra_providers::adapter::{CompletionRequest, ProviderAdapter};
@@ -15,6 +16,7 @@ pub async fn route(
     agent: &str,
     memory: &MemoryDatabase,
     artifacts: &ArtifactStore,
+    search_index: &Mutex<VectorIndex>,
     provider: &Arc<dyn ProviderAdapter>,
 ) -> CommandResult {
     match op {
@@ -29,7 +31,13 @@ pub async fn route(
             };
 
             match memory.write(key.clone(), scope, level, agent, content.as_bytes().to_vec()) {
-                Ok(()) => CommandResult::ok("", Some(serde_json::json!({"written": key}))),
+                Ok(()) => {
+                    // Also index for vector search
+                    if let Ok(mut idx) = search_index.lock() {
+                        idx.upsert(key, content);
+                    }
+                    CommandResult::ok("", Some(serde_json::json!({"written": key})))
+                }
                 Err(e) => CommandResult::err("", e.to_string()),
             }
         }
@@ -58,11 +66,21 @@ pub async fn route(
         }
 
         CommandOp::MemSearch { query, top_k } => {
+            let results = match search_index.lock() {
+                Ok(idx) => idx.search(query, *top_k as usize),
+                Err(_) => vec![],
+            };
+
+            let entries: Vec<serde_json::Value> = results
+                .iter()
+                .map(|(key, score)| serde_json::json!({"key": key, "score": score}))
+                .collect();
+
             CommandResult::ok("", Some(serde_json::json!({
                 "query": query,
                 "top_k": top_k,
-                "results": [],
-                "note": "vector search not yet implemented"
+                "results": entries,
+                "count": results.len(),
             })))
         }
 
@@ -158,17 +176,22 @@ mod tests {
         (ArtifactStore::new(dir.path().to_path_buf()), dir)
     }
 
+    fn test_search() -> Mutex<VectorIndex> {
+        Mutex::new(VectorIndex::new())
+    }
+
     #[tokio::test]
     async fn route_mem_write() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
         let result = route(
             &CommandOp::MemWrite {
                 key: "test_key".into(), content: "test content".into(),
                 scope: "project".into(), level: "L1".into(),
             },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
         assert_eq!(result.status, CommandStatus::Ok);
     }
@@ -177,15 +200,16 @@ mod tests {
     async fn route_mem_read_after_write() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
         route(
             &CommandOp::MemWrite {
                 key: "k1".into(), content: "data".into(),
                 scope: "project".into(), level: "L1".into(),
             },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
-        let result = route(&CommandOp::MemRead { key: "k1".into() }, "main", &mem, &art, &prov).await;
+        let result = route(&CommandOp::MemRead { key: "k1".into() }, "main", &mem, &art, &search, &prov).await;
         assert_eq!(result.status, CommandStatus::Ok);
         assert_eq!(result.data.unwrap()["key"], "k1");
     }
@@ -194,8 +218,9 @@ mod tests {
     async fn route_mem_read_not_found() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
-        let result = route(&CommandOp::MemRead { key: "nope".into() }, "main", &mem, &art, &prov).await;
+        let result = route(&CommandOp::MemRead { key: "nope".into() }, "main", &mem, &art, &search, &prov).await;
         assert_eq!(result.status, CommandStatus::NotFound);
     }
 
@@ -203,13 +228,14 @@ mod tests {
     async fn route_invalid_scope() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
         let result = route(
             &CommandOp::MemWrite {
                 key: "k".into(), content: "c".into(),
                 scope: "INVALID".into(), level: "L1".into(),
             },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
         assert_eq!(result.status, CommandStatus::Error);
     }
@@ -218,10 +244,11 @@ mod tests {
     async fn route_trace_checkpoint() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
         let result = route(
             &CommandOp::TraceCheckpoint { title: "test".into(), summary: "testing".into() },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
         assert_eq!(result.status, CommandStatus::Ok);
     }
@@ -230,6 +257,7 @@ mod tests {
     async fn route_provider_call_dry_run() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
         let result = route(
             &CommandOp::ProviderCall {
@@ -237,7 +265,7 @@ mod tests {
                 user_prompt: "What is 2+2?".into(),
                 max_tokens: Some(50), temperature: None,
             },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
         assert_eq!(result.status, CommandStatus::Ok);
         assert!(result.data.unwrap()["content"].as_str().unwrap().contains("DRY_RUN"));
@@ -247,6 +275,7 @@ mod tests {
     async fn route_artifact_save_and_load() {
         let mem = test_memory();
         let (art, _d) = test_artifacts();
+        let search = test_search();
         let prov = test_provider();
 
         // Save
@@ -255,7 +284,7 @@ mod tests {
                 artifact_type: "plan".into(),
                 content: serde_json::json!({"step": "plan v1"}),
             },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
         assert_eq!(save_result.status, CommandStatus::Ok);
         assert_eq!(save_result.data.as_ref().unwrap()["version"], 1);
@@ -263,7 +292,7 @@ mod tests {
         // Load
         let load_result = route(
             &CommandOp::ArtifactLoad { artifact_type: "plan".into(), version: None },
-            "main", &mem, &art, &prov,
+            "main", &mem, &art, &search, &prov,
         ).await;
         assert_eq!(load_result.status, CommandStatus::Ok);
         assert_eq!(load_result.data.as_ref().unwrap()["version"], 1);
