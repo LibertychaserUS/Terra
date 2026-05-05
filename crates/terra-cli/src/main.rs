@@ -338,19 +338,34 @@ max_candidates = 10
                     Ok(line) => {
                         let _ = rl.add_history_entry(&line);
 
+                        // Start spinner for non-command input (conversation)
+                        let is_command = line.trim().starts_with('/');
+                        let spinner_msg = if !is_command && !line.trim().is_empty() {
+                            let short = if line.len() > 30 { format!("{}...", &line.trim()[..27]) } else { line.trim().to_string() };
+                            Some(short)
+                        } else {
+                            None
+                        };
+                        let spinner = spinner_msg.as_ref().map(|msg| ui::Spinner::start(msg));
+
                         let outputs = repl.process_input(&line).await;
 
+                        // Stop spinner
+                        if let Some(s) = &spinner {
+                            s.stop();
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+
                         if Repl::should_quit(&outputs) {
-                            for o in &outputs {
-                                renderer.render(o);
-                            }
+                            for o in &outputs { renderer.render(o); }
                             break;
                         }
 
-                        // Render outputs (skip Prompt — rustyline handles it)
                         for output in &outputs {
                             match output {
-                                ReplOutput::Prompt(_) => {} // rustyline shows prompt
+                                ReplOutput::Prompt(_) => {}
+                                // Skip "Thinking" notifications — spinner already showed it
+                                ReplOutput::Notification(msg) if (msg.contains("Thinking") || msg.contains("Analyzing") || msg.contains("Processing")) && spinner.is_some() => {}
                                 other => renderer.render(other),
                             }
                         }

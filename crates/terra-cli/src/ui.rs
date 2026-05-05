@@ -14,6 +14,43 @@
 use terra_agents::repl::ReplOutput;
 use terra_types::event::TokenTracker;
 
+/// Dynamic thinking spinner — prints dots on same line.
+pub struct Spinner {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Spinner {
+    /// Start a spinner with the given message.
+    pub fn start(msg: &str) -> Self {
+        use std::io::Write;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let msg = msg.to_string();
+
+        let handle = tokio::spawn(async move {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut i = 0;
+            loop {
+                if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                print!("\r\x1b[2m  {} {}\x1b[0m  ", frames[i % frames.len()], msg);
+                std::io::stdout().flush().ok();
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                i += 1;
+            }
+            print!("\r{}\r", " ".repeat(60));
+            std::io::stdout().flush().ok();
+        });
+
+        Self { handle: Some(handle), stop }
+    }
+
+    /// Stop the spinner.
+    pub fn stop(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ANSI color codes
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";

@@ -208,6 +208,34 @@ pub fn git_diff_file(root: &Path, file_path: &str) -> Option<String> {
     }
 }
 
+/// Get a colored diff for a specific file (ANSI colors: green +, red -).
+pub fn git_diff_colored(root: &Path, file_path: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["diff", file_path])
+        .current_dir(root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() { return None; }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    if raw.trim().is_empty() { return None; }
+
+    // Colorize diff output
+    let colored: String = raw.lines().map(|line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            format!("\x1b[32m{}\x1b[0m", line)  // green for additions
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            format!("\x1b[31m{}\x1b[0m", line)  // red for deletions
+        } else if line.starts_with("@@") {
+            format!("\x1b[36m{}\x1b[0m", line)  // cyan for hunk headers
+        } else {
+            line.to_string()
+        }
+    }).collect::<Vec<_>>().join("\n");
+
+    Some(colored)
+}
+
 /// Stage files and create a commit with the given message.
 pub fn git_commit(root: &Path, files: &[&str], message: &str) -> Result<String, String> {
     // Stage files
