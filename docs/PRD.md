@@ -409,3 +409,112 @@ terra skill list, terra session start/end, terra --help/--version
 
 ### Skill: MessagePack stdin/stdout, JSON stderr
 ### Provider: POST /v1/chat/completions (OpenAI-compatible)
+
+---
+
+## Patch 1 — Dual Mode, Memory Permissions, Sleep Cycle, Output Cage
+
+> Patch ID: TERRA-PRS-002-P1
+> Date: 2026-05-22
+> Scope: New functional requirements extending v2 baseline.
+> Rule: This patch only adds. No existing FR is modified.
+
+---
+
+### P1.1 Conversation/Goal Dual Mode
+
+Terra operates in two modes. Conversation Mode is the default.
+Goal Mode is explicitly activated by the user.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-143 | MUST | Terra SHALL support two runtime modes: Conversation Mode (default) and Goal Mode (user-activated). |
+| FR-144 | MUST | Goal Mode SHALL be activated by explicit user command (`/goal "<description>"`). |
+| FR-145 | MUST | Goal Mode SHALL activate: Specification Cage, Verification Cage, Convergence Cage, D-001/D-002/D-003 drift detection. |
+| FR-146 | MUST | Conversation Mode SHALL keep active: Meta-Cage, Memory Cage, Action Cage (sandbox), Audit (lightweight). |
+| FR-147 | MUST | Conversation Mode SHALL NOT require SpecIR compilation or Specification Cage gating. |
+| FR-148 | MUST | Mode transitions SHALL be recorded in the Audit log. |
+| FR-149 | SHOULD | Agent MAY suggest Goal Mode when task intent is detected in Conversation Mode. User confirms before switch. |
+
+### P1.2 Memory Write Permissions by Mode and Level
+
+Agent write access is constrained by memory level. Persistent knowledge
+requires promotion + user verdict. Cage enforcement is programmatic.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-150 | MUST | L0 (Authoritative) SHALL be read-only in all modes. Enforced by Memory Cage. |
+| FR-151 | MUST | L1 (Project Knowledge) SHALL only be written via promotion chain + user verdict. No direct agent write. |
+| FR-152 | MUST | L2 (Task Scope) SHALL be writable by agent in both modes. Cleaned on session end. |
+| FR-153 | MUST | L3 (Accepted Paths) SHALL be writable in Goal Mode only, gated by Verification Cage pass. |
+| FR-154 | MUST | L4 (Failed Paths) SHALL be writable by agent in both modes (auto-recorded on failure). |
+| FR-155 | MUST | L5 (Dormant Ideas) SHALL be writable by agent in both modes. This is the buffer layer for observations. |
+| FR-156 | MUST | L6 (Model Candidates) SHALL be writable by agent in both modes. Agent nominates candidates for user review. |
+| FR-157 | MUST | When agent writes to L5 or L6, a fixed-format notification SHALL be emitted: `[Terra] Recorded → L{n}: "{summary}"`. This notification is program-generated, not LLM-generated. |
+
+### P1.3 Sleep Consolidation Cycle
+
+Sleep consolidation is a configurable periodic process that abstracts
+concrete actions into reusable principles via the L0-L6 promotion chain.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-158 | MUST | Sleep consolidation SHALL be triggered by one of: session end, configurable interval, or manual `/sleep` command. |
+| FR-159 | MUST | Consolidation trigger mode and interval SHALL be configurable in config.toml under `[sleep]` section. |
+| FR-160 | MUST | Consolidation SHALL scan L2 + L5 entries, match against IC rules, group by pattern, and produce L6 candidates. |
+| FR-161 | MUST | Consolidation results SHALL be presented to user as a candidate list. User accepts (→ promote to L1/L3) or rejects (→ discard or remain L5). |
+| FR-162 | MUST | User verdicts on promotion candidates SHALL be recorded in Audit log. |
+| FR-163 | SHOULD | Consolidation SHALL respect `max_candidates` config to limit single-batch output. |
+
+### P1.4 Output Cage
+
+Current caging only audits input commands. Output Cage audits model responses.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-164 | MUST | An Output Cage SHALL inspect ProviderCall responses before they are returned to the agent. |
+| FR-165 | MUST | Output Cage SHALL block responses that contain instructions to bypass caging, modify constitution, or escalate permissions. |
+| FR-166 | SHOULD | Output Cage SHALL flag responses that reference operations outside the current agent's permitted CommandOp set. |
+
+### P1.5 Active Drift Detection (Goal Mode Only)
+
+D-001 drift detection transitions from passive (on-demand) to active
+(automatic) when in Goal Mode.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-167 | MUST | In Goal Mode, D-001 (goal drift) SHALL be evaluated automatically at configurable intervals (default: every 5 commands). |
+| FR-168 | MUST | When D-001 score falls below threshold, execution SHALL pause and agent SHALL re-align with spec before continuing. |
+| FR-169 | MUST | D-002 (shallow reasoning) and D-003 (shortcut detection) SHALL be evaluated at checkpoints in Goal Mode. |
+| FR-170 | MUST | Drift detection results SHALL be recorded in Audit log. Drift events SHALL NOT consume LLM tokens for justification unless cage requests it. |
+
+### P1.6 User Commands
+
+Fixed set of user-facing commands. Program-processed, no LLM token cost.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-171 | MUST | `/goal "<description>"` SHALL activate Goal Mode with the given description as spec input. |
+| FR-172 | MUST | `/done` SHALL end current Goal Mode, trigger sleep consolidation, return to Conversation Mode. |
+| FR-173 | MUST | `/status` SHALL display: current mode, goal (if any), drift score (if Goal Mode), session duration. |
+| FR-174 | MUST | `/remember "<content>"` SHALL write content to Memory L1 (Project) directly, bypassing promotion chain. This is explicit user intent. |
+| FR-175 | MUST | `/forget <key>` SHALL soft-delete a memory entry. Requires ownership or user authority. |
+| FR-176 | MUST | `/sleep` SHALL manually trigger sleep consolidation. |
+| FR-177 | MUST | `/trace` SHALL display current session audit log summary. |
+| FR-178 | SHOULD | All user commands SHALL be processed without LLM invocation. They are program-handled at CLI layer. |
+
+### P1.7 Known Issues (from Phase 1-5 Review)
+
+Documented for tracking. These are defects in the current implementation,
+not new features.
+
+| ID | Category | Description |
+|----|----------|-------------|
+| ISSUE-001 | Architecture | Layer violation: terra-memory (L2) depends on terra-protocol (L3). Command types should be in shared L0 crate. |
+| ISSUE-002 | Architecture | Layer violation: terra-trace (L2) depends on terra-protocol (L3). Same root cause as ISSUE-001. |
+| ISSUE-003 | Architecture | Layer violation: terra-providers (L1) depends on terra-protocol (L3). Same root cause as ISSUE-001. |
+| ISSUE-004 | Testing | Test ID prefix inconsistency: T-PT, T-MD, T-AT tests exist but use non-standard prefixes (T-C-, T-TR-, etc). |
+| ISSUE-005 | Feature | Embedding not integrated. Vector search uses TF-IDF fallback. ONNX Runtime (ort) + usearch not added. |
+| ISSUE-006 | Feature | Audit log persistence is in-memory only. Persistent SQLite storage exists but not connected. |
+| ISSUE-007 | Feature | Agent inter-communication MessagePack pipeline not fully connected end-to-end. |
+| ISSUE-008 | Feature | Streaming provider response not implemented (capability advertised but not functional). |

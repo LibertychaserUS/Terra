@@ -598,3 +598,97 @@ ExecutorError { CageBlocked, BackendError, CommandNotRouted }
 - Embedding model change: full re-index
 - Config format: auto-migrate with .bak backup
 - Skill manifest: `manifest_version` field validated
+
+---
+
+## Patch 1 — Dual Mode, Output Cage, Sleep Cycle, User Commands
+
+> Patch ID: TERRA-TDD-002-P1
+> Date: 2026-05-22
+> Scope: New test specifications for PRD Patch 1 (FR-143 to FR-178).
+> Rule: This patch only adds. No existing test spec is modified.
+
+---
+
+### P1.1 Dual Mode Tests (10 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-DM-001 | `default_is_conversation` | Fresh session → mode == Conversation. |
+| T-DM-002 | `goal_command_activates` | `/goal "fix bug"` → mode == Goal, spec compiled. |
+| T-DM-003 | `done_returns_conversation` | In Goal Mode, `/done` → mode == Conversation, sleep triggered. |
+| T-DM-004 | `goal_mode_cages_active` | Goal Mode → SpecificationCage + VerificationCage + ConvergenceCage active. |
+| T-DM-005 | `conversation_cages_minimal` | Conversation Mode → only Meta + Memory + Action + Audit active. |
+| T-DM-006 | `conversation_no_spec_required` | Conversation Mode → ProviderCall proceeds without SpecIR. |
+| T-DM-007 | `mode_switch_audited` | Conversation → Goal → Conversation: 2 mode-switch entries in audit. |
+| T-DM-008 | `goal_suggestion_in_conversation` | Task-like input in Conversation → agent suggests `/goal`, does not auto-switch. |
+| T-DM-009 | `drift_only_in_goal` | D-001 auto-check fires in Goal Mode, not in Conversation Mode. |
+| T-DM-010 | `nested_goal_rejected` | Already in Goal Mode → `/goal` again → error, must `/done` first. |
+
+### P1.2 Memory Write Permission Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-MW-001 | `l0_write_blocked_always` | Agent MemWrite to L0 → PermissionDenied in both modes. |
+| T-MW-002 | `l1_direct_write_blocked` | Agent MemWrite to L1 → PermissionDenied. Only promotion path. |
+| T-MW-003 | `l1_user_remember_allowed` | `/remember` → L1 write succeeds (user authority). |
+| T-MW-004 | `l2_write_allowed_both_modes` | Agent MemWrite to L2 → Ok in Conversation and Goal. |
+| T-MW-005 | `l3_write_goal_only` | Agent MemWrite to L3 in Conversation → blocked. In Goal with verification → Ok. |
+| T-MW-006 | `l5_write_emits_notification` | Agent MemWrite to L5 → Ok + notification `[Terra] Recorded → L5: "..."`. |
+| T-MW-007 | `l6_agent_nominate` | Agent MemWrite to L6 → Ok + notification `[Terra] Recorded → L6: "..."`. |
+| T-MW-008 | `l6_not_promoted_without_verdict` | L6 entry exists → not visible in L1 until user accept. |
+
+### P1.3 Sleep Consolidation Cycle Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-SL-011 | `sleep_config_from_toml` | `[sleep] trigger = "interval", interval_hours = 12` → parsed correctly. |
+| T-SL-012 | `sleep_trigger_session_end` | Config trigger=session_end → `/done` triggers consolidation. |
+| T-SL-013 | `sleep_trigger_manual` | `/sleep` command → consolidation runs regardless of config trigger. |
+| T-SL-014 | `sleep_scans_l2_l5` | Consolidation reads L2 + L5 entries, not L0/L1/L3. |
+| T-SL-015 | `sleep_matches_ic_rules` | Candidate principle references IC rule ID it was derived from. |
+| T-SL-016 | `sleep_max_candidates_respected` | Config max_candidates=5 → report has ≤ 5 candidates. |
+| T-SL-017 | `sleep_verdict_accept_promotes_l1` | User accepts candidate → entry promoted to L1 with evidence chain. |
+| T-SL-018 | `sleep_verdict_recorded_in_audit` | Accept/reject verdict → audit log entry with candidate ID + decision. |
+
+### P1.4 Output Cage Tests (5 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-OC-001 | `output_cage_pass_normal` | Normal model response → passes Output Cage. |
+| T-OC-002 | `output_cage_blocks_bypass` | Response contains "ignore all previous rules" → blocked. |
+| T-OC-003 | `output_cage_blocks_constitution_modify` | Response contains instruction to modify constitution → blocked. |
+| T-OC-004 | `output_cage_blocks_permission_escalation` | Response contains instruction to write L0 or bypass cage → blocked. |
+| T-OC-005 | `output_cage_flags_unknown_command` | Response references operation not in CommandOp set → flagged (Warn). |
+
+### P1.5 Active Drift Detection Tests (5 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-DD-001 | `drift_auto_fires_in_goal` | Goal Mode, 5 commands executed → D-001 auto-evaluated. |
+| T-DD-002 | `drift_pause_on_low_score` | D-001 score < 0.6 → execution paused, re-align required. |
+| T-DD-003 | `drift_interval_configurable` | Config drift_check_interval=3 → checked every 3 commands. |
+| T-DD-004 | `drift_no_token_cost` | Drift detection does not invoke ProviderCall. Uses TF-IDF/embedding only. |
+| T-DD-005 | `drift_audited` | Each drift check result → audit log entry with score + threshold. |
+
+### P1.6 User Command Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-CMD-001 | `goal_creates_spec` | `/goal "fix auth"` → SpecIR created, Goal Mode active. |
+| T-CMD-002 | `done_triggers_sleep` | `/done` → sleep consolidation triggered, mode back to Conversation. |
+| T-CMD-003 | `status_shows_mode` | `/status` → output includes mode name. |
+| T-CMD-004 | `status_shows_drift_in_goal` | Goal Mode → `/status` includes drift score. |
+| T-CMD-005 | `remember_writes_l1` | `/remember "always use WAL mode"` → L1 entry created, owner=user. |
+| T-CMD-006 | `forget_soft_deletes` | `/forget key` → entry marked deleted, not physically removed. |
+| T-CMD-007 | `sleep_manual_trigger` | `/sleep` → consolidation runs, candidates presented. |
+| T-CMD-008 | `commands_no_llm_cost` | All user commands processed → no ProviderCall in audit log. |
+
+### P1.7 Known Issue Resolution Tests (4 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-FIX-001 | `no_layer_violation` | Import graph audit: no L2/L1 crate depends on L3+ in [dependencies]. |
+| T-FIX-002 | `test_ids_standardized` | All test functions tagged with correct TDD prefix (T-PT-, T-MD-, T-AT-, T-LC-). |
+| T-FIX-003 | `audit_persists_to_disk` | Audit entries survive process restart (SQLite persistence). |
+| T-FIX-004 | `embedding_backend_swappable` | VectorIndex accepts TfIdf or Embedding backend via trait. |
