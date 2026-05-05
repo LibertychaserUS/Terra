@@ -23,3 +23,6 @@ dirs.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+terra-memory = { path = "../terra-memory" }
+terra-caging = { path = "../terra-caging" }
+terra-protocol = { path = "../terra-protocol" }
