@@ -1271,7 +1271,42 @@ Iteration 23 (zero-config + permissions)
     │
     └── Iteration 27 (distribution) ← independent
 
-After 27: Terra is a real product.
+Iteration 28 (Smart Greeter + full TUI) ← after 25 (needs codebase + session)
+
+After 28: Terra is a real product.
+```
+
+---
+
+### Iteration 28: Smart Greeter + Full TUI (ratatui)
+
+**Goal:** Professional TUI with Smart Greeter, dialog boxes, status bar.
+
+```
+Step 28.1: Smart Greeter
+  - GreeterProvider trait: fn suggestions(&self) -> Vec<Suggestion>
+  - SessionGreeter: unfinished goals from last session
+  - MemoryGreeter: L6 candidates pending review
+  - GitGreeter: files changed since last session
+  - Custom: config.toml [greeter] entries
+  - Display in dedicated TUI zone at startup
+
+Step 28.2: Full TUI layout (ratatui)
+  - 5 zones: logo+status | greeter | conversation | status bar | input
+  - Conversation zone scrollable, occupies most space
+  - Confirmation dialogs overlay conversation area
+  - Prediction text as dim/ghost in input area
+  - Not crowded — generous whitespace, clean lines
+
+Step 28.3: Status bar
+  - Model name + version + source
+  - Mode (conversation/goal)
+  - Reasoning effort (low/med/high)
+  - Token count + session budget
+  - Continuously updated
+
+Step 28.4: Tests
+  - T-SG-001 through T-SG-004
 ```
 
 ## 18. Definition of "Terra Is Ready for Users"

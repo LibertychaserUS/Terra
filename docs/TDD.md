@@ -940,3 +940,12 @@ All tests skip gracefully when no API key is configured.
 | ID | Test | Behavior Verified |
 |----|------|-------------------|
 | T-PRED-001 | `tab_predicts_from_history` | Previous input "/goal fix bug" → typing "/go" + tab → "/goal" completed. |
+
+### P5.11 Smart Greeter Tests (4 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-SG-001 | `greeter_shows_on_startup` | Startup displays greeter section with at least one suggestion. |
+| T-SG-002 | `greeter_from_last_session` | Last session had unfinished goal → greeter shows "Continue: {goal}". |
+| T-SG-003 | `greeter_from_memory` | L6 candidates pending → greeter shows "Review: N candidates". |
+| T-SG-004 | `greeter_custom_config` | config.toml [greeter] custom entry → appears in suggestions. |

@@ -878,3 +878,25 @@ Coding agents need git.
 | FR-285 | SHOULD | Tab completion SHALL predict user input based on command history + current context. |
 | FR-286 | SHOULD | Prediction SHALL be local (no LLM call, zero token cost). |
 | FR-287 | MAY | Future: lightweight LLM-assisted prediction as optional mode. |
+
+### P5.11 Smart Greeter
+
+Personalized startup suggestions based on memory, session history, and project state.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-288 | MUST | On startup, Terra SHALL display a Smart Greeter with 1-5 personalized suggestions. |
+| FR-289 | MUST | Suggestions SHALL be sourced from: last session (unfinished goals), memory system (L6 candidates pending), project state (git changes). |
+| FR-290 | MUST | User MAY click/type a suggestion number to act on it, or ignore and type freely. |
+| FR-291 | SHOULD | Greeter SHALL be powered by a GreeterProvider trait with pluggable sources (SessionGreeter, MemoryGreeter, GitGreeter). |
+| FR-292 | SHOULD | User MAY add custom suggestions via config.toml `[greeter]` section. |
+| FR-293 | MUST | Greeter SHALL occupy a dedicated TUI area, not mixed with conversation output. |
+
+### P5.12 TUI Layout
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-294 | SHOULD | TUI layout SHALL have 5 zones: logo+status (top), greeter (below logo), conversation (main body, scrollable), status bar (bottom), input (bottom). |
+| FR-295 | SHOULD | Conversation zone SHALL occupy the largest area. Other zones compact. |
+| FR-296 | SHOULD | Confirmation dialogs SHALL overlay the conversation area (not block input permanently). |
+| FR-297 | SHOULD | Prediction text SHALL display as dim/ghost text in the input area. |
