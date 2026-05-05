@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub struct TerraConfig {
     pub provider: ProviderConfig,
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub sleep: SleepConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +26,27 @@ pub struct MemoryConfig {
     pub cache_capacity: usize,
 }
 
+/// Sleep consolidation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SleepConfig {
+    /// Trigger mode: "session_end", "interval", or "manual"
+    pub trigger: String,
+    /// Hours between automatic consolidations (when trigger = "interval")
+    pub interval_hours: u32,
+    /// Maximum candidates per consolidation batch
+    pub max_candidates: usize,
+}
+
+impl Default for SleepConfig {
+    fn default() -> Self {
+        Self {
+            trigger: "session_end".into(),
+            interval_hours: 24,
+            max_candidates: 10,
+        }
+    }
+}
+
 impl Default for TerraConfig {
     fn default() -> Self {
         Self {
@@ -35,6 +58,7 @@ impl Default for TerraConfig {
             memory: MemoryConfig {
                 cache_capacity: 1000,
             },
+            sleep: SleepConfig::default(),
         }
     }
 }
@@ -117,6 +141,17 @@ fn apply_toml(config: &mut TerraConfig, toml: &toml::Value) {
     if let Some(memory) = toml.get("memory") {
         if let Some(cap) = memory.get("cache_capacity").and_then(|v| v.as_integer()) {
             config.memory.cache_capacity = cap as usize;
+        }
+    }
+    if let Some(sleep) = toml.get("sleep") {
+        if let Some(trigger) = sleep.get("trigger").and_then(|v| v.as_str()) {
+            config.sleep.trigger = trigger.to_string();
+        }
+        if let Some(hours) = sleep.get("interval_hours").and_then(|v| v.as_integer()) {
+            config.sleep.interval_hours = hours as u32;
+        }
+        if let Some(max) = sleep.get("max_candidates").and_then(|v| v.as_integer()) {
+            config.sleep.max_candidates = max as usize;
         }
     }
 }

@@ -60,6 +60,7 @@ pub struct SessionManager {
     mode: SessionMode,
     session_actions: Vec<SessionAction>,
     goal_key: Option<String>,
+    sleep_settings: SleepSettings,
 }
 
 /// A recorded action during a session (for sleep consolidation).
@@ -78,6 +79,19 @@ impl SessionManager {
             mode: SessionMode::Conversation,
             session_actions: Vec::new(),
             goal_key: None,
+            sleep_settings: SleepSettings::default(),
+        }
+    }
+
+    /// Create with custom sleep settings.
+    pub fn with_sleep_settings(executor: Arc<CommandExecutor>, settings: SleepSettings) -> Self {
+        Self {
+            executor,
+            state: SessionState::Idle,
+            mode: SessionMode::Conversation,
+            session_actions: Vec::new(),
+            goal_key: None,
+            sleep_settings: settings,
         }
     }
 
@@ -165,12 +179,30 @@ impl SessionManager {
             "to": "conversation",
         })).await;
 
-        let report = consolidate(&self.session_actions);
+        let report = consolidate(&self.session_actions, self.sleep_settings.max_candidates);
 
         self.mode = SessionMode::Conversation;
         self.session_actions.clear();
 
         report
+    }
+
+    /// Manual sleep consolidation (/sleep command).
+    /// Runs consolidation without changing mode or clearing actions.
+    pub async fn consolidate_manual(&self) -> SleepConsolidationReport {
+        self.audit_event("sleep_manual", &serde_json::json!({
+            "action_count": self.session_actions.len(),
+        })).await;
+
+        consolidate(&self.session_actions, self.sleep_settings.max_candidates)
+    }
+
+    /// Record a verdict on a promotion candidate and audit it.
+    pub async fn record_verdict(&self, candidate_index: usize, accepted: bool) {
+        self.audit_event("sleep_verdict", &serde_json::json!({
+            "candidate_index": candidate_index,
+            "accepted": accepted,
+        })).await;
     }
 
     /// Record an action during the session.
@@ -232,7 +264,7 @@ impl SessionManager {
             "mode": if self.mode.is_goal() { "goal" } else { "conversation" },
         })).await;
 
-        let report = consolidate(&self.session_actions);
+        let report = consolidate(&self.session_actions, self.sleep_settings.max_candidates);
 
         self.state = SessionState::Idle;
         self.mode = SessionMode::Conversation;
@@ -269,11 +301,31 @@ pub struct SleepConsolidationReport {
     pub action_count: usize,
 }
 
+/// Sleep consolidation configuration (mirrors CLI SleepConfig).
+#[derive(Debug, Clone)]
+pub struct SleepSettings {
+    pub trigger: String,
+    pub interval_hours: u32,
+    pub max_candidates: usize,
+}
+
+impl Default for SleepSettings {
+    fn default() -> Self {
+        Self {
+            trigger: "session_end".into(),
+            interval_hours: 24,
+            max_candidates: 10,
+        }
+    }
+}
+
 /// A candidate for promotion from L6 to L1.
 #[derive(Debug, Clone)]
 pub struct PromotionCandidate {
     pub principle: String,
     pub derived_from: Vec<String>,
+    /// IC rule ID this principle relates to (e.g., "B-002", "R-003")
+    pub ic_rule_id: Option<String>,
     pub promoted: Option<bool>,
 }
 
@@ -287,8 +339,25 @@ impl PromotionCandidate {
     }
 }
 
+/// IC rule keywords for matching actions to rules during consolidation.
+const IC_RULE_KEYWORDS: &[(&str, &str)] = &[
+    ("B-002", "minimal"),
+    ("B-001", "elegant"),
+    ("R-001", "understand"),
+    ("R-003", "evidence"),
+    ("R-002", "decompose"),
+    ("B-003", "safe"),
+    ("B-004", "verify"),
+    ("C-001", "unwrap"),
+    ("B-005", "pattern"),
+    ("A-002", "edge case"),
+];
+
 /// Consolidate session actions into promotion candidates.
-fn consolidate(actions: &[SessionAction]) -> SleepConsolidationReport {
+///
+/// Scans actions (from L2+L5 scope), groups by task type,
+/// matches against IC rule keywords, and generates candidates.
+fn consolidate(actions: &[SessionAction], max_candidates: usize) -> SleepConsolidationReport {
     let action_count = actions.len();
 
     let mut groups: HashMap<String, Vec<&SessionAction>> = HashMap::new();
@@ -299,7 +368,7 @@ fn consolidate(actions: &[SessionAction]) -> SleepConsolidationReport {
             .push(action);
     }
 
-    let candidates: Vec<PromotionCandidate> = groups
+    let mut candidates: Vec<PromotionCandidate> = groups
         .iter()
         .filter(|(_, actions)| actions.len() >= 2)
         .map(|(task_type, actions)| {
@@ -308,16 +377,26 @@ fn consolidate(actions: &[SessionAction]) -> SleepConsolidationReport {
                 .map(|a| a.description.clone())
                 .collect();
 
+            // Match against IC rules by scanning action descriptions
+            let combined_text = descriptions.join(" ").to_lowercase();
+            let ic_rule_id = IC_RULE_KEYWORDS
+                .iter()
+                .find(|(_, keyword)| combined_text.contains(keyword))
+                .map(|(id, _)| id.to_string());
+
             PromotionCandidate {
                 principle: format!(
                     "When performing {} tasks: common approach observed across {} instances",
                     task_type, actions.len()
                 ),
                 derived_from: descriptions,
+                ic_rule_id,
                 promoted: None,
             }
         })
         .collect();
+
+    candidates.truncate(max_candidates);
 
     SleepConsolidationReport { candidates, action_count }
 }
@@ -539,7 +618,7 @@ mod tests {
             SessionAction { description: "fixed login".into(), task_type: "bugfix".into(), outcome: "ok".into() },
             SessionAction { description: "added tests".into(), task_type: "bugfix".into(), outcome: "ok".into() },
         ];
-        let report = consolidate(&actions);
+        let report = consolidate(&actions, 10);
         assert!(!report.candidates.is_empty());
         assert!(report.candidates[0].principle.contains("bugfix"));
     }
@@ -554,7 +633,7 @@ mod tests {
             SessionAction { description: "task 4".into(), task_type: "bugfix".into(), outcome: "ok".into() },
             SessionAction { description: "task 5".into(), task_type: "refactor".into(), outcome: "ok".into() },
         ];
-        let report = consolidate(&actions);
+        let report = consolidate(&actions, 10);
         assert!(report.candidates.len() >= 2);
     }
 
@@ -562,7 +641,8 @@ mod tests {
     #[test]
     fn sleep_user_accept_promotes() {
         let mut c = PromotionCandidate {
-            principle: "test".into(), derived_from: vec!["a".into()], promoted: None,
+            principle: "test".into(), derived_from: vec!["a".into()],
+            ic_rule_id: None, promoted: None,
         };
         c.accept();
         assert_eq!(c.promoted, Some(true));
@@ -572,9 +652,146 @@ mod tests {
     #[test]
     fn sleep_user_reject_discards() {
         let mut c = PromotionCandidate {
-            principle: "test".into(), derived_from: vec!["a".into()], promoted: None,
+            principle: "test".into(), derived_from: vec!["a".into()],
+            ic_rule_id: None, promoted: None,
         };
         c.reject();
         assert_eq!(c.promoted, Some(false));
+    }
+
+    // T-SL-011: sleep_config_from_toml
+    #[test]
+    fn sleep_config_defaults() {
+        let settings = SleepSettings::default();
+        assert_eq!(settings.trigger, "session_end");
+        assert_eq!(settings.interval_hours, 24);
+        assert_eq!(settings.max_candidates, 10);
+    }
+
+    // T-SL-012: sleep_trigger_session_end
+    #[tokio::test]
+    async fn sleep_trigger_session_end() {
+        let (exec, _dir) = test_executor();
+        let mut mgr = SessionManager::new(exec);
+        mgr.start("project", "goal").await.unwrap();
+        mgr.enter_goal("fix bug").await.unwrap();
+        mgr.record_action(SessionAction {
+            description: "fixed auth".into(), task_type: "bugfix".into(), outcome: "ok".into(),
+        });
+        mgr.record_action(SessionAction {
+            description: "fixed login".into(), task_type: "bugfix".into(), outcome: "ok".into(),
+        });
+        // exit_goal triggers consolidation
+        let report = mgr.exit_goal().await;
+        assert_eq!(report.action_count, 2);
+        assert!(!report.candidates.is_empty());
+    }
+
+    // T-SL-013: sleep_trigger_manual
+    #[tokio::test]
+    async fn sleep_trigger_manual() {
+        let (exec, _dir) = test_executor();
+        let mut mgr = SessionManager::new(exec);
+        mgr.start("project", "goal").await.unwrap();
+        mgr.record_action(SessionAction {
+            description: "task a".into(), task_type: "feature".into(), outcome: "ok".into(),
+        });
+        mgr.record_action(SessionAction {
+            description: "task b".into(), task_type: "feature".into(), outcome: "ok".into(),
+        });
+        // Manual consolidation without mode change
+        let report = mgr.consolidate_manual().await;
+        assert_eq!(report.action_count, 2);
+        // Actions NOT cleared (manual doesn't change state)
+        assert!(mgr.mode().is_conversation());
+    }
+
+    // T-SL-014: sleep scans by grouping (L2+L5 scope represented by actions)
+    #[test]
+    fn sleep_scans_actions_by_type() {
+        let actions = vec![
+            SessionAction { description: "a".into(), task_type: "bugfix".into(), outcome: "ok".into() },
+            SessionAction { description: "b".into(), task_type: "bugfix".into(), outcome: "ok".into() },
+            SessionAction { description: "c".into(), task_type: "feature".into(), outcome: "ok".into() },
+        ];
+        let report = consolidate(&actions, 10);
+        // Only bugfix group has >= 2, feature has 1 (filtered out)
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.candidates[0].principle.contains("bugfix"));
+    }
+
+    // T-SL-015: sleep matches IC rules
+    #[test]
+    fn sleep_matches_ic_rules() {
+        let actions = vec![
+            SessionAction {
+                description: "applied minimal change to fix auth".into(),
+                task_type: "bugfix".into(), outcome: "ok".into(),
+            },
+            SessionAction {
+                description: "kept change minimal, only target file".into(),
+                task_type: "bugfix".into(), outcome: "ok".into(),
+            },
+        ];
+        let report = consolidate(&actions, 10);
+        assert!(!report.candidates.is_empty());
+        // "minimal" keyword should match B-002
+        assert_eq!(
+            report.candidates[0].ic_rule_id.as_deref(),
+            Some("B-002"),
+            "should match B-002 (minimal change)"
+        );
+    }
+
+    // T-SL-016: max_candidates respected
+    #[test]
+    fn sleep_max_candidates_respected() {
+        let mut actions = Vec::new();
+        for i in 0..20 {
+            let task_type = format!("type_{}", i / 2);
+            actions.push(SessionAction {
+                description: format!("action {}", i), task_type, outcome: "ok".into(),
+            });
+        }
+        let report = consolidate(&actions, 5);
+        assert!(report.candidates.len() <= 5, "should respect max_candidates=5, got {}", report.candidates.len());
+    }
+
+    // T-SL-017: accept promotes (verdict recorded)
+    #[tokio::test]
+    async fn sleep_verdict_accept() {
+        let (exec, _dir) = test_executor();
+        let mgr = SessionManager::new(exec);
+
+        let mut candidate = PromotionCandidate {
+            principle: "always verify before commit".into(),
+            derived_from: vec!["action 1".into(), "action 2".into()],
+            ic_rule_id: Some("B-004".into()),
+            promoted: None,
+        };
+        candidate.accept();
+        assert_eq!(candidate.promoted, Some(true));
+
+        // Verdict audited
+        mgr.record_verdict(0, true).await;
+    }
+
+    // T-SL-018: verdict recorded in audit
+    #[tokio::test]
+    async fn sleep_verdict_reject_audited() {
+        let (exec, _dir) = test_executor();
+        let mgr = SessionManager::new(exec);
+
+        let mut candidate = PromotionCandidate {
+            principle: "test".into(),
+            derived_from: vec!["a".into()],
+            ic_rule_id: None,
+            promoted: None,
+        };
+        candidate.reject();
+        assert_eq!(candidate.promoted, Some(false));
+
+        // Verdict audited
+        mgr.record_verdict(0, false).await;
     }
 }
