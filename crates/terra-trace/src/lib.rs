@@ -1,6 +1,8 @@
 //! Terra Audit Trail
 //!
-//! Structured logging, checkpoints, command audit log,
-//! and replay capability.
+//! Command audit logging and replay capability.
+//! Every command executed by agents is recorded here.
 
-pub struct TraceRecorder;
+pub mod audit;
+
+pub use audit::{AuditLog, AuditEntry};

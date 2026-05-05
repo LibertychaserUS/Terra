@@ -408,7 +408,25 @@ Artifact:
 
 ---
 
-## 8. Caging Layer
+## 8. Sandbox（文件系统沙盒）
+
+Agent 的文件操作受 SandboxGuard 约束：
+
+```
+项目目录内 (sandbox root):
+  src/, tests/, Cargo.toml 等  → 可读写删除新增
+  .terra/project.db            → 只能通过 Command Protocol 操作
+  .terra/constitution.toml     → 只读（Meta-Cage 保护）
+
+项目目录外:
+  任何路径                      → 可读、可执行，不可写/删除/新增
+```
+
+所有文件 I/O 经过 SandboxGuard 检查。违规操作被拦截并记录到审计日志。
+
+---
+
+## 9. Caging Layer
 
 CE 的 8 cage 映射到 Terra 的具体实现：
 
@@ -416,7 +434,7 @@ CE 的 8 cage 映射到 Terra 的具体实现：
 Specification Cage   → Language Compilation Layer + TaskSpec
 Knowledge Cage       → Intelligence Core + authority ranking
 Memory Cage          → Memory Database 的 Rust 式安全规则
-Action Cage          → Skill Registry + Tool Protocol + Permissions
+Action Cage          → Skill Registry + Tool Protocol + Permissions + **SandboxGuard**
 Verification Cage    → External Verifier Layer + Generate-Verify-Repair loop
 Convergence Cage     → Path pruning + accepted path preservation
 Parametric Mem Cage  → L6 promotion gate (需人工审核)

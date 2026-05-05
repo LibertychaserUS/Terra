@@ -9,9 +9,12 @@ terra-memory = { path = "../terra-memory" }
 terra-protocol = { path = "../terra-protocol" }
 terra-providers = { path = "../terra-providers" }
 terra-caging = { path = "../terra-caging" }
+terra-compile = { path = "../terra-compile" }
+terra-trace = { path = "../terra-trace" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+async-trait.workspace = true

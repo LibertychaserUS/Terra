@@ -1,6 +1,8 @@
 //! Terra Multi-Agent Runtime
 //!
-//! Main Agent orchestration, Sub-agent (Worker/Explorer) dispatch,
-//! and Cage Sub-agent monitoring.
+//! Main Agent orchestration, Sub-agent dispatch, and the
+//! end-to-end task execution pipeline.
 
-pub struct AgentOrchestrator;
+pub mod orchestrator;
+
+pub use orchestrator::Orchestrator;

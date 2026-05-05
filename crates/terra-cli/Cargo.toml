@@ -8,13 +8,8 @@ name = "terra"
 path = "src/main.rs"
 
 [dependencies]
-terra-core = { path = "../terra-core" }
-terra-memory = { path = "../terra-memory" }
-terra-protocol = { path = "../terra-protocol" }
 terra-agents = { path = "../terra-agents" }
-terra-caging = { path = "../terra-caging" }
 terra-providers = { path = "../terra-providers" }
-terra-compile = { path = "../terra-compile" }
 terra-trace = { path = "../terra-trace" }
 clap.workspace = true
 tokio.workspace = true
