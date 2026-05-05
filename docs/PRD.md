@@ -1,266 +1,747 @@
-# Terra PRD（产品需求文档）
+# Terra Product Requirements Specification
 
-> 版本: 0.1.0 — MVP
-> 最后更新: 2026-05-20
-> 状态: 草案
-
----
-
-## 1. 产品愿景
-
-### 1.1 Terra 是什么
-
-Terra 是一个 **Agent OS**——运行 AI Agent 的操作系统。
-
-它不是聊天机器人，不是 LLM wrapper，不是又一个 Agent 框架。它是一个完整的运行时环境，让 AI Agent 在经过工程化设计的任务空间中**可靠、可控、可审计**地运行。
-
-### 1.2 Terra 不是什么
-
-- **不是** LangChain/CrewAI 那样的编排框架——那些是应用层，Terra 是操作系统层
-- **不是** ChatGPT/Claude 那样的对话产品——Terra 管理 Agent，不替代 Agent
-- **不是** 通用 AI 平台——MVP 聚焦 coding/软件工程场景
-
-### 1.3 核心价值主张
-
-> 可靠性不是模型的属性，而是**系统**的属性。
-
-当前 AI Agent 的问题：
-| 问题 | 根因 |
-|------|------|
-| Agent 漫无目的探索 | 没有结构化的任务空间 |
-| 上下文污染、重复犯错 | 没有记忆纪律（Memory Cage） |
-| 声称完成但未验证 | 没有外部验证机制 |
-| 执行危险操作 | 没有权限边界和沙盒 |
-| 静默修改自身规则 | 没有 cage integrity |
-| 用户从零开始养成 | 没有内建的第一性原理 |
-| Token 浪费严重 | 没有结构化通信协议 |
-
-Terra 通过 **Caging Engineering** 的方法论，系统性地解决这些问题。
-
-### 1.4 与 Caging Engineering 的关系
-
-Caging Engineering（笼工程）是 Harness Engineering 的升级版，是**人机协作开发的 workflow 原则**。它同时治理：
-- **开发过程**：我们如何构建 Terra
-- **产品行为**：Terra 如何治理其内部的 Agent
-
-### 1.5 理论基础
-
-> Keep goals reachable, make unsafe states unreachable, and prune invalid paths after verification.
-
-来源: [Caging Engineering v0.1.0](https://github.com/LibertychaserUS/caging-engineering)
+> Document ID: TERRA-PRS-001
+> Version: 1.0.0
+> Status: DRAFT
+> Date: 2026-05-20
+> Author: Oliver Zhang, Claude (Anthropic)
+> Classification: Public
+>
+> This document follows IEEE 830-1998 (Recommended Practice for
+> Software Requirements Specifications) with RFC 2119 keyword
+> conventions. The key words "MUST", "MUST NOT", "REQUIRED",
+> "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED",
+> "MAY", and "OPTIONAL" are to be interpreted as described in
+> RFC 2119.
 
 ---
 
-## 2. 用户角色
+## Table of Contents
 
-### 2.1 主要用户：软件工程师
-
-- 使用 Terra 运行 AI Agent 来辅助 coding
-- 通过 CLI 与 Terra 交互
-- 期望 Agent 行为可预测、可审计
-- 不愿意从零养成 Agent，期望开箱即有基础能力
-
-### 2.2 次要用户：Skill 开发者
-
-- 在 Terra 上构建领域 Skill（如 OfficeX 文档操作）
-- 通过 MANIFEST.yml 注册 Skill 能力
-- 通过 MessagePack over stdio 与 Terra 通信
-
-### 2.3 未来用户：Agent 运营者
-
-- 配置和运行 Agent 完成更广泛的任务
-- 管理 Provider、Skill、记忆等资源
-- （MVP 不覆盖）
+1. Introduction
+2. Overall Description
+3. Functional Requirements
+4. Non-Functional Requirements
+5. Interface Requirements
+6. System Constraints
+7. Acceptance Criteria
+8. Appendices
 
 ---
 
-## 3. 核心功能
+## 1. Introduction
 
-### 3.1 Intelligence Core（智能核心）
+### 1.1 Purpose
 
-Agent 出厂即有的第一性原理——从"一"开始，不从"零"。
+This document specifies the product requirements for Terra, an
+Agent Operating System (Agent OS) for reliable AI agent execution.
+It is intended for use by developers, testers, and stakeholders
+involved in the design, implementation, and validation of Terra.
 
-**Universal Layer（通用层，只读）：**
-- Reasoning Framework：如何推理（深度优先、证据驱动、分解复杂问题）
-- Behavioral Framework：如何行动（优雅代码、最小改动、安全默认）
-- Self-Diagnostic Rules：如何自检（防目标偏移、防偷懒、防浅层推理）
+### 1.2 Scope
 
-**Domain Modules（领域模块，可插拔）：**
-- `coding/`：编程原则、设计模式、重构规则
-- `algorithm/`：复杂度分析、数据结构选型
-- 未来可扩展：`document/`、`security/` 等
+Terra is a runtime environment that manages AI agent lifecycle,
+memory, permissions, verification, and inter-agent communication.
+It is analogous to a general-purpose operating system, where:
 
-每个 Domain Module 注册自己的 Perspectives（观察视角）、Rules（行为规则）、Verifiers（验证器）。
+- Processes → Agents (Main, Worker, Explorer, Cage)
+- Memory management → Memory Database (scoped, leveled, Rust-safe)
+- Syscall interface → Command Protocol
+- File system → Artifact Store + Sandbox
+- IPC → MessagePack messages (Terra Internal Protocol)
+- Kernel → Caging Engine (8 cages)
+- Firmware → Intelligence Core (first principles)
+- Device drivers → Provider Adapters (LLM endpoints)
+- Syslog → Audit Trail
 
-### 3.2 Language Compilation Layer（语言编译层）
+The initial release (MVP) targets the **software engineering** domain.
+General-purpose agent workloads are out of scope for this version.
 
-**问题**：用户自然语言术语不规范，导致 Agent 理解偏差。
+### 1.3 Definitions and Acronyms
 
-**方案**：JSP 式编译——用户输入 → 术语规范化 → Spec IR（标准化中间表示）
+| Term | Definition |
+|------|-----------|
+| Agent OS | Operating system for AI agents; manages runtime, memory, permissions |
+| Cage | A constraint mechanism that shapes an agent's reachable state space (from Caging Engineering) |
+| CE | Caging Engineering — reachability-oriented framework for reliable AI agent systems |
+| Spec IR | Specification Intermediate Representation — normalized task description |
+| TIP | Terra Internal Protocol — MessagePack-based inter-agent communication |
+| Provider | An LLM endpoint (OpenAI-compatible) |
+| Skill | A self-contained domain capability package registered with Terra |
+| Scope | Memory isolation boundary: Global (S0), Project (S1), Session (S2), Task (S3) |
+| Level | Memory semantic classification: L0 (Authoritative) through L6 (Model Candidates) |
+| Promotion | The process of elevating a memory entry from a lower level to a higher level, subject to verification gates |
+| Sleep Consolidation | Post-session process that abstracts concrete actions into general principles |
+| SandboxGuard | File system permission enforcer: write inside project root, read-only outside |
 
-编译流程：
-1. Lexical Pass：提取关键实体和意图
-2. Semantic Resolution：映射到项目上下文
-3. Terminology Normalization：统一命名
-4. Completeness Check：检测缺失信息
-5. Ambiguity Detection：识别歧义
+### 1.4 References
 
-输出的 Spec IR 是所有下游操作的统一输入，确保 Plan / PRD / Code / Test 术语一致。
+| ID | Document |
+|----|----------|
+| REF-01 | IEEE 830-1998, Recommended Practice for Software Requirements Specifications |
+| REF-02 | RFC 2119, Key words for use in RFCs to Indicate Requirement Levels |
+| REF-03 | Zhang, O. "Caging Engineering v0.1.0", 2026. github.com/LibertychaserUS/caging-engineering |
+| REF-04 | POSIX.1-2024, The Open Group Base Specifications |
+| REF-05 | ARCHITECTURE.md — Terra technical architecture blueprint |
+| REF-06 | VISION_OLIVER.md — Original design vision and rationale |
 
-### 3.3 Multi-Agent Runtime（多智能体运行时）
+### 1.5 Overview
 
-**Main Agent（主 Agent）：**
-- 使用当前可用的最强推理模型
-- 接收用户需求 + 全部对话上下文
-- 制定计划、分发任务、审计结果
-
-**Sub-Agents（子 Agent）：**
-- Worker：执行具体编码/修改
-- Explorer：搜索/研究/信息收集
-- 接收 Main Agent 的结构化指令（MessagePack），执行后返回结果
-
-**Cage Sub-agent（笼子 Agent）：**
-- 独立的监控者，不介入业务
-- 监测 Main Agent 的规范性：目标偏移、推理深度、偷懒、规则违反
-- 可用轻量模型或规则引擎实现
-
-**Provider 适配：**
-- 多模型 Provider → Main 用最强，Worker 用平衡，Explorer 用快速
-- 单模型 Provider → 同模型不同参数（max_tokens, temperature）
-
-### 3.4 Memory Database（记忆数据库）
-
-不是 MD 档案库，是完整的**数据库系统**。
-
-**作用域维度（Scope）：**
-- S0 Global：Intelligence Core + Constitution + 用户偏好
-- S1 Project：项目级知识（每项目独立 SQLite）
-- S2 Session：当前会话上下文
-- S3 Task：具体任务执行状态
-
-**语义维度（Level）：**
-- L0 Authoritative → L1 Project → L2 Task → L3 Accepted Paths → L4 Failed Index → L5 Dormant → L6 Model Candidates
-
-**安全规则（Rust 式）：**
-- Ownership：每条记忆有且仅有一个 owner
-- Borrowing：多读单写
-- Lifetime：低层级不引用高层级
-- No null / No dangling：编译期保证
-
-**三层存储：**
-- L0 Rust 内嵌 + terra-global.db
-- moka Cache（缓冲层，Attention score 驱动 TTI）
-- Per-Project SQLite（持久层）
-
-**检索机制：** Multi-Head Attention（每个 Domain Module 贡献一个观察视角）
-
-### 3.5 Command Protocol（命令协议）
-
-Agent 不写数据库代码。~15 条固定命令覆盖所有交互：
-- mem_write / mem_read / mem_search / mem_promote / mem_archive
-- artifact_save / artifact_load / artifact_list
-- trace_event / trace_checkpoint
-- session_start / session_switch / session_end
-
-每条命令经过：审计记录 → Cage 权限检查 → 执行 → 结果记录。
-可审计 + 可回放。用户和 Agent 用同一套协议。
-
-### 3.6 Caging Layer（笼层）
-
-CE 的 8 cage 实现：
-- Specification Cage → Language Compilation + TaskSpec
-- Knowledge Cage → Intelligence Core + authority ranking
-- Memory Cage → Memory Database 安全规则
-- Action Cage → Skill Registry + Tool Protocol + SandboxGuard
-- Verification Cage → 外部验证 + Generate-Verify-Repair loop
-- Convergence Cage → Path pruning + accepted path preservation
-- Parametric Memory Cage → L6 promotion gate
-- Meta-Cage → Constitution + Cage Sub-agent
-
-### 3.7 Sandbox（沙盒）
-
-- 项目目录内：可读写删除新增
-- 项目目录外：只读 + 可执行
-- .terra/ 内的 constitution 等：只读（Meta-Cage 保护）
-- 所有文件 I/O 经过 SandboxGuard 检查
-
-### 3.8 Sleep Consolidation（睡眠沉淀）
-
-会话结束/空闲时：
-1. 清理无用临时数据
-2. 具体操作抽象为通用原则
-3. 提名晋升（S3→S1, S1→S0）
-4. 用户确认
-
-### 3.9 通信协议
-
-- 人 ↔ Agent：自然语言
-- Agent ↔ Agent：MessagePack 二进制
-- Agent ↔ Tool：MessagePack / JSON Schema
-- 人类审阅：程序渲染为 Markdown
-- Token efficiency 是一等公民
-
-### 3.10 压缩保护
-
-上下文使用率达 70% 时触发主动外化：
-- Accepted paths / plan / 关键决策写入 Memory Database
-- 更新指针表
-- 然后才允许压缩
+Section 2 provides a high-level description of the product.
+Sections 3 and 4 enumerate functional and non-functional requirements
+with unique identifiers, priorities, and acceptance criteria.
+Section 5 defines external interfaces. Section 6 states constraints.
+Section 7 provides cross-cutting acceptance criteria.
 
 ---
 
-## 4. 非功能需求
+## 2. Overall Description
 
-| 需求 | 标准 |
-|------|------|
-| CLI-first | 所有命令支持 `--as-json` 机器可读输出 |
-| Token efficiency | Agent 间通信用 MessagePack，不用自然语言 |
-| 无外部服务硬依赖 | 可纯本地运行（embedding 用本地模型） |
-| Provider 无关 | 任何 OpenAI 兼容端点 |
-| 可审计 | 所有操作有审计日志，可回放 |
-| 安全 | Sandbox 隔离，API key 仅从环境变量读取 |
-| 可扩展 | 通过 Skill 扩展领域能力 |
-| 优雅代码 | 代码质量是一等公民，不为完成而堆砌 |
+### 2.1 Product Perspective
+
+Terra occupies a layer **below** agent frameworks (LangChain, CrewAI)
+and **above** LLM providers (OpenAI, Anthropic, local models).
+
+```
+┌────────────────────────┐
+│ User / Application     │
+├────────────────────────┤
+│ Agent Frameworks       │  ← optional; agents can run directly on Terra
+├────────────────────────┤
+│ Terra (Agent OS)       │  ← THIS PRODUCT
+├────────────────────────┤
+│ LLM Providers          │
+├────────────────────────┤
+│ Hardware / OS          │
+└────────────────────────┘
+```
+
+### 2.2 Product Functions (Summary)
+
+| Function | Description |
+|----------|-------------|
+| F1. Intelligence Core | Built-in first principles for agent reasoning and behavior |
+| F2. Language Compilation | User natural language → Spec IR normalization |
+| F3. Agent Orchestration | Main/Sub/Cage agent lifecycle management |
+| F4. Memory Management | Scoped, leveled, Rust-safe memory database |
+| F5. Command Protocol | Fixed command set for all agent-system interactions |
+| F6. Caging Engine | 8-cage constraint system from Caging Engineering |
+| F7. Sandbox | File system isolation and permission enforcement |
+| F8. Provider Dispatch | LLM adapter with capability detection and retry |
+| F9. Audit Trail | Sequential command logging with replay capability |
+| F10. Sleep Consolidation | Post-session abstraction and promotion |
+| F11. Configuration | User settings, environment detection, project config |
+| F12. Skill System | Domain capability registration and loading |
+
+### 2.3 User Classes
+
+| Class | Interaction Mode | Priority |
+|-------|-----------------|----------|
+| Software Engineer | CLI, direct task execution | Primary (MVP) |
+| Skill Developer | MANIFEST.yml + MessagePack stdio | Secondary |
+| Agent Operator | Config management, monitoring | Future |
+
+### 2.4 Operating Environment
+
+| Component | Requirement |
+|-----------|-------------|
+| OS | macOS 11+ (Apple Silicon), Linux (glibc 2.28+, x86_64/aarch64) |
+| Runtime | Rust 1.75+ (compiled binary, no runtime dependency) |
+| LLM Provider | OPTIONAL. Any OpenAI-compatible endpoint. System MUST operate in dry_run mode without a provider |
+| Network | OPTIONAL. Required only for remote LLM calls and embedding models |
+| Disk | SQLite databases + MessagePack artifacts. Estimated <100MB per project |
+
+### 2.5 Design and Implementation Constraints
+
+| ID | Constraint | Rationale |
+|----|-----------|-----------|
+| DC-01 | Implementation language SHALL be Rust (2021 edition) | Memory safety, performance, zero-cost abstractions |
+| DC-02 | All inter-agent communication SHALL use MessagePack serialization | Token efficiency, compact binary format |
+| DC-03 | All persistent storage SHALL use SQLite with WAL mode | Embedded, ACID, no external service dependency |
+| DC-04 | The system MUST operate without network connectivity in dry_run mode | Offline development support |
+| DC-05 | API credentials MUST be resolved from environment variables only | Security: never touch disk |
+| DC-06 | The system SHALL NOT modify files outside the project sandbox root | Safety: bounded mutation |
+
+### 2.6 Assumptions and Dependencies
+
+| ID | Assumption |
+|----|-----------|
+| A-01 | Users have a Rust toolchain installed (for building from source) or use pre-built binaries |
+| A-02 | At least one OpenAI-compatible provider is available for live mode |
+| A-03 | Project directories follow standard software project layouts |
+| A-04 | Users interact primarily through CLI in a terminal environment |
 
 ---
 
-## 5. MVP 范围
+## 3. Functional Requirements
 
-### 5.1 MVP1（已完成）：端到端路径
+### 3.1 Intelligence Core
 
-✅ User Task → Spec IR → Main Agent → Provider → Worker → Trace
-✅ CLI: `terra run --task "..." [--as-json]`
-✅ DryRun Provider
-✅ 16 tests 通过
+**FR-IC-001: Universal Reasoning Framework**
+- Priority: MUST
+- The system SHALL provide a built-in reasoning framework that
+  defines how agents approach problems.
+- The framework SHALL include rules for: depth-first exploration,
+  evidence-based decisions, and complexity decomposition.
+- The framework SHALL be read-only at runtime (L0 Authoritative).
+- Acceptance: Agent behavior demonstrably follows framework rules
+  in test scenarios.
 
-### 5.2 MVP2（当前目标）：核心能力
+**FR-IC-002: Universal Behavioral Framework**
+- Priority: MUST
+- The system SHALL provide behavioral rules including:
+  elegant code over complex code, minimal change principle,
+  safe defaults, and project pattern consistency.
+- Acceptance: Agent-generated code adheres to behavioral rules
+  in test scenarios.
 
-- [ ] 真实 Provider 接入（OpenAI-compatible）
-- [ ] Memory Database 基础版（SQLite + moka + 基本 read/write/search）
-- [ ] Intelligence Core 基础规则
-- [ ] Sandbox 文件系统保护
-- [ ] Config 系统（用户设置 + 环境识别）
-- [ ] Superpower Skill 基础版
+**FR-IC-003: Self-Diagnostic Rules**
+- Priority: MUST
+- The system SHALL detect and report:
+  (a) goal drift — agent deviating from stated objective,
+  (b) shallow reasoning — insufficient analysis depth,
+  (c) shortcut-taking — bypassing verification or safety steps.
+- Acceptance: Each diagnostic produces a detectable signal in
+  test scenarios.
 
-### 5.3 未来版本
+**FR-IC-004: Domain Module Registry**
+- Priority: MUST
+- The system SHALL support registration of domain-specific
+  capability modules (e.g., `coding/`, `algorithm/`).
+- Each module SHALL declare: perspectives, rules, and verifiers.
+- Multiple modules SHALL be composable (active simultaneously).
+- Acceptance: Two modules registered, both contribute perspectives
+  to a single retrieval query.
 
-- Language Compilation Layer 完整版（需 LLM 做语义解析）
-- Cage Sub-agent 主动监控
-- Sleep Consolidation
-- Multi-Head Attention 检索
-- Streaming 支持
-- OfficeX 重构为 Terra Skill
+**FR-IC-005: Perspective Registration**
+- Priority: SHOULD
+- Each domain module SHALL register one or more Perspectives.
+- Perspectives generate specialized query vectors for
+  Multi-Head Attention retrieval.
+- Acceptance: Multi-head search returns results from multiple
+  module perspectives.
+
+### 3.2 Language Compilation Layer
+
+**FR-LC-001: Spec IR Generation**
+- Priority: MUST
+- The system SHALL transform a user task description (natural language
+  string) into a SpecIR structure containing: spec_id, intent,
+  target, constraints, success_predicate, open_questions,
+  and resolved_terms.
+- Acceptance: `SpecIR::from_task_description("fix the login bug")`
+  produces a valid SpecIR with non-empty intent.
+
+**FR-LC-002: Completeness Detection**
+- Priority: MUST
+- The system SHALL identify when a SpecIR has unresolved
+  questions (missing target, ambiguous scope, etc.).
+- `SpecIR::is_complete()` SHALL return false when
+  `open_questions` is non-empty.
+- Acceptance: Incomplete specs detected in test scenarios.
+
+**FR-LC-003: Terminology Normalization**
+- Priority: SHOULD
+- The system SHOULD map user terminology to project-specific
+  normalized terms (e.g., "login button" → "LoginButton component").
+- Mappings SHALL be stored in `resolved_terms`.
+- Acceptance: Term mapping round-trips through serialization.
+
+**FR-LC-004: LLM-Assisted Compilation**
+- Priority: MAY (future)
+- The system MAY use an LLM provider to perform semantic resolution,
+  ambiguity detection, and completeness checking.
+- This capability MUST be optional; the system SHALL operate
+  with basic compilation when no provider is available.
+
+### 3.3 Multi-Agent Runtime
+
+**FR-AG-001: Main Agent**
+- Priority: MUST
+- The system SHALL instantiate a Main Agent that:
+  (a) receives user input and full dialogue context,
+  (b) queries the Intelligence Core for applicable rules,
+  (c) creates task assignments for Sub-agents,
+  (d) audits Sub-agent results before returning to user.
+- Acceptance: End-to-end test with DryRunAdapter completes successfully.
+
+**FR-AG-002: Worker Sub-agent**
+- Priority: MUST
+- The system SHALL support Worker Sub-agents that execute
+  specific coding/modification tasks.
+- Workers SHALL receive structured TaskPayload (MessagePack)
+  and return structured ResultPayload.
+- Acceptance: Worker receives task, calls provider, returns result.
+
+**FR-AG-003: Explorer Sub-agent**
+- Priority: SHOULD
+- The system SHOULD support Explorer Sub-agents for
+  search, research, and information gathering.
+- Acceptance: Explorer receives search query, returns findings.
+
+**FR-AG-004: Cage Sub-agent**
+- Priority: SHOULD
+- The system SHOULD support a Cage Sub-agent that monitors
+  the Main Agent's execution without intervening in business logic.
+- The Cage Sub-agent SHALL check for: goal drift, reasoning depth
+  degradation, rule violations, and shortcut-taking.
+- Acceptance: Cage agent detects a simulated goal drift scenario.
+
+**FR-AG-005: Model Dispatch Policy**
+- Priority: MUST
+- The system SHALL auto-detect provider capabilities and assign
+  models to agent roles:
+  - Multi-model provider: strongest → Main, balanced → Worker,
+    fast → Explorer
+  - Single-model provider: same model, differentiated by parameters
+    (max_tokens, temperature).
+- Acceptance: Policy correctly assigns models in both scenarios.
+
+### 3.4 Memory Database
+
+**FR-MD-001: Scoped Storage**
+- Priority: MUST
+- The system SHALL maintain four memory scopes:
+  S0 (Global), S1 (Project), S2 (Session), S3 (Task).
+- Each project SHALL have an independent SQLite database.
+- Acceptance: Two projects have isolated memory; writes to one
+  are invisible to the other.
+
+**FR-MD-002: Leveled Memory**
+- Priority: MUST
+- Within each scope, memory entries SHALL be classified by level:
+  L0 (Authoritative), L1 (Project), L2 (Task), L3 (Accepted Paths),
+  L4 (Failed Path Index), L5 (Dormant Ideas), L6 (Model Candidates).
+- Acceptance: Entries created at each level; level constraints enforced.
+
+**FR-MD-003: Ownership**
+- Priority: MUST
+- Each memory entry SHALL have exactly one owner (the creating agent/task).
+- Only the owner MAY modify or delete the entry.
+- Non-owners MAY read the entry.
+- Acceptance: Non-owner write attempt returns PermissionDenied.
+
+**FR-MD-004: Reference Safety**
+- Priority: MUST
+- Memory pointers SHALL NOT be null.
+  - Read of nonexistent key SHALL return `None` (explicit absence),
+    not a null pointer or silent failure.
+- Memory pointers SHALL NOT dangle.
+  - Read through a pointer to a deleted entry SHALL return
+    `MemoryError::Dangling`, not stale data.
+- Version mismatch SHALL be detectable.
+  - Read with expected version N when current version is N+1
+    SHALL return `MemoryError::Stale`.
+- Acceptance: Each error case tested explicitly.
+
+**FR-MD-005: Garbage Collection**
+- Priority: SHOULD
+- The system SHOULD implement garbage collection via:
+  (a) reference counting (real-time, decremented on pointer removal),
+  (b) periodic integrity scan (detect orphaned entries, dangling pointers).
+- L0 and L1 entries SHALL NOT be garbage collected regardless
+  of reference count.
+- Acceptance: GC removes zero-refcount L5 entry; preserves L0 entry.
+
+**FR-MD-006: Promotion Chain**
+- Priority: MUST
+- Memory entries SHALL be promotable between levels:
+  L2→L1, L3→L1, L4→L1 (project knowledge),
+  L1→L0 (if verified repeatedly).
+- L6 promotion SHALL REQUIRE explicit human review.
+- Acceptance: Promotion gate blocks L6→L0 without review flag.
+
+**FR-MD-007: Cache Layer**
+- Priority: SHOULD
+- The system SHOULD maintain an in-memory cache (moka)
+  for the active project's working set.
+- Cache hits SHALL bypass SQLite I/O.
+- Writes SHALL update both cache and SQLite (write-through for
+  critical writes, write-back for non-critical).
+- Acceptance: Cache hit measured faster than SQLite read.
+
+**FR-MD-008: Attention-Based Retrieval**
+- Priority: SHOULD
+- The system SHOULD support semantic search via embedding vectors.
+- Query vectors SHALL be computed at retrieval time from the
+  current context (not stored statically).
+- Multi-Head retrieval: each Domain Module perspective generates
+  a separate query; results are merged and deduplicated.
+- Acceptance: Semantic search returns relevant entries ranked by score.
+
+**FR-MD-009: Artifact Store**
+- Priority: MUST
+- Plan, Spec, Test, and Review artifacts SHALL be stored as
+  versioned MessagePack files in `project/.terra/artifacts/`.
+- The Memory Database SHALL store pointers to artifacts,
+  not the artifact content itself.
+- Acceptance: Artifact saved, loaded by version, pointer resolves.
+
+**FR-MD-010: Compression Protection**
+- Priority: SHOULD
+- When context utilization reaches 70%, the system SHOULD trigger
+  proactive externalization:
+  (a) write accepted paths to Memory Database,
+  (b) write current plan to Artifact Store,
+  (c) update pointer table,
+  (d) then allow context compression.
+- Acceptance: Critical data survives a simulated compression event.
+
+### 3.5 Command Protocol
+
+**FR-CP-001: Fixed Command Set**
+- Priority: MUST
+- The system SHALL define a fixed set of commands (~15) covering
+  all agent-system interactions.
+- Agents SHALL NOT generate database code, SQL, or file I/O code.
+  They SHALL only issue commands from this set.
+- Commands: mem_write, mem_read, mem_update, mem_promote,
+  mem_archive, mem_search, artifact_save, artifact_load,
+  artifact_list, trace_event, trace_checkpoint,
+  session_start, session_switch, session_end.
+- Acceptance: Each command type created, serialized, and executed.
+
+**FR-CP-002: Command Auditing**
+- Priority: MUST
+- Every command SHALL be recorded in the audit log before execution.
+- Every command result SHALL be recorded after execution.
+- Records SHALL include: sequence number, timestamp, agent,
+  command, result, and duration.
+- Acceptance: Audit log contains entry for every executed command.
+
+**FR-CP-003: Command Replay**
+- Priority: SHOULD
+- The audit log SHOULD support replay: re-executing a sequence
+  of recorded commands to reproduce system state.
+- Acceptance: Replay of N commands produces same final state.
+
+**FR-CP-004: Markdown Rendering**
+- Priority: MUST
+- Commands and results SHALL be renderable to human-readable
+  Markdown via a deterministic program (no LLM involvement).
+- Acceptance: Rendered markdown contains all key fields.
+
+### 3.6 Caging Engine
+
+**FR-CG-001: Cage Interface**
+- Priority: MUST
+- Each cage SHALL implement a common interface:
+  `check(state) → Pass | Warn(reason) | Block(reason)`.
+- Block results SHALL prevent the associated action.
+- Warn results SHALL log but allow the action.
+- Acceptance: Each result type handled correctly.
+
+**FR-CG-002: Specification Cage**
+- Priority: MUST
+- The Specification Cage SHALL block task execution when
+  the SpecIR is incomplete (has open questions).
+- Acceptance: Incomplete spec → Block; complete spec → Pass.
+
+**FR-CG-003: Memory Cage**
+- Priority: MUST
+- The Memory Cage SHALL enforce ownership rules (FR-MD-003)
+  and promotion gates (FR-MD-006).
+- Acceptance: Non-owner write blocked; ungated promotion blocked.
+
+**FR-CG-004: Action Cage / Sandbox**
+- Priority: MUST
+- The Action Cage SHALL enforce file system boundaries:
+  (a) writes MUST be within the project sandbox root,
+  (b) reads MAY access any path,
+  (c) writes to protected paths (.terra/constitution) MUST be blocked,
+  (d) deletes outside sandbox root MUST be blocked.
+- Acceptance: Each boundary tested with specific path scenarios.
+
+**FR-CG-005: Verification Cage**
+- Priority: MUST
+- The Verification Cage SHALL block task completion claims
+  when no external verifier has passed.
+- Acceptance: Claim without verification → Block;
+  claim with verification → Pass.
+
+**FR-CG-006: Meta-Cage**
+- Priority: MUST
+- The Meta-Cage SHALL detect and block attempts to modify:
+  constitution rules, cage definitions, verification rules,
+  and permission boundaries.
+- Acceptance: Modification attempt detected and blocked.
+
+**FR-CG-007: Convergence Cage**
+- Priority: SHOULD
+- The Convergence Cage SHOULD enforce stop conditions after
+  a valid path is found, preventing endless exploration.
+- Acceptance: Agent stopped after accepted path recorded.
+
+**FR-CG-008: Parametric Memory Cage**
+- Priority: SHOULD
+- The Parametric Memory Cage SHOULD gate L6 → model memory
+  promotion, requiring explicit human review.
+- Acceptance: Promotion without review flag → Block.
+
+### 3.7 Provider Dispatch
+
+**FR-PD-001: Provider Adapter Trait**
+- Priority: MUST
+- The system SHALL define a `ProviderAdapter` trait with:
+  `complete(request) → CompletionResponse` and
+  `capabilities() → ProviderCapability`.
+- Acceptance: DryRunAdapter and OpenAICompatibleAdapter
+  both implement the trait.
+
+**FR-PD-002: DryRun Mode**
+- Priority: MUST
+- The system SHALL support a DryRun mode that returns
+  deterministic responses without making API calls.
+- DryRun SHALL work without network connectivity or API keys.
+- Acceptance: DryRun produces consistent output; zero token usage.
+
+**FR-PD-003: OpenAI-Compatible Adapter**
+- Priority: MUST (MVP2)
+- The system SHALL implement an adapter for OpenAI-compatible
+  endpoints (OpenAI, DashScope, local models).
+- The adapter SHALL support: API key from env var, base URL override,
+  model selection, temperature, max_tokens.
+- Acceptance: Successful completion against a live endpoint.
+
+**FR-PD-004: Retry with Backoff**
+- Priority: SHOULD
+- The adapter SHOULD retry failed requests with exponential backoff.
+- Maximum 3 retry attempts. Rate limit (HTTP 429) MUST trigger retry.
+- Acceptance: Mock 429 response → retry → eventual success.
+
+**FR-PD-005: Capability Matrix**
+- Priority: SHOULD
+- Each adapter SHALL report its capabilities:
+  structured_output, streaming, max_context_tokens, latency_class.
+- The orchestrator SHALL use capabilities for model dispatch policy.
+- Acceptance: Capability query returns expected fields.
+
+### 3.8 Audit Trail
+
+**FR-AT-001: Sequential Logging**
+- Priority: MUST
+- The audit log SHALL assign monotonically increasing sequence
+  numbers to every recorded command.
+- Acceptance: 100 commands → seq 1..100, no gaps.
+
+**FR-AT-002: Duration Tracking**
+- Priority: SHOULD
+- The audit log SHOULD record execution duration (microseconds)
+  for each command.
+- Acceptance: Duration field populated after execution.
+
+**FR-AT-003: Markdown Report**
+- Priority: MUST
+- The audit log SHALL be renderable to a complete Markdown
+  report listing all entries with timestamps and results.
+- Acceptance: Rendered report parseable and contains all entries.
+
+**FR-AT-004: Concurrent Safety**
+- Priority: MUST
+- The audit log MUST be safe for concurrent writes from
+  multiple agents (threads).
+- Acceptance: 10 threads writing simultaneously; no data loss.
+
+### 3.9 Configuration
+
+**FR-CF-001: Global Config**
+- Priority: MUST
+- The system SHALL read global configuration from
+  `~/.terra/config.toml`.
+- Acceptance: Config file read; settings applied.
+
+**FR-CF-002: Project Config Override**
+- Priority: MUST
+- Project-level `project/.terra/config.toml` SHALL override
+  global settings.
+- Acceptance: Project setting overrides global for same key.
+
+**FR-CF-003: Environment Variable Override**
+- Priority: MUST
+- Environment variables (`TERRA_PROVIDER_API_KEY`,
+  `TERRA_PROVIDER_BASE_URL`) SHALL override config file settings.
+- Precedence: env var > project config > global config > defaults.
+- Acceptance: Env var takes precedence in all test scenarios.
+
+**FR-CF-004: Environment Detection**
+- Priority: SHOULD
+- `terra doctor` SHALL detect and report:
+  OS type and version, Rust version, available providers,
+  SQLite availability, embedding model status.
+- Acceptance: Doctor output includes all detected components.
+
+### 3.10 Sleep Consolidation
+
+**FR-SC-001: Post-Session Cleanup**
+- Priority: SHOULD
+- On session end, the system SHOULD remove S3 (Task) entries
+  that are not promoted.
+- Acceptance: Task entries absent after session end.
+
+**FR-SC-002: Abstraction**
+- Priority: SHOULD
+- The system SHOULD abstract concrete actions into general
+  principles (e.g., "added null check to auth.py:42" →
+  "validate input boundaries at function entry").
+- Acceptance: Abstracted principle is more general than
+  original action.
+
+**FR-SC-003: Promotion Candidates**
+- Priority: SHOULD
+- The system SHOULD generate a list of promotion candidates
+  for user review after sleep consolidation.
+- Acceptance: Candidate list presented; user can accept/reject.
+
+### 3.11 Skill System
+
+**FR-SK-001: Skill Registration**
+- Priority: SHOULD
+- Skills SHALL be registered via a MANIFEST.yml file declaring:
+  name, version, capabilities, inputs, outputs.
+- Acceptance: Skill manifest loaded and capabilities listed.
+
+**FR-SK-002: Skill Communication**
+- Priority: SHOULD
+- Skills SHALL communicate with Terra via MessagePack over stdio.
+- Acceptance: Skill receives MessagePack input, returns output.
 
 ---
 
-## 6. 与竞品的差异
+## 4. Non-Functional Requirements
 
-| 维度 | LangChain/CrewAI | Hermes/OpenClaw | Terra |
-|------|-------------------|-----------------|-------|
-| 定位 | Agent 框架 | 通用 Agent | Agent OS |
-| 起点 | 从零搭建 | 从零养成 | 从"一"开始（Intelligence Core） |
-| 记忆 | 外挂 vector store | 基本记忆 | Rust 式安全的 Memory Database |
-| 验证 | 无 / 自我评判 | 基本 | 外部验证 + Cage Sub-agent |
-| 治理 | 无 | 无 | Constitution + 8 Cage |
-| Token | 不关注 | 不关注 | MessagePack + Command Protocol |
-| 成长 | 不成长 | 无序成长 | 有序成长（Sleep + 用户确认） |
+**NFR-001: Token Efficiency**
+- Priority: MUST
+- Inter-agent communication SHALL use MessagePack (not natural language).
+- Command Protocol SHALL use ~15 tokens per command (not generated code).
+- Rationale: Token waste is resource waste; efficiency is a first-class concern.
+
+**NFR-002: CLI-First**
+- Priority: MUST
+- All functionality SHALL be accessible via CLI.
+- All commands SHALL support `--as-json` for machine-readable output.
+
+**NFR-003: Offline Operation**
+- Priority: MUST
+- The system MUST operate without network connectivity in dry_run mode.
+- Embedding models SHOULD be loadable locally (ONNX Runtime).
+
+**NFR-004: Provider Agnosticism**
+- Priority: MUST
+- The system SHALL work with any OpenAI-compatible LLM endpoint.
+- No vendor-specific features SHALL be required.
+
+**NFR-005: Code Quality**
+- Priority: MUST
+- Code SHALL be elegant and precise, not written merely to complete features.
+- No `.unwrap()` in production code.
+- All public APIs SHALL have documentation comments.
+- Naming SHALL follow Rust conventions (snake_case, CamelCase).
+
+**NFR-006: Auditability**
+- Priority: MUST
+- Every agent action SHALL be logged in the audit trail.
+- Audit logs SHALL be replayable.
+
+**NFR-007: Security**
+- Priority: MUST
+- Credentials SHALL be read from environment variables only.
+- Sandbox SHALL prevent writes outside project root.
+- Constitution and cage rules SHALL be immutable at runtime.
+
+**NFR-008: Performance**
+- Priority: SHOULD
+- Cache hit latency: < 1ms
+- SQLite read: < 5ms
+- MessagePack encode: < 100μs
+- Vector search (1K entries): < 10ms
+- CLI startup: < 500ms (excluding embedding model load)
+
+**NFR-009: Reliability**
+- Priority: MUST
+- All fallible operations SHALL return `Result<T, E>`.
+- Cage violations SHALL be logged and blocked, not panicked.
+- Provider errors SHALL be retried (max 3 attempts).
+- SQLite write failures SHALL not corrupt existing data (ACID).
+
+**NFR-010: Extensibility**
+- Priority: SHOULD
+- New domain capabilities SHALL be addable via Skill packages
+  without modifying core Terra code.
+- New Provider implementations SHALL require only implementing
+  the `ProviderAdapter` trait.
+
+---
+
+## 5. Interface Requirements
+
+### 5.1 User Interface (CLI)
+
+```
+terra                              -- banner + environment scan
+terra doctor [--as-json]           -- environment readiness
+terra run --task "..." [--as-json] -- execute task
+terra memory read <key>            -- read memory entry
+terra memory search <query>        -- semantic search
+terra trace show                   -- display audit trail
+terra config show                  -- show configuration
+terra config set <key> <value>     -- update setting
+terra --help                       -- command listing
+terra --version                    -- version display
+```
+
+### 5.2 Skill Interface (MessagePack over stdio)
+
+```
+Input:  MessagePack-encoded TaskPayload on stdin
+Output: MessagePack-encoded ResultPayload on stdout
+Errors: JSON error object on stderr
+```
+
+### 5.3 Provider Interface (HTTP)
+
+```
+Endpoint: OpenAI-compatible /v1/chat/completions
+Auth:     Bearer token from TERRA_PROVIDER_API_KEY
+Format:   JSON request/response (standard OpenAI format)
+```
+
+---
+
+## 6. System Constraints
+
+| ID | Constraint |
+|----|-----------|
+| SC-01 | Single-user system (no multi-tenancy in MVP) |
+| SC-02 | Single-machine deployment (no distributed agents in MVP) |
+| SC-03 | English and Chinese natural language input |
+| SC-04 | Software engineering domain focus (MVP) |
+
+---
+
+## 7. Acceptance Criteria
+
+### 7.1 MVP1 (Complete)
+
+- [x] End-to-end path: User task → Spec IR → Main Agent → Provider → Worker → Trace
+- [x] CLI: `terra run --task "..." [--as-json]`
+- [x] DryRun Provider functional
+- [x] 16 tests passing
+
+### 7.2 MVP2 (Current Target)
+
+- [ ] Real LLM Provider connected and tested
+- [ ] Memory Database: write, read, search functional
+- [ ] Intelligence Core: basic rules loaded
+- [ ] Sandbox: write protection enforced
+- [ ] Config: global + project + env var precedence
+- [ ] 100+ tests passing
+- [ ] `terra doctor` detects full environment
+
+### 7.3 MVP3 (Future)
+
+- [ ] Full Language Compilation (LLM-assisted)
+- [ ] Cage Sub-agent active monitoring
+- [ ] Sleep Consolidation
+- [ ] Multi-Head Attention retrieval
+- [ ] Streaming LLM support
+- [ ] Skill registration and loading
