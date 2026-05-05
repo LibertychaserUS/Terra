@@ -675,3 +675,86 @@ Long conversations SHALL not crash or degrade.
 | ISSUE-018 | UX | Ctrl+C kills process instead of cancelling current call. |
 | ISSUE-019 | Architecture | Context grows unbounded — no compaction. 100 turns will exceed model limit. |
 | ISSUE-020 | UX | No cost estimation display. |
+
+---
+
+## Patch 4 — Pipeline Unity, ExecutionPlan, Agent Loop, E2E Closure
+
+> Patch ID: TERRA-PRS-002-P4
+> Date: 2026-05-06
+> Scope: Fix architectural seams. Make REPL and Orchestrator share one path.
+> Upgrade SpecIR to ExecutionPlan. Close the end-to-end loop.
+> Rule: This patch only adds. No existing FR is modified.
+
+---
+
+### P4.1 Pipeline Unity: REPL → Orchestrator
+
+The REPL and Orchestrator SHALL share a single execution path.
+Goal Mode MUST go through the full pipeline, not bypass it.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-228 | MUST | In Goal Mode, user input SHALL be routed through Orchestrator, not directly to ProviderCall. |
+| FR-229 | MUST | Orchestrator SHALL accept conversational input (not just one-shot task descriptions). It processes dialogue turns within the context of an active goal. |
+| FR-230 | MUST | Conversation Mode SHALL continue to use direct ProviderCall (lightweight, no pipeline overhead). |
+| FR-231 | MUST | The Orchestrator SHALL emit ReplOutput events that the REPL renders. Single output contract between them. |
+| FR-232 | MUST | There SHALL be exactly ONE path for goal-driven execution: REPL → Orchestrator → [Compile → IC → Cage → Executor] → REPL. No parallel paths. |
+
+### P4.2 ExecutionPlan: SpecIR Evolution
+
+SpecIR evolves into ExecutionPlan — a mutable, versioned plan with steps.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-233 | MUST | ExecutionPlan SHALL contain: SpecIR (the what) + steps (the how) + progress (what's done) + version (how it evolved). |
+| FR-234 | MUST | Steps SHALL be a list of named actions with: description, required CommandOps, status (pending/running/done/failed), dependencies (which steps must complete first). |
+| FR-235 | MUST | ExecutionPlan SHALL be mutable: add_step(), remove_step(), reorder(), update_spec(). Each mutation increments version. |
+| FR-236 | MUST | All plan versions SHALL be retained in audit log. |
+| FR-237 | MUST | `/plan` command SHALL display the current active plan with step status. |
+| FR-238 | MUST | `/plan history` SHALL display plan evolution (version diffs). |
+
+### P4.3 Agent Loop
+
+The Orchestrator SHALL run a proper agent loop — not single-shot.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-239 | MUST | In Goal Mode, the Orchestrator SHALL run an agent loop: assess → plan → act → observe → repeat, until goal is met or user intervenes. |
+| FR-240 | MUST | Each loop iteration SHALL: consult IC rules, check caging, execute one step, record result, evaluate progress. |
+| FR-241 | MUST | User input during the loop SHALL be processed as guidance (mid-loop correction), not queued for later. |
+| FR-242 | MUST | The loop SHALL pause and ask user when: a step fails, drift detected, ambiguity found, or a destructive operation is requested. |
+| FR-243 | MUST | The loop SHALL stop when: all steps complete, user says /done, or budget exhausted. |
+| FR-244 | SHOULD | Between loop iterations, the Orchestrator MAY yield to allow user input (cooperative scheduling). |
+
+### P4.4 Skill Data Flow: Reference-Based
+
+Replace closure-based data flow with reference-based.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-245 | MUST | SkillStep SHALL declare input_ref: Option<String> — a dotted path reference to a previous step's output (e.g., "step_read.content"). |
+| FR-246 | MUST | The Skill executor SHALL resolve references at runtime from accumulated step results. |
+| FR-247 | MUST | SkillPlan SHALL be serializable (JSON/MessagePack). No closures in the plan. |
+| FR-248 | MUST | SkillPlan SHALL be displayable: user can see what steps will be executed before they run. |
+
+### P4.5 End-to-End Closure
+
+The full path from user intent to modified file SHALL be verified.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-249 | MUST | The following path SHALL work end-to-end with real LLM: User says "add logging to auth.rs" → SpecIR compiled → ExecutionPlan generated → Worker runs CodeEditor Skill → file modified → tests run → result reported. |
+| FR-250 | MUST | The Orchestrator SHALL autonomously execute multi-step plans, consulting user only when needed (ambiguity, failure, destructive ops). |
+| FR-251 | MUST | All steps of E2E execution SHALL appear in audit log with timestamps and outcomes. |
+
+### P4.6 Known Issues (from architecture review)
+
+| ID | Category | Description |
+|----|----------|-------------|
+| ISSUE-021 | Architecture | REPL Goal Mode bypasses Orchestrator pipeline — direct ProviderCall. |
+| ISSUE-022 | Architecture | SpecIR is static — no execution steps, no progress, no versioning. |
+| ISSUE-023 | Architecture | terra-agents depends on 9/11 crates — over-engineering, isolation broken. Tech debt, defer. |
+| ISSUE-024 | Architecture | Skill resolve_fn is closure-based — not serializable, not auditable. |
+| ISSUE-025 | Architecture | Orchestrator is single-shot (.run()), not a loop. Cannot handle multi-step autonomous execution. |
+| ISSUE-026 | Testing | No end-to-end test from user input through full pipeline to file modification. |

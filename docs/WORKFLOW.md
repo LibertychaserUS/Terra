@@ -925,40 +925,66 @@ Step 18.4: Tests
 
 ---
 
-### Iteration 19: Dynamic Self-Evolution
+### Iteration 19: Pipeline Unity + ExecutionPlan + Agent Loop (REVISED)
 
-**Goal:** Plans evolve through dialogue. SpecIR is mutable.
-This is the most important architectural change remaining.
+**Goal:** Fix the architectural seam. REPL Goal Mode uses Orchestrator.
+SpecIR evolves into ExecutionPlan. Agent runs a proper loop.
+This is no longer "dynamic planning" as a feature — it's fixing the
+core architecture so everything else can work.
+
+**Why this changed:** Architecture review revealed REPL bypasses pipeline
+in Goal Mode, SpecIR can't evolve, Orchestrator is single-shot.
+These must be fixed before any further feature work.
 
 ```
-Step 19.1: Mutable SpecIR
-  - SpecIR gains: update_target(), add_constraint(), add_question()
-  - Mutation creates new version (old version in audit)
-  - is_complete() re-evaluated after each mutation
+Step 19.1: ExecutionPlan struct (terra-compile)
+  - ExecutionPlan = SpecIR + Vec<PlanStep> + version + status
+  - PlanStep: name, description, required_ops, input_refs, status, depends_on
+  - Mutable: add/remove/reorder steps, update spec. Version increments.
+  - Serializable (JSON/MessagePack — no closures)
+  - Tests: T-EP-001 through T-EP-007
 
-Step 19.2: LLM plan proposal
-  - On /goal, Terra asks LLM to propose execution plan
-  - Plan formatted as structured steps (not free text)
-  - User confirms ("yes"), modifies ("skip step 2"), or rejects ("different approach")
+Step 19.2: Skill reference-based data flow (terra-agents/skill.rs)
+  - Replace resolve_fn closures with input_ref: Option<String>
+  - Executor resolves "step_name.field" at runtime from accumulated results
+  - SkillPlan becomes serializable, displayable, auditable
+  - Tests: T-SR-001 through T-SR-004
 
-Step 19.3: Mid-task correction
-  - User input during Goal Mode checked: is this a correction?
-  - If correction detected → update SpecIR + replan
-  - If conversation → respond normally (Goal Mode is additive)
+Step 19.3: Pipeline unity — REPL → Orchestrator (terra-agents)
+  - Orchestrator gains: run_interactive(input, plan) → Vec<ReplOutput>
+  - Goal Mode in REPL routes through Orchestrator instead of direct ProviderCall
+  - Conversation Mode stays lightweight (direct ProviderCall)
+  - Orchestrator emits ReplOutput events
+  - Tests: T-PU-001 through T-PU-005
 
-Step 19.4: Plan versioning
-  - Each plan change → audit entry with diff
-  - /plan command shows current active plan
-  - /plan history shows evolution
+Step 19.4: Agent loop (terra-agents/orchestrator.rs)
+  - Orchestrator.run_loop(): assess → plan → act → observe → repeat
+  - Each iteration: IC consult → cage check → execute step → record → evaluate
+  - User input mid-loop: guidance/correction processed immediately
+  - Loop pauses on: failure, drift, ambiguity, destructive ops
+  - Loop stops on: all done, /done, budget exhausted
+  - Tests: T-AL-001 through T-AL-007
 
-Step 19.5: Tests
-  - T-DP-001 through T-DP-007
+Step 19.5: Dynamic plan proposal
+  - On /goal, Orchestrator asks LLM to propose ExecutionPlan
+  - User confirms/modifies/rejects in conversation
+  - Mid-task correction → update plan, continue loop
+  - Plan versions in audit
+  - Tests: T-DP-001 through T-DP-007
+
+Step 19.6: End-to-end closure
+  - "add logging to auth.rs" → compile → plan → loop → file modified
+  - Verified with real LLM
+  - Tests: T-FULL-001 through T-FULL-003
 ```
 
 **Quality Gate:**
-- /goal → plan proposed → user modifies → updated plan executes
-- Mid-task "change direction" → plan updates without /done
-- Audit has full plan evolution history
+- /goal → Orchestrator engaged (not direct ProviderCall)
+- ExecutionPlan serializable, displayable, versioned
+- Agent loop runs multi-step plan autonomously
+- User mid-loop correction updates plan without restart
+- Full E2E: user intent → file actually modified → audit trail complete
+- All Skill plans serializable (no closures)
 
 ---
 

@@ -803,3 +803,65 @@ All tests skip gracefully when no API key is configured.
 |----|------|-------------------|
 | T-UI-001 | `logo_renders` | Startup banner contains "Terra" in styled format. |
 | T-UI-002 | `plain_mode_no_ansi` | Piped output contains no ANSI escape sequences. |
+
+---
+
+## Patch 4 — Pipeline Unity, ExecutionPlan, Agent Loop, E2E Closure
+
+> Patch ID: TERRA-TDD-002-P4
+> Date: 2026-05-06
+> Scope: Tests for PRD Patch 4 (FR-228 to FR-251).
+> Rule: This patch only adds. No existing test spec is modified.
+
+---
+
+### P4.1 Pipeline Unity Tests (5 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-PU-001 | `goal_mode_uses_orchestrator` | /goal → user message → routed through Orchestrator, not direct ProviderCall. Audit shows IC + cage steps. |
+| T-PU-002 | `conversation_mode_direct` | Conversation Mode → ProviderCall without Orchestrator. Lightweight path confirmed. |
+| T-PU-003 | `orchestrator_emits_repl_output` | Orchestrator returns data that maps to ReplOutput. Single contract. |
+| T-PU-004 | `one_path_for_goals` | In Goal Mode, ALL user input goes through Orchestrator. No bypass. |
+| T-PU-005 | `goal_mode_ic_rules_in_prompt` | Goal Mode response includes IC rules in system prompt (verified via audit). |
+
+### P4.2 ExecutionPlan Tests (7 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-EP-001 | `plan_has_steps` | ExecutionPlan from goal → has named steps with status pending. |
+| T-EP-002 | `plan_step_dependencies` | Step B depends on Step A → B not started until A done. |
+| T-EP-003 | `plan_mutable` | add_step() → plan.steps.len() increases. remove_step() → decreases. Version incremented. |
+| T-EP-004 | `plan_versions_in_audit` | Mutate plan 3 times → audit has 3 version entries. |
+| T-EP-005 | `plan_command_shows_steps` | /plan → displays step names + statuses. |
+| T-EP-006 | `plan_history_command` | /plan history → shows version diffs. |
+| T-EP-007 | `plan_serializable` | ExecutionPlan survives JSON roundtrip. |
+
+### P4.3 Agent Loop Tests (7 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-AL-001 | `loop_runs_steps` | Agent loop executes steps in order. Each step recorded in audit. |
+| T-AL-002 | `loop_consults_ic` | Each iteration checks IC rules. |
+| T-AL-003 | `loop_checks_caging` | Each step goes through cage check before execution. |
+| T-AL-004 | `loop_pauses_on_failure` | Step fails → loop pauses, asks user. |
+| T-AL-005 | `loop_stops_on_done` | All steps complete → loop exits. |
+| T-AL-006 | `loop_accepts_mid_correction` | User input during loop → plan updated, loop continues with new plan. |
+| T-AL-007 | `loop_stops_on_budget` | Token budget exceeded → loop exits with partial result. |
+
+### P4.4 Skill Reference Tests (4 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-SR-001 | `step_input_ref_resolved` | Step declares input_ref "read.content" → receives read step's output content. |
+| T-SR-002 | `plan_serializable_no_closures` | SkillPlan with input_refs survives JSON roundtrip (no closures). |
+| T-SR-003 | `plan_displayable` | SkillPlan renders as human-readable step list. |
+| T-SR-004 | `invalid_ref_errors` | Step references nonexistent step → clear error. |
+
+### P4.5 End-to-End Closure Tests (3 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-FULL-001 | `user_to_file_modification` | "add logging to auth.rs" → file actually modified via full pipeline. |
+| T-FULL-002 | `autonomous_multi_step` | Plan with 3 steps → all execute without user intervention (when no ambiguity). |
+| T-FULL-003 | `full_audit_trail` | After E2E run, audit has: compile, IC query, cage checks, file ops, provider calls. |
