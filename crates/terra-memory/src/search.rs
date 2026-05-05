@@ -1,37 +1,86 @@
 use std::collections::HashMap;
 
-/// A simple vector search index using TF-IDF cosine similarity.
+/// Trait for swappable embedding/search backends.
 ///
-/// This is the fallback implementation when no ONNX embedding model
-/// is available. It operates on text content extracted from MessagePack
-/// entries. Future: replace with FAISS/usearch + sentence-transformers.
+/// Implementations:
+/// - `TfIdfBackend` (default fallback, no external model)
+/// - Future: `OnnxBackend` (sentence-transformers via ort crate)
+pub trait EmbeddingBackend: Send + Sync {
+    /// Name of this backend (for diagnostics).
+    fn name(&self) -> &str;
+
+    /// Compute similarity score between query and a stored text.
+    /// Returns 0.0 for no match, 1.0 for perfect match.
+    fn similarity(&self, query: &str, text: &str) -> f32;
+
+    /// Whether this backend supports semantic understanding
+    /// (true for neural embeddings, false for TF-IDF).
+    fn is_semantic(&self) -> bool;
+}
+
+/// TF-IDF based backend — fallback when no embedding model available.
+pub struct TfIdfBackend;
+
+impl EmbeddingBackend for TfIdfBackend {
+    fn name(&self) -> &str {
+        "tfidf"
+    }
+
+    fn similarity(&self, query: &str, text: &str) -> f32 {
+        let q = tokenize_and_weight(query);
+        let t = tokenize_and_weight(text);
+        cosine_similarity(&q, &t)
+    }
+
+    fn is_semantic(&self) -> bool {
+        false
+    }
+}
+
+/// Vector search index that dispatches to a swappable EmbeddingBackend.
 ///
-/// Architecture:
-/// - Embedding trait defines the interface (swappable)
-/// - TfIdfIndex is the default implementation
-/// - Multi-head search: multiple queries, merge + deduplicate
+/// Default: TfIdfBackend. Can be replaced with OnnxBackend at runtime.
 pub struct VectorIndex {
     entries: Vec<IndexEntry>,
+    backend: Box<dyn EmbeddingBackend>,
 }
 
 struct IndexEntry {
     key: String,
-    tokens: HashMap<String, f32>, // TF-IDF weights
+    text: String,
+    tokens: HashMap<String, f32>, // cached TF-IDF weights (for TfIdf backend)
 }
 
 impl VectorIndex {
+    /// Create with default TF-IDF backend.
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+            backend: Box::new(TfIdfBackend),
+        }
+    }
+
+    /// Create with a specific backend.
+    pub fn with_backend(backend: Box<dyn EmbeddingBackend>) -> Self {
+        Self {
+            entries: Vec::new(),
+            backend,
+        }
+    }
+
+    /// Get the backend name.
+    pub fn backend_name(&self) -> &str {
+        self.backend.name()
     }
 
     /// Add or update an entry in the index.
     pub fn upsert(&mut self, key: &str, text: &str) {
-        // Remove existing entry if present
         self.entries.retain(|e| e.key != key);
 
         let tokens = tokenize_and_weight(text);
         self.entries.push(IndexEntry {
             key: key.to_string(),
+            text: text.to_string(),
             tokens,
         });
     }
@@ -44,16 +93,28 @@ impl VectorIndex {
     /// Search for entries similar to the query. Returns (key, score) pairs
     /// sorted by descending similarity.
     pub fn search(&self, query: &str, top_k: usize) -> Vec<(String, f32)> {
-        let query_tokens = tokenize_and_weight(query);
-
-        let mut scored: Vec<(String, f32)> = self.entries
-            .iter()
-            .map(|entry| {
-                let score = cosine_similarity(&query_tokens, &entry.tokens);
-                (entry.key.clone(), score)
-            })
-            .filter(|(_, score)| *score > 0.0)
-            .collect();
+        let mut scored: Vec<(String, f32)> = if self.backend.is_semantic() {
+            // Semantic backend: delegate similarity computation
+            self.entries
+                .iter()
+                .map(|entry| {
+                    let score = self.backend.similarity(query, &entry.text);
+                    (entry.key.clone(), score)
+                })
+                .filter(|(_, score)| *score > 0.0)
+                .collect()
+        } else {
+            // TF-IDF fast path: use cached token weights
+            let query_tokens = tokenize_and_weight(query);
+            self.entries
+                .iter()
+                .map(|entry| {
+                    let score = cosine_similarity(&query_tokens, &entry.tokens);
+                    (entry.key.clone(), score)
+                })
+                .filter(|(_, score)| *score > 0.0)
+                .collect()
+        };
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
@@ -83,6 +144,15 @@ impl VectorIndex {
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         sorted.truncate(top_k);
         sorted
+    }
+
+    /// Rebuild the index from a list of (key, text) pairs.
+    /// Used for recovery: reload all content from SQLite, re-index.
+    pub fn rebuild_from(&mut self, entries: &[(String, String)]) {
+        self.entries.clear();
+        for (key, text) in entries {
+            self.upsert(key, text);
+        }
     }
 
     /// Number of entries in the index.
@@ -257,5 +327,47 @@ mod tests {
         for window in results.windows(2) {
             assert!(window[0].1 >= window[1].1, "scores should be descending");
         }
+    }
+
+    // T-FIX-004: embedding backend swappable
+    #[test]
+    fn embedding_backend_swappable() {
+        // Default is TfIdf
+        let idx_tfidf = VectorIndex::new();
+        assert_eq!(idx_tfidf.backend_name(), "tfidf");
+
+        // Custom backend
+        struct MockBackend;
+        impl EmbeddingBackend for MockBackend {
+            fn name(&self) -> &str { "mock_embedding" }
+            fn similarity(&self, _q: &str, _t: &str) -> f32 { 0.99 }
+            fn is_semantic(&self) -> bool { true }
+        }
+
+        let mut idx_custom = VectorIndex::with_backend(Box::new(MockBackend));
+        assert_eq!(idx_custom.backend_name(), "mock_embedding");
+
+        idx_custom.upsert("key1", "any content");
+        let results = idx_custom.search("any query", 1);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].1 - 0.99).abs() < 0.01, "should use mock backend");
+    }
+
+    // T-RS-001: vector index rebuild from stored entries
+    #[test]
+    fn vector_index_rebuild() {
+        let entries = vec![
+            ("auth".to_string(), "authentication login password".to_string()),
+            ("db".to_string(), "database schema migration".to_string()),
+            ("perf".to_string(), "performance optimization query".to_string()),
+        ];
+
+        let mut idx = VectorIndex::new();
+        idx.rebuild_from(&entries);
+
+        assert_eq!(idx.len(), 3);
+
+        let results = idx.search("authentication", 1);
+        assert_eq!(results[0].0, "auth");
     }
 }

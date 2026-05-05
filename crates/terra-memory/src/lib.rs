@@ -24,4 +24,4 @@ pub use db::MemoryDatabase;
 pub use error::MemoryError;
 pub use types::{Level, MemoryEntry, Scope};
 pub use artifact::{ArtifactStore, ArtifactType, ArtifactMeta};
-pub use search::VectorIndex;
+pub use search::{VectorIndex, EmbeddingBackend, TfIdfBackend};
