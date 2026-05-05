@@ -191,6 +191,14 @@ impl Repl {
                     self.prompt(),
                 ]
             }
+            "/clear" => {
+                self.context.clear();
+                vec![
+                    ReplOutput::Text("\x1b[2J\x1b[H".into()), // ANSI clear screen
+                    ReplOutput::Notification("Context cleared.".into()),
+                    self.prompt(),
+                ]
+            }
             "/help" => {
                 vec![
                     ReplOutput::Text("Commands:".into()),
@@ -200,6 +208,7 @@ impl Repl {
                     ReplOutput::Text("  /remember \"x\" — Save to L1 memory".into()),
                     ReplOutput::Text("  /sleep         — Manual sleep consolidation".into()),
                     ReplOutput::Text("  /trace         — View audit trail".into()),
+                    ReplOutput::Text("  /clear         — Clear screen and context".into()),
                     ReplOutput::Text("  /help          — This message".into()),
                     ReplOutput::Text("  /quit          — Exit Terra".into()),
                     self.prompt(),

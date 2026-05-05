@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 terra-agents = { path = "../terra-agents" }
+terra-types = { path = "../terra-types" }
 terra-core = { path = "../terra-core" }
 terra-executor = { path = "../terra-executor" }
 terra-memory = { path = "../terra-memory" }
