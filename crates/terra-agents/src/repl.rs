@@ -38,7 +38,7 @@ pub enum ReplOutput {
 /// The interactive REPL core.
 pub struct Repl {
     executor: Arc<CommandExecutor>,
-    #[allow(dead_code)] // Available for future direct IC queries
+    #[allow(dead_code)]
     core: Arc<IntelligenceCore>,
     orchestrator: Orchestrator,
     pub session: SessionManager,
@@ -46,7 +46,17 @@ pub struct Repl {
     token_tracker: TokenTracker,
     session_record: SessionRecord,
     session_store: Option<SessionStore>,
+    /// Approximate max context tokens (from provider capability).
+    max_context_tokens: u32,
 }
+
+/// Approximate token count from text (chars / 4 is a rough heuristic).
+fn approx_tokens(text: &str) -> u32 {
+    (text.len() / 4) as u32
+}
+
+/// Compaction threshold: 70% of max.
+const COMPACTION_THRESHOLD: f32 = 0.70;
 
 /// A single turn in the conversation.
 #[derive(Debug, Clone)]
@@ -67,7 +77,13 @@ impl Repl {
             token_tracker: TokenTracker::new(),
             session_record: SessionRecord::new(),
             session_store: None,
+            max_context_tokens: 128_000, // default, overridden by provider capability
         }
+    }
+
+    /// Set max context tokens (from provider capability).
+    pub fn set_max_context(&mut self, max_tokens: u32) {
+        self.max_context_tokens = max_tokens;
     }
 
     /// Set the session store for persistence.
@@ -292,6 +308,13 @@ impl Repl {
                     self.prompt(),
                 ]
             }
+            "/compact" => {
+                let (before, after) = self.compact_context().await;
+                vec![
+                    ReplOutput::Notification(format!("Compacted: {} turns → {} turns", before, after)),
+                    self.prompt(),
+                ]
+            }
             "/help" => {
                 vec![
                     ReplOutput::Text("Commands:".into()),
@@ -302,6 +325,7 @@ impl Repl {
                     ReplOutput::Text("  /sleep         — Manual sleep consolidation".into()),
                     ReplOutput::Text("  /trace         — View audit trail".into()),
                     ReplOutput::Text("  /plan          — Show/propose execution plan".into()),
+                    ReplOutput::Text("  /compact       — Compact context (free memory)".into()),
                     ReplOutput::Text("  /clear         — Clear screen and context".into()),
                     ReplOutput::Text("  /help          — This message".into()),
                     ReplOutput::Text("  /quit          — Exit Terra".into()),
@@ -395,7 +419,80 @@ impl Repl {
         // Auto-save session to disk
         self.auto_save();
 
-        vec![ReplOutput::Text(response), self.prompt()]
+        // Check if compaction needed
+        let mut out = vec![ReplOutput::Text(response)];
+        if let Some(compaction_msg) = self.check_compaction().await {
+            out.push(ReplOutput::Notification(compaction_msg));
+        }
+        out.push(self.prompt());
+        out
+    }
+
+    /// Check if context needs compaction. Returns notification if compacted.
+    async fn check_compaction(&mut self) -> Option<String> {
+        let context_size: u32 = self.context.iter()
+            .map(|t| approx_tokens(&t.content))
+            .sum();
+
+        let threshold = (self.max_context_tokens as f32 * COMPACTION_THRESHOLD) as u32;
+
+        if context_size > threshold {
+            let compacted = self.compact_context().await;
+            Some(format!(
+                "Context compacted: {} turns → {} turns ({} → {} approx tokens)",
+                compacted.0, compacted.1, context_size,
+                self.context.iter().map(|t| approx_tokens(&t.content)).sum::<u32>()
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Compact the conversation context.
+    /// Keeps last 5 turns verbatim, summarizes the rest into one turn.
+    /// Externalizes key content to memory (L5).
+    async fn compact_context(&mut self) -> (usize, usize) {
+        let original_count = self.context.len();
+
+        if original_count <= 6 {
+            return (original_count, original_count); // nothing to compact
+        }
+
+        let keep_recent = 5;
+        let old_turns = &self.context[..original_count - keep_recent];
+        let recent_turns = self.context[original_count - keep_recent..].to_vec();
+
+        // Build summary of old turns
+        let summary: String = old_turns.iter()
+            .map(|t| format!("{}: {}", t.role,
+                if t.content.len() > 100 { format!("{}...", &t.content[..97]) } else { t.content.clone() }
+            ))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Externalize summary to memory L5
+        let cmd = Command::new("session", CommandOp::MemWrite {
+            key: format!("compaction:{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+            content: summary.clone(),
+            scope: "task".into(),
+            level: "L5".into(),
+        });
+        self.executor.execute(cmd).await;
+
+        // Replace context: one summary turn + recent turns
+        let mut new_context = vec![ConversationTurn {
+            role: "system".into(),
+            content: format!("[Compacted {} earlier turns. Key topics: {}]",
+                old_turns.len(),
+                &summary[..summary.len().min(200)]
+            ),
+        }];
+        new_context.extend(recent_turns);
+
+        let new_count = new_context.len();
+        self.context = new_context;
+
+        (original_count, new_count)
     }
 
     /// Generate the prompt string based on current mode.
