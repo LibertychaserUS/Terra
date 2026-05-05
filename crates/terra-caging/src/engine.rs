@@ -749,4 +749,52 @@ mod tests {
         };
         assert!(engine.check(&ctx_goal).allowed);
     }
+
+    // T-CG-001: pass_allows_action
+    #[test]
+    fn pass_allows_action() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::FileRead {
+                path: PathBuf::from("/projects/myapp/src/main.rs"),
+            },
+            goal_mode: true,
+        };
+        let result = engine.check(&ctx);
+        assert!(result.allowed);
+        assert!(result.block.is_none());
+    }
+
+    // T-CG-003: block_prevents_action
+    #[test]
+    fn block_prevents_action() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::FileWrite {
+                path: PathBuf::from("/etc/passwd"),
+            },
+            goal_mode: true,
+        };
+        let result = engine.check(&ctx);
+        assert!(!result.allowed);
+        assert!(result.block.is_some());
+    }
+
+    // T-CG-019: meta_cage_rule_change_blocks
+    #[test]
+    fn meta_cage_rule_change_blocks() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::ModifyRule {
+                rule_name: "cage.memory.ownership".into(),
+            },
+            goal_mode: true,
+        };
+        let result = engine.check(&ctx);
+        assert!(!result.allowed);
+        assert_eq!(result.block.as_ref().unwrap().0, "meta");
+    }
 }

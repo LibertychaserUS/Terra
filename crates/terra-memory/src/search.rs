@@ -370,4 +370,76 @@ mod tests {
         let results = idx.search("authentication", 1);
         assert_eq!(results[0].0, "auth");
     }
+
+    // T-RS-002: lazy load — metadata in index, content only on search
+    #[test]
+    fn lazy_load_metadata_only() {
+        let mut idx = VectorIndex::new();
+
+        // Insert 1000 entries
+        for i in 0..1000 {
+            idx.upsert(
+                &format!("key_{}", i),
+                &format!("content about topic {} with some words", i),
+            );
+        }
+        assert_eq!(idx.len(), 1000);
+
+        // Search returns only top-k keys + scores — not all content
+        let results = idx.search("topic", 5);
+        assert!(results.len() <= 5);
+
+        // The index stores text but search only returns (key, score) pairs
+        // Content is not duplicated in the result — caller must do MemRead
+        for (key, score) in &results {
+            assert!(!key.is_empty());
+            assert!(*score > 0.0);
+        }
+    }
+
+    // T-RS-003: embedding model migration — re-index with different backend
+    #[test]
+    fn embedding_model_migration() {
+        // Build index with TfIdf backend
+        let mut idx = VectorIndex::new();
+        idx.upsert("auth", "authentication login password security");
+        idx.upsert("db", "database schema migration index");
+        idx.upsert("perf", "performance optimization caching");
+
+        let original_results = idx.search("authentication security", 2);
+        assert!(!original_results.is_empty());
+
+        // Simulate migration: extract entries, rebuild with new backend
+        let entries: Vec<(String, String)> = vec![
+            ("auth".into(), "authentication login password security".into()),
+            ("db".into(), "database schema migration index".into()),
+            ("perf".into(), "performance optimization caching".into()),
+        ];
+
+        // New index with mock backend (simulating model change)
+        struct NewBackend;
+        impl EmbeddingBackend for NewBackend {
+            fn name(&self) -> &str { "new_model_v2" }
+            fn similarity(&self, q: &str, t: &str) -> f32 {
+                // Simple overlap count as mock "new model"
+                let q_words: std::collections::HashSet<&str> = q.split_whitespace().collect();
+                let t_words: std::collections::HashSet<&str> = t.split_whitespace().collect();
+                let overlap = q_words.intersection(&t_words).count();
+                overlap as f32 / q_words.len().max(1) as f32
+            }
+            fn is_semantic(&self) -> bool { true }
+        }
+
+        let mut new_idx = VectorIndex::with_backend(Box::new(NewBackend));
+        new_idx.rebuild_from(&entries);
+
+        assert_eq!(new_idx.len(), 3);
+        assert_eq!(new_idx.backend_name(), "new_model_v2");
+
+        // Search still works with new backend
+        let migrated_results = new_idx.search("authentication security", 2);
+        assert!(!migrated_results.is_empty());
+        // Top result should still be auth-related
+        assert_eq!(migrated_results[0].0, "auth");
+    }
 }
