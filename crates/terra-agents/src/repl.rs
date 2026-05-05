@@ -353,11 +353,13 @@ impl Repl {
         });
         self.session_record.add_turn("user", input);
 
-        // Route based on mode:
-        // - Goal Mode → Orchestrator (full pipeline: IC + cage + memory + audit)
-        // - Conversation Mode → direct ProviderCall (lightweight)
+        let mut out = Vec::new();
+
+        // Route based on mode
         let (response, prompt_tokens, completion_tokens) = if self.session.mode().is_goal() {
-            // Goal Mode: through Orchestrator
+            // Goal Mode: through Orchestrator (full pipeline)
+            out.push(ReplOutput::Notification("Thinking... (IC + memory + caging)".into()));
+
             let goal = match self.session.mode() {
                 crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
                 _ => String::new(),
@@ -374,6 +376,8 @@ impl Repl {
             }
         } else {
             // Conversation Mode: direct ProviderCall (lightweight)
+            out.push(ReplOutput::Notification("Thinking...".into()));
+
             let history: String = self.context.iter()
                 .map(|t| format!("{}: {}", t.role, t.content))
                 .collect::<Vec<_>>()

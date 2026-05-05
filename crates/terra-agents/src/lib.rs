@@ -20,6 +20,7 @@ pub mod subagent;
 pub mod skill;
 pub mod repl;
 pub mod session_store;
+pub mod status;
 
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
