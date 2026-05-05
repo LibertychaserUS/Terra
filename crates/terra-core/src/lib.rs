@@ -14,8 +14,10 @@ pub mod framework;
 pub mod domain;
 pub mod core;
 pub mod diagnostic;
+pub mod soul;
 
 pub use self::core::IntelligenceCore;
 pub use diagnostic::DiagnosticSignal;
 pub use domain::DomainModule;
+pub use soul::{SoulKind, SoulTemplate, soul_template};
 pub use types::{DiagnosticThreshold, Perspective, Rule, RuleCategory, Severity, TaskType};

@@ -5,9 +5,11 @@ edition.workspace = true
 
 [dependencies]
 terra-core = { path = "../terra-core" }
+terra-types = { path = "../terra-types" }
 terra-protocol = { path = "../terra-protocol" }
 terra-compile = { path = "../terra-compile" }
 terra-executor = { path = "../terra-executor" }
+terra-memory = { path = "../terra-memory" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -19,7 +21,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-terra-memory = { path = "../terra-memory" }
 terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }
 terra-providers = { path = "../terra-providers" }

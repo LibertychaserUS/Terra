@@ -15,9 +15,13 @@ pub mod roles;
 pub mod dispatch;
 pub mod session;
 pub mod drift;
+pub mod profile;
+pub mod subagent;
 
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
 pub use dispatch::{ModelDispatcher, ModelCapability, DispatchParams};
 pub use session::{SessionManager, SessionMode, SessionStatus, SleepSettings};
 pub use drift::{DriftDetector, DriftConfig};
+pub use profile::{AgentProfile, MemoryView};
+pub use subagent::SubAgentRunner;
