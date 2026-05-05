@@ -94,16 +94,20 @@ impl OutputRenderer for TermRenderer {
 
     fn render_banner(&self) {
         println!("{BOLD}{MAGENTA}");
-        println!("  ╔════════════════════════════════════╗");
-        println!("  ║        Terra Agent OS              ║");
-        println!("  ║    Efficiency is Intelligence      ║");
-        println!("  ╚════════════════════════════════════╝{RESET}");
+        println!(r#"  ████████╗███████╗██████╗ ██████╗  █████╗ "#);
+        println!(r#"  ╚══██╔══╝██╔════╝██╔══██╗██╔══██╗██╔══██╗"#);
+        println!(r#"     ██║   █████╗  ██████╔╝██████╔╝███████║"#);
+        println!(r#"     ██║   ██╔══╝  ██╔══██╗██╔══██╗██╔══██║"#);
+        println!(r#"     ██║   ███████╗██║  ██║██║  ██║██║  ██║"#);
+        println!(r#"     ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝"#);
+        println!("{DIM}        Agent OS — Efficiency is Intelligence{RESET}");
         println!();
         println!("  {DIM}Version{RESET}   {}", env!("CARGO_PKG_VERSION"));
         println!("  {DIM}Provider{RESET}  {GREEN}{}{RESET}", self.provider_name);
         println!("  {DIM}Mode{RESET}      Conversation");
         println!();
         println!("  Type {GREEN}/help{RESET} for commands, {GREEN}/quit{RESET} to exit.");
+        println!("  {DIM}Ctrl+C to interrupt, Ctrl+D to exit.{RESET}");
         println!();
     }
 
