@@ -758,3 +758,103 @@ The full path from user intent to modified file SHALL be verified.
 | ISSUE-024 | Architecture | Skill resolve_fn is closure-based — not serializable, not auditable. |
 | ISSUE-025 | Architecture | Orchestrator is single-shot (.run()), not a loop. Cannot handle multi-step autonomous execution. |
 | ISSUE-026 | Testing | No end-to-end test from user input through full pipeline to file modification. |
+
+---
+
+## Patch 5 — Product Experience, Thinking Chain, Permissions, Codebase, Zero-Config
+
+> Patch ID: TERRA-PRS-002-P5
+> Date: 2026-05-06
+> Scope: Product-level experience. From "developer tool" to "product people want to use."
+> Derived from: Jobs/Linus/user/engineer four-perspective audit.
+> Rule: This patch only adds. No existing FR is modified.
+
+---
+
+### P5.1 Zero-Config Startup
+
+Users should type `terra` and start working. No manual init, no two-step.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-252 | MUST | `terra` with no subcommand SHALL enter interactive chat (not show --help). |
+| FR-253 | MUST | If `.terra/` does not exist, first launch SHALL auto-initialize (create constitution.toml, config.toml) without user interaction. |
+| FR-254 | MUST | First-launch banner SHALL explain what Terra can do: "I can read, modify, and test your code. Type a task or /help." |
+| FR-255 | MUST | API key detection SHALL happen silently. If no key, operate in dry_run mode with a one-line notice. |
+
+### P5.2 Permission System + Usage Declaration
+
+Trust requires transparency. Users must know what Terra will do before it does it.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-256 | MUST | First launch SHALL display a usage declaration: what Terra can do (read/write files, execute commands, call LLM API). User must acknowledge. |
+| FR-257 | MUST | Every startup SHALL display the sandbox boundary: "Working in: /path/to/project". |
+| FR-258 | MUST | Destructive operations (FileDelete, ShellExec with side effects) SHALL require user confirmation before execution. |
+| FR-259 | MUST | Confirmation prompt SHALL be inline (not blocking a separate modal). Format: "[Terra] Delete file.txt? (y/N)". |
+| FR-260 | SHOULD | User MAY configure auto-approve for specific operations in config.toml (trust levels). |
+
+### P5.3 Thinking Chain + Operation Visibility
+
+Users must see what Terra is doing. Every operation visible in real-time.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-261 | MUST | When Terra executes a CommandOp, a status line SHALL be displayed: "[Reading auth.rs...]", "[Calling LLM...]", "[Writing auth.rs...]". |
+| FR-262 | MUST | Status lines SHALL be generated programmatically from CommandOp (not by LLM). Zero token cost. |
+| FR-263 | MUST | For ProviderCall, a spinner/dots SHALL be visible while waiting for response. |
+| FR-264 | SHOULD | After FileWrite, a diff summary SHALL be shown: "+5 lines, -2 lines in auth.rs". |
+| FR-265 | SHOULD | Thinking chain (IC consultation, cage checks) MAY be shown in dim/collapsed format. |
+
+### P5.4 Simplified Command Set
+
+12 commands is too many. Core commands should be minimal, rest automatic.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-266 | MUST | Core user commands SHALL be reduced to essentials. Auto-behaviors replace explicit commands where possible. |
+| FR-267 | MUST | Required commands: /goal, /done, /help, /quit. Everything else either automatic or accessible but not required. |
+| FR-268 | SHOULD | /status, /plan, /sessions, /compact, /remember: accessible but not in the main help unless user types /help --all. |
+
+### P5.5 Codebase Awareness
+
+Terra must understand the project it's working in.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-269 | MUST | On startup, Terra SHALL scan the project directory to build a file tree (names + sizes, not contents). |
+| FR-270 | MUST | File tree SHALL be available to LLM as context ("Project structure: src/, tests/, Cargo.toml, ..."). |
+| FR-271 | SHOULD | Terra SHALL detect project type (Rust/Python/JS/etc.) from manifest files and configure IC domain modules accordingly. |
+| FR-272 | SHOULD | When user references a file by partial name ("auth module"), Terra SHALL resolve it against the file tree. |
+
+### P5.6 Git Integration
+
+Coding agents need git.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-273 | SHOULD | Terra SHALL detect if the project is a git repository. |
+| FR-274 | SHOULD | After file modifications, Terra SHALL show `git diff` summary of changes. |
+| FR-275 | SHOULD | `/commit` command SHALL stage modified files and create a commit with LLM-generated message. |
+| FR-276 | MAY | Multi-session git worktree isolation: each session can operate on a separate worktree. |
+
+### P5.7 Distribution + Installation
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-277 | MUST | `cargo install terra-cli` SHALL work from crates.io. Binary named `terra`. |
+| FR-278 | SHOULD | Pre-compiled binaries for macOS (ARM + x86), Linux (x86), Windows via GitHub Releases. |
+| FR-279 | MAY | `npm install -g @terra/cli` or `brew install terra` for broader reach. |
+
+### P5.8 Known Issues (from product audit)
+
+| ID | Category | Description |
+|----|----------|-------------|
+| ISSUE-027 | UX | No thinking chain — user can't see what Terra is doing during execution. |
+| ISSUE-028 | UX | No permission confirmation for destructive operations. |
+| ISSUE-029 | UX | No codebase awareness — doesn't know project structure. |
+| ISSUE-030 | UX | No git integration — can't show diff, can't commit. |
+| ISSUE-031 | UX | 12 commands too many — cognitive overload for new users. |
+| ISSUE-032 | UX | No first-launch guidance — user doesn't know what Terra can do. |
+| ISSUE-033 | Distribution | No packaged installation — requires Rust toolchain. |
+| ISSUE-034 | UX | No usage declaration / permission disclosure at startup. |

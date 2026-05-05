@@ -1109,3 +1109,179 @@ All of the following must be true:
 6. Professional TUI with logo, colors, status bar
 7. All operations audited, caged, persistent
 8. `cargo install terra-cli` works from crates.io
+
+---
+
+## Product Polish — Iteration 23-27
+
+> Appended: 2026-05-06
+> Scope: From "working tool" to "product people want to use."
+> Derived from: Jobs/Linus/user/engineer four-perspective audit.
+
+---
+
+### Iteration 23: Zero-Config + Permissions
+
+**Goal:** `terra` one command starts everything. Transparent permissions.
+
+```
+Step 23.1: Default to chat mode
+  - `terra` with no subcommand → enter interactive chat
+  - Auto-detect and create .terra/ if missing
+  - Silent API key detection (dry_run fallback with one-line notice)
+
+Step 23.2: Usage declaration
+  - First launch: display what Terra can do (read/write/exec/LLM)
+  - User acknowledges (stored in .terra/acknowledged)
+  - Every startup: display sandbox boundary "Working in: /path"
+
+Step 23.3: Operation confirmation
+  - FileDelete, destructive ShellExec → inline confirmation
+  - Format: "[Terra] Delete file.txt? (y/N)"
+  - Configurable auto-approve in config.toml
+
+Step 23.4: Tests
+  - T-ZC-001 through T-ZC-004
+  - T-PM-001 through T-PM-004
+```
+
+---
+
+### Iteration 24: Thinking Chain + Operation Visibility
+
+**Goal:** Users see what Terra is doing in real-time. Zero-token cost.
+
+```
+Step 24.1: CommandOp status events
+  - Executor emits StreamEvent::StepStart before each CommandOp
+  - Status text derived programmatically:
+    FileRead → "[Reading {path}...]"
+    FileWrite → "[Writing {path}...]"
+    ProviderCall → "[Thinking...]"
+    ShellExec → "[Running: {cmd}...]"
+  - Zero LLM token cost
+
+Step 24.2: Renderer displays status
+  - TermRenderer shows status line in dim before response
+  - Spinner/dots during ProviderCall wait
+  - Clear status when complete
+
+Step 24.3: Diff summary after file writes
+  - After FileWrite, compute simple diff (+lines, -lines)
+  - Display: "[Wrote auth.rs: +5, -2 lines]"
+  - Or integrate with git diff if in git repo
+
+Step 24.4: Tests
+  - T-TC-001 through T-TC-004
+```
+
+---
+
+### Iteration 25: Codebase Awareness
+
+**Goal:** Terra understands the project it's working in.
+
+```
+Step 25.1: Project file tree scan
+  - On startup, walk project directory (respect .gitignore)
+  - Build file tree: names, sizes, types
+  - Cache in memory (refresh on /reload)
+
+Step 25.2: File tree in LLM context
+  - Inject condensed file tree into system prompt
+  - "Project: Rust (Cargo.toml), 45 files, key: src/main.rs, src/lib.rs..."
+
+Step 25.3: Project type detection
+  - Cargo.toml → Rust, package.json → JS/TS, pyproject.toml → Python
+  - Auto-register appropriate IC domain modules
+
+Step 25.4: Partial name resolution
+  - "auth module" → resolve to src/auth.rs via file tree
+  - Used by SpecIR compilation Pass 3
+
+Step 25.5: Tests
+  - T-CB-001 through T-CB-003
+```
+
+---
+
+### Iteration 26: Git Integration
+
+**Goal:** Coding agent needs git.
+
+```
+Step 26.1: Git detection
+  - On startup, check if project is git repo
+  - Display branch + status in startup info
+
+Step 26.2: Diff after file writes
+  - After FileWrite, run `git diff {file}` if in git repo
+  - Show summary in output
+
+Step 26.3: /commit command
+  - Stage modified files
+  - LLM generates commit message
+  - User confirms message → git commit
+
+Step 26.4: Worktree isolation (future)
+  - Each session can have own worktree
+  - /worktree create → git worktree add
+  - Avoids multi-session file conflicts
+
+Step 26.5: Tests
+  - T-GIT-001 through T-GIT-003
+```
+
+---
+
+### Iteration 27: Distribution + cargo install
+
+**Goal:** Anyone can install and use Terra.
+
+```
+Step 27.1: cargo install support
+  - Verify terra-cli publishes correctly to crates.io
+  - Binary named "terra" (not "terra-cli")
+  - cargo install terra-cli → terra command available
+
+Step 27.2: GitHub Releases
+  - CI builds for macOS ARM, macOS x86, Linux x86
+  - Pre-compiled binaries attached to releases
+
+Step 27.3: npm/brew wrapper (future)
+  - npm package wraps pre-compiled binary
+  - brew formula for macOS
+
+Step 27.4: Tests
+  - T-DIST-001, T-DIST-002
+```
+
+---
+
+## 17. Product Polish Dependency Graph
+
+```
+Iteration 23 (zero-config + permissions)
+    │
+    ├── Iteration 24 (thinking chain + visibility)
+    │
+    ├── Iteration 25 (codebase awareness)
+    │       │
+    │       └── Iteration 26 (git integration)
+    │
+    └── Iteration 27 (distribution) ← independent
+
+After 27: Terra is a real product.
+```
+
+## 18. Definition of "Terra Is Ready for Users"
+
+All previous definitions PLUS:
+1. `terra` one command → auto-init → interactive dialogue
+2. First launch explains what Terra does + gets acknowledgment
+3. Every operation visible in real-time (thinking chain)
+4. Destructive operations require confirmation
+5. Terra knows the project structure (file tree + type)
+6. Git integration: diff + commit
+7. `cargo install terra-cli` works
+8. Usable by someone who has never seen Terra before

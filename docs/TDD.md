@@ -865,3 +865,64 @@ All tests skip gracefully when no API key is configured.
 | T-FULL-001 | `user_to_file_modification` | "add logging to auth.rs" → file actually modified via full pipeline. |
 | T-FULL-002 | `autonomous_multi_step` | Plan with 3 steps → all execute without user intervention (when no ambiguity). |
 | T-FULL-003 | `full_audit_trail` | After E2E run, audit has: compile, IC query, cage checks, file ops, provider calls. |
+
+---
+
+## Patch 5 — Product Experience Tests
+
+> Patch ID: TERRA-TDD-002-P5
+> Date: 2026-05-06
+> Scope: Tests for PRD Patch 5 (FR-252 to FR-279).
+> Rule: This patch only adds.
+
+---
+
+### P5.1 Zero-Config Tests (4 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-ZC-001 | `no_subcommand_enters_chat` | `terra` with no args → enters interactive mode (not --help). |
+| T-ZC-002 | `auto_init_on_first_launch` | No .terra/ → auto-created with constitution + config. |
+| T-ZC-003 | `first_launch_explains` | First launch banner contains "I can" + "read" + "modify". |
+| T-ZC-004 | `no_key_dry_run_notice` | No API key → "dry_run mode" one-line notice, not error. |
+
+### P5.2 Permission Tests (4 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-PM-001 | `first_launch_declaration` | First run shows usage declaration (file access, shell exec, LLM API). |
+| T-PM-002 | `startup_shows_sandbox` | Every startup displays "Working in: /path". |
+| T-PM-003 | `delete_requires_confirm` | FileDelete → confirmation prompt. Without confirm → not executed. |
+| T-PM-004 | `auto_approve_config` | Config auto_approve=true → no confirmation prompt. |
+
+### P5.3 Thinking Chain Tests (4 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-TC-001 | `file_read_shows_status` | FileRead → "[Reading auth.rs...]" visible before result. |
+| T-TC-002 | `provider_call_shows_spinner` | ProviderCall → spinner/dots visible during wait. |
+| T-TC-003 | `status_from_commandop` | Status text derived from CommandOp programmatically (zero LLM token). |
+| T-TC-004 | `file_write_shows_diff` | FileWrite → "+N lines, -M lines" summary shown. |
+
+### P5.4 Codebase Awareness Tests (3 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-CB-001 | `startup_scans_filetree` | On launch, project file tree available (at least top-level files). |
+| T-CB-002 | `filetree_in_llm_context` | ProviderCall system prompt includes project structure. |
+| T-CB-003 | `project_type_detected` | Cargo.toml present → project type "rust" detected. |
+
+### P5.5 Git Integration Tests (3 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-GIT-001 | `git_repo_detected` | In git repo → "Git: main branch" in startup info. |
+| T-GIT-002 | `diff_after_write` | FileWrite → git diff summary shown. |
+| T-GIT-003 | `commit_command` | /commit → staged + committed with LLM message. |
+
+### P5.6 Distribution Tests (2 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-DIST-001 | `binary_named_terra` | Compiled binary is named "terra" (not "terra-cli"). |
+| T-DIST-002 | `version_flag` | `terra --version` outputs version number. |
