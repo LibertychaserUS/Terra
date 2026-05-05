@@ -5,6 +5,8 @@
 
 pub mod adapter;
 pub mod dispatch;
+pub mod openai;
 
 pub use adapter::{ProviderAdapter, ProviderCapability};
 pub use dispatch::{DispatchResult, DispatchMode, dispatch};
+pub use openai::OpenAICompatibleAdapter;

@@ -91,10 +91,16 @@ impl Orchestrator {
             temperature: Some(0.0),
         };
 
+        let dispatch_mode = if self.provider.capabilities().provider_id == "dry_run" {
+            DispatchMode::DryRun
+        } else {
+            DispatchMode::Live
+        };
+
         let dispatch_result = dispatch::dispatch(
             self.provider.as_ref(),
             request,
-            DispatchMode::DryRun,
+            dispatch_mode,
         )
         .await?;
 
