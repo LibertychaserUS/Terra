@@ -518,3 +518,68 @@ not new features.
 | ISSUE-006 | Feature | Audit log persistence is in-memory only. Persistent SQLite storage exists but not connected. |
 | ISSUE-007 | Feature | Agent inter-communication MessagePack pipeline not fully connected end-to-end. |
 | ISSUE-008 | Feature | Streaming provider response not implemented (capability advertised but not functional). |
+
+---
+
+## Patch 2 — Skill Data Flow, Streaming Interaction, Live E2E
+
+> Patch ID: TERRA-PRS-002-P2
+> Date: 2026-05-06
+> Scope: Three critical capabilities that make Terra usable.
+> Rule: This patch only adds. No existing FR is modified.
+
+---
+
+### P2.1 Skill Execution Data Flow
+
+SkillPlan steps execute sequentially. Each step's output is available
+to subsequent steps. Without this, multi-step Skills like CodeEditor
+cannot pass LLM output to FileWrite.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-179 | MUST | SkillPlan execution SHALL pass each step's CommandResult.data to the next step as `prev_result`. |
+| FR-180 | MUST | A SkillStep MAY declare `uses_prev: true`. When set, the step's CommandOp is constructed at runtime from prev_result, not statically. |
+| FR-181 | MUST | CodeEditor Skill step 3 (FileWrite) SHALL use the LLM response content from step 2 (ProviderCall) as its file content. |
+| FR-182 | MUST | If a step fails, subsequent steps SHALL NOT execute. SkillResult reports which step failed. |
+| FR-183 | SHOULD | SkillPlan MAY define a `rollback` step that executes on failure (e.g., restore original file). |
+
+### P2.2 Streaming Interaction
+
+Terra SHALL support streaming output and interactive conversation.
+This is the core of usability. Without it, Terra is a batch processor.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-184 | MUST | ProviderCall SHALL support streaming mode. Tokens are emitted as they arrive, not buffered to completion. |
+| FR-185 | MUST | Streaming output SHALL be displayable in terminal as tokens arrive. |
+| FR-186 | MUST | User SHALL be able to interrupt a running ProviderCall (Ctrl+C or equivalent). Partial result is preserved in audit. |
+| FR-187 | MUST | In Conversation Mode, Terra SHALL accept user input as a continuous dialogue, not one-shot commands. |
+| FR-188 | MUST | In Goal Mode, user SHALL be able to converse with the agent mid-task to provide guidance, clarification, or corrections. Goal Mode is additive over conversation, not a replacement. |
+| FR-189 | MUST | Progress feedback SHALL be displayed during multi-step operations: which step, what it's doing, elapsed time. |
+| FR-190 | SHOULD | Token count and cost SHALL be displayed in real-time during interaction (footer or status line). |
+| FR-191 | SHOULD | Terra SHALL support an event-based output model: each operation emits structured events that a UI layer can consume (terminal, TUI, or web). |
+
+### P2.3 End-to-End Live Pipeline
+
+The full pipeline SHALL be verified with a real LLM provider,
+not just DryRunAdapter.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-192 | MUST | CodeEditor Skill SHALL be verified end-to-end: read a real file → LLM modifies it → write back → file content changed. |
+| FR-193 | MUST | TestRunner Skill SHALL be verified: run `cargo test` → parse result → report pass/fail. |
+| FR-194 | MUST | OutputContract parsing SHALL be verified against real LLM output (not mock JSON). |
+| FR-195 | MUST | Output Cage SHALL be verified against real LLM responses (no false positives on normal coding output). |
+| FR-196 | MUST | Full pipeline: user task → compile → IC → cage → worker (CodeEditor) → result → audit. Verified with real Provider. |
+
+### P2.4 Known Issues (from V2 comparison review)
+
+| ID | Category | Description |
+|----|----------|-------------|
+| ISSUE-009 | Architecture | SkillPlan steps have no data flow — step 2 output cannot feed step 3 input. |
+| ISSUE-010 | Architecture | No streaming support — all ProviderCall responses are buffered. |
+| ISSUE-011 | Architecture | No interactive dialogue — CLI is one-shot `terra run --task`. |
+| ISSUE-012 | Architecture | Constitution loaded but not used to drive cage behavior (hardcoded). |
+| ISSUE-013 | Architecture | No context window management / compression protection. |
+| ISSUE-014 | Testing | 395 tests all use DryRunAdapter — zero tests against real LLM. |

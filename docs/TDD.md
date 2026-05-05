@@ -692,3 +692,50 @@ ExecutorError { CageBlocked, BackendError, CommandNotRouted }
 | T-FIX-002 | `test_ids_standardized` | All test functions tagged with correct TDD prefix (T-PT-, T-MD-, T-AT-, T-LC-). |
 | T-FIX-003 | `audit_persists_to_disk` | Audit entries survive process restart (SQLite persistence). |
 | T-FIX-004 | `embedding_backend_swappable` | VectorIndex accepts TfIdf or Embedding backend via trait. |
+
+---
+
+## Patch 2 — Skill Data Flow, Streaming, Live E2E
+
+> Patch ID: TERRA-TDD-002-P2
+> Date: 2026-05-06
+> Scope: Tests for PRD Patch 2 (FR-179 to FR-196).
+> Rule: This patch only adds. No existing test spec is modified.
+
+---
+
+### P2.1 Skill Data Flow Tests (6 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-SKL-001 | `step_output_feeds_next` | Step 1 result available as prev_result in Step 2. |
+| T-SKL-002 | `code_editor_llm_to_write` | CodeEditor Step 2 (ProviderCall) content → Step 3 (FileWrite) content. File actually changed. |
+| T-SKL-003 | `step_failure_stops_chain` | Step 2 fails → Step 3 never executes. SkillResult shows step 2 as failure point. |
+| T-SKL-004 | `test_runner_captures_output` | TestRunner runs `echo test` → stdout captured in result. |
+| T-SKL-005 | `memory_inspector_returns_findings` | MemoryInspector searches → results in structured output. |
+| T-SKL-006 | `skill_result_has_all_steps` | SkillResult.steps_completed + steps_total correct for success and failure cases. |
+
+### P2.2 Streaming Interaction Tests (7 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-STR-001 | `streaming_provider_emits_tokens` | ProviderCall in streaming mode → tokens emitted incrementally, not buffered. |
+| T-STR-002 | `streaming_interrupt_preserves_partial` | Ctrl+C mid-stream → partial result in CommandResult + audit entry. |
+| T-STR-003 | `conversation_accepts_multi_turn` | User sends 3 messages → agent responds to each, context accumulates. |
+| T-STR-004 | `goal_mode_allows_conversation` | In Goal Mode, user sends guidance mid-task → agent incorporates it. |
+| T-STR-005 | `progress_events_emitted` | Multi-step Skill execution → progress event per step (step_name, status). |
+| T-STR-006 | `event_stream_structured` | Events have consistent structure: type, timestamp, data. Consumable by UI. |
+| T-STR-007 | `token_count_tracked` | After ProviderCall, cumulative token count updated and accessible. |
+
+### P2.3 Live End-to-End Tests (6 tests)
+
+All tests skip gracefully when no API key is configured.
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-E2E-001 | `code_editor_live` | Real LLM: FileRead → ProviderCall → FileWrite. File content actually modified. |
+| T-E2E-002 | `test_runner_live` | Real shell: `echo pass` executed, stdout captured, TraceEvent recorded. |
+| T-E2E-003 | `output_contract_live` | Real LLM response parsed against file_write contract. No false rejection. |
+| T-E2E-004 | `output_cage_no_false_positive` | Real LLM coding response passes Output Cage (not flagged as bypass/escalation). |
+| T-E2E-005 | `full_pipeline_live` | User task → compile → IC → cage → Worker (CodeEditor) → audit. All stages verified. |
+| T-E2E-006 | `five_pass_compile_live` | Real LLM: Pass 3 resolves entities, Pass 4 finds missing info, Pass 5 flags ambiguity. |
