@@ -89,7 +89,31 @@ impl CommandExecutor {
             &cmd.op, &agent, &self.memory, &self.artifacts,
             &self.search_index, &self.provider,
         ).await;
-        result.command_id = cmd_id;
+        result.command_id = cmd_id.clone();
+
+        // 3.5. Output Cage: inspect ProviderCall responses
+        if matches!(cmd.op, CommandOp::ProviderCall { .. }) {
+            if let Some(ref data) = result.data {
+                if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
+                    match terra_caging::check_output(content) {
+                        terra_caging::OutputCheckResult::Pass => {}
+                        terra_caging::OutputCheckResult::Warn(reason) => {
+                            warn!(agent = %agent, reason = %reason, "output cage warning");
+                        }
+                        terra_caging::OutputCheckResult::Block(reason) => {
+                            warn!(agent = %agent, reason = %reason, "output cage BLOCKED response");
+                            result = CommandResult {
+                                command_id: cmd_id,
+                                status: CommandStatus::PermissionDenied,
+                                data: None,
+                                error: Some(format!("output cage blocked: {}", reason)),
+                                notification: None,
+                            };
+                        }
+                    }
+                }
+            }
+        }
 
         // 4. Audit: record result with duration
         let elapsed = start.elapsed().as_micros() as u64;

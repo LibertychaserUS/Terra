@@ -14,8 +14,10 @@ pub mod cage;
 pub mod sandbox;
 pub mod constitution;
 pub mod engine;
+pub mod output;
 
 pub use cage::{Cage, CageAction, CageCheckResult, CageContext, KnowledgeSource};
 pub use constitution::Constitution;
 pub use sandbox::{SandboxGuard, SandboxViolation};
 pub use engine::{CagingEngine, ConvergenceCage, KnowledgeCage};
+pub use output::{check_output, OutputCheckResult};
