@@ -11,5 +11,7 @@
 //! 5. Ambiguity Detection — flag vague references (LLM-assisted, optional)
 
 pub mod spec_ir;
+pub mod plan;
 
 pub use spec_ir::{SpecIR, Target, TermMapping, TermTable};
+pub use plan::{ExecutionPlan, PlanStep, PlanStatus, StepStatus};
