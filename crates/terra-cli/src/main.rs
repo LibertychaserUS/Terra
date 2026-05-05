@@ -28,6 +28,9 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    /// Initialize Terra in the current directory.
+    Init,
+
     /// Interactive dialogue mode (REPL).
     Chat,
 
@@ -149,6 +152,97 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::Init) => {
+            use std::io::{BufRead, Write};
+
+            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let terra_dir = project_root.join(".terra");
+
+            println!("\x1b[1m\x1b[35m");
+            println!("  Terra Agent OS — Project Setup");
+            println!("\x1b[0m");
+
+            if terra_dir.exists() {
+                println!("  \x1b[33m.terra/ already exists.\x1b[0m Overwrite? (y/N)");
+                print!("  > ");
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer).ok();
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    println!("  Aborted.");
+                    return Ok(());
+                }
+            }
+
+            // Create .terra/
+            std::fs::create_dir_all(&terra_dir)?;
+
+            // Generate constitution.toml
+            let constitution_content = format!(
+                r#"[meta]
+version = 1
+description = "Terra project constitution for {}"
+
+[[protected_paths]]
+path = ".terra/constitution.toml"
+
+[[protected_paths]]
+path = ".terra/audit.db"
+
+[sandbox]
+root = "."
+
+[rules]
+allow_external_writes = false
+require_spec_complete = true
+require_verification = true
+"#,
+                project_root.file_name().and_then(|n| n.to_str()).unwrap_or("project")
+            );
+            std::fs::write(terra_dir.join("constitution.toml"), &constitution_content)?;
+            println!("  \x1b[32m✓\x1b[0m Constitution written");
+
+            // Generate config.toml
+            let config_content = r#"[provider]
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen-plus"
+
+[memory]
+cache_capacity = 1000
+
+[sleep]
+trigger = "session_end"
+interval_hours = 24
+max_candidates = 10
+"#;
+            std::fs::write(terra_dir.join("config.toml"), config_content)?;
+            println!("  \x1b[32m✓\x1b[0m Config written");
+
+            // Check API key
+            let has_key = std::env::var("DASHSCOPE_API_KEY").is_ok()
+                || std::env::var("TERRA_PROVIDER_API_KEY").is_ok();
+            if has_key {
+                println!("  \x1b[32m✓\x1b[0m API key detected");
+            } else {
+                println!("  \x1b[33m!\x1b[0m No API key found (will use dry_run mode)");
+                println!("    Set DASHSCOPE_API_KEY or TERRA_PROVIDER_API_KEY in your environment.");
+            }
+
+            // Summary
+            println!();
+            println!("  \x1b[1mProject initialized:\x1b[0m");
+            println!("    \x1b[2m{}\x1b[0m", terra_dir.display());
+            println!("    ├── constitution.toml  (safety rules)");
+            println!("    ├── config.toml        (provider + sleep)");
+            println!("    └── audit.db           (created on first run)");
+            println!();
+            println!("  Next steps:");
+            println!("    \x1b[32mterra chat\x1b[0m     — Start interactive dialogue");
+            println!("    \x1b[32mterra doctor\x1b[0m   — Check environment");
+            println!("    \x1b[32mterra run\x1b[0m      — Run a one-shot task");
+            println!();
+        }
+
         Some(Commands::Chat) => {
             use std::io::BufRead;
             use terra_agents::repl::{Repl, ReplOutput};
