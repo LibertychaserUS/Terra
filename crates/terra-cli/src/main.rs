@@ -1,11 +1,16 @@
 mod config;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use terra_agents::Orchestrator;
-use terra_providers::adapter::{DryRunAdapter, ProviderAdapter};
-use terra_providers::OpenAICompatibleAdapter;
+use terra_caging::engine::*;
+use terra_caging::sandbox::SandboxGuard;
+use terra_core::domain::{AlgorithmModule, CodingModule};
+use terra_core::IntelligenceCore;
+use terra_executor::CommandExecutor;
+use terra_memory::MemoryDatabase;
 use terra_trace::AuditLog;
 
 use config::{detect_environment, resolve_config, to_toml_string};
@@ -21,20 +26,15 @@ struct Cli {
 enum Commands {
     /// Check environment readiness.
     Doctor {
-        /// Output as JSON.
         #[arg(long, default_value_t = false)]
         as_json: bool,
     },
 
-    /// Run a task end-to-end.
+    /// Run a task end-to-end through the canonical pipeline.
     Run {
         /// The task description in natural language.
         #[arg(short, long)]
         task: String,
-
-        /// Force dry-run mode (no real API calls).
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
 
         /// Output as JSON for machine consumption.
         #[arg(long, default_value_t = false)]
@@ -55,28 +55,45 @@ enum Commands {
 enum ConfigAction {
     /// Show current configuration.
     Show,
-    /// Set a configuration value (dotted key: "provider.model").
+    /// Set a configuration value.
     Set {
-        /// Key in dotted format (e.g., "provider.model").
         key: String,
-        /// Value to set.
         value: String,
     },
 }
 
-fn resolve_provider(force_dry_run: bool) -> Arc<dyn ProviderAdapter> {
-    if force_dry_run {
-        return Arc::new(DryRunAdapter::new());
-    }
+/// Bootstrap the Terra runtime: Memory, Caging, IC, Executor, Orchestrator.
+fn bootstrap() -> Orchestrator {
+    // L2: Memory Database (in-memory for now, project-specific SQLite later)
+    let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
 
-    match OpenAICompatibleAdapter::from_env() {
-        Ok(adapter) => Arc::new(adapter),
-        Err(_) => {
-            eprintln!("No provider API key found. Using dry_run mode.");
-            eprintln!("Set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY for live mode.");
-            Arc::new(DryRunAdapter::new())
-        }
-    }
+    // L2: Audit Trail
+    let audit = Arc::new(AuditLog::new());
+
+    // L4: Caging Engine with all 5 cages + sandbox
+    let sandbox = SandboxGuard::new(
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        vec![], // protected paths configured per project
+    );
+    let caging = Arc::new(CagingEngine::new(vec![
+        Box::new(SpecificationCage),
+        Box::new(MemoryCage),
+        Box::new(ActionCage::new(sandbox)),
+        Box::new(VerificationCage),
+        Box::new(MetaCage),
+    ]));
+
+    // L3+: Command Executor (the single gateway)
+    let executor = Arc::new(CommandExecutor::new(memory, audit, caging));
+
+    // L4: Intelligence Core with domain modules
+    let mut core = IntelligenceCore::new();
+    core.register(Box::new(CodingModule));
+    core.register(Box::new(AlgorithmModule));
+    let core = Arc::new(core);
+
+    // L5: Orchestrator
+    Orchestrator::new(executor, core)
 }
 
 #[tokio::main]
@@ -84,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("terra=info")
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -108,23 +126,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        Some(Commands::Run { task, dry_run, as_json }) => {
-            let provider = resolve_provider(dry_run);
-            let mode_name = provider.capabilities().provider_id.clone();
-            let audit_log = Arc::new(AuditLog::new());
-            let orchestrator = Orchestrator::new(provider, audit_log.clone());
-
-            let result = orchestrator.run(&task).await?;
+        Some(Commands::Run { task, as_json }) => {
+            let orchestrator = bootstrap();
+            let result = orchestrator.run(&task)?;
 
             if as_json {
                 let output = serde_json::json!({
                     "spec_id": result.spec.spec_id,
                     "intent": result.spec.intent,
-                    "dispatch_mode": format!("{:?}", result.dispatch_mode),
-                    "provider": mode_name,
+                    "provider": result.provider_id,
                     "worker_response": result.worker_response,
-                    "prompt_tokens": result.prompt_tokens,
-                    "completion_tokens": result.completion_tokens,
+                    "ic_rules_applied": result.ic_rules_applied,
+                    "cage_checks_passed": result.cage_checks_passed,
                     "audit_entries": result.audit_entry_count,
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
@@ -132,16 +145,15 @@ async fn main() -> anyhow::Result<()> {
                 println!("Terra run complete");
                 println!("  Spec ID:    {}", result.spec.spec_id);
                 println!("  Intent:     {}", result.spec.intent);
-                println!("  Provider:   {}", mode_name);
-                println!("  Mode:       {:?}", result.dispatch_mode);
+                println!("  IC Rules:   {} applied", result.ic_rules_applied);
+                println!("  Pipeline:   canonical (IC → Caging → Executor)");
                 println!("  Response:   {}", result.worker_response);
-                println!("  Tokens:     {} prompt + {} completion", result.prompt_tokens, result.completion_tokens);
                 println!("  Audit:      {} entries", result.audit_entry_count);
             }
         }
 
         Some(Commands::Trace) => {
-            println!("(No persistent trace in MVP — trace is session-only)");
+            println!("(Trace is session-scoped — view via terra trace show)");
         }
 
         Some(Commands::Config { action }) => match action {

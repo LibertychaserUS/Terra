@@ -25,6 +25,16 @@ pub struct Rule {
     pub severity: Severity,
 }
 
+impl Rule {
+    pub fn severity_str(&self) -> &str {
+        match self.severity {
+            Severity::Must => "MUST",
+            Severity::Should => "SHOULD",
+            Severity::May => "MAY",
+        }
+    }
+}
+
 /// A perspective for Multi-Head Attention retrieval.
 ///
 /// Each Domain Module registers perspectives that generate

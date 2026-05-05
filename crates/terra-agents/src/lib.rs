@@ -1,7 +1,8 @@
 //! Terra Multi-Agent Runtime
 //!
-//! Main Agent orchestration, Sub-agent dispatch, and the
-//! end-to-end task execution pipeline.
+//! Orchestrator that follows the canonical pipeline:
+//! User Input → Compilation → SpecIR → IC consultation
+//! → Caging gate → Command Executor → Result
 
 pub mod orchestrator;
 

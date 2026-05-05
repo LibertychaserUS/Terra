@@ -9,7 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 terra-agents = { path = "../terra-agents" }
-terra-providers = { path = "../terra-providers" }
+terra-core = { path = "../terra-core" }
+terra-executor = { path = "../terra-executor" }
+terra-memory = { path = "../terra-memory" }
+terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }
 clap.workspace = true
 tokio.workspace = true
@@ -25,6 +28,4 @@ dirs.workspace = true
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-terra-memory = { path = "../terra-memory" }
-terra-caging = { path = "../terra-caging" }
 terra-protocol = { path = "../terra-protocol" }

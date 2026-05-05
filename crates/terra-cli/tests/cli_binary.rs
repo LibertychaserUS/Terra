@@ -1,7 +1,4 @@
 //! CLI binary tests — T-CLI-001 to T-CLI-008.
-//!
-//! These tests run the `terra` binary as a subprocess and
-//! verify its stdout, stderr, and exit code.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -39,7 +36,7 @@ fn doctor_as_json() {
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("doctor --as-json should output valid JSON");
+        serde_json::from_slice(&output.stdout).expect("should output valid JSON");
     assert!(json.get("os").is_some());
     assert!(json.get("terra_version").is_some());
 }
@@ -48,7 +45,7 @@ fn doctor_as_json() {
 #[test]
 fn run_with_task() {
     terra()
-        .args(["run", "--task", "test task", "--dry-run"])
+        .args(["run", "--task", "test task"])
         .assert()
         .success()
         .stdout(predicate::str::contains("complete"));
@@ -58,12 +55,12 @@ fn run_with_task() {
 #[test]
 fn run_as_json() {
     let output = terra()
-        .args(["run", "--task", "test task", "--dry-run", "--as-json"])
+        .args(["run", "--task", "test task", "--as-json"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("run --as-json should output valid JSON");
+        serde_json::from_slice(&output.stdout).expect("should output valid JSON");
     assert!(json.get("spec_id").is_some());
 }
 
@@ -71,16 +68,14 @@ fn run_as_json() {
 #[test]
 fn run_json_has_required_fields() {
     let output = terra()
-        .args(["run", "--task", "test", "--dry-run", "--as-json"])
+        .args(["run", "--task", "test", "--as-json"])
         .output()
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json.get("spec_id").is_some(), "missing spec_id");
     assert!(json.get("intent").is_some(), "missing intent");
     assert!(json.get("worker_response").is_some(), "missing worker_response");
-    assert!(json.get("dispatch_mode").is_some(), "missing dispatch_mode");
-    assert!(json.get("prompt_tokens").is_some(), "missing prompt_tokens");
-    assert!(json.get("completion_tokens").is_some(), "missing completion_tokens");
+    assert!(json.get("ic_rules_applied").is_some(), "missing ic_rules_applied");
     assert!(json.get("audit_entries").is_some(), "missing audit_entries");
 }
 
