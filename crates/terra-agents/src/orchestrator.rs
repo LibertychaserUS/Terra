@@ -21,19 +21,23 @@ pub struct RunResult {
     pub cage_checks_passed: usize,
 }
 
+/// Result of a single goal-mode turn through the pipeline.
+#[derive(Debug)]
+pub struct GoalTurnResult {
+    pub response: String,
+    pub ic_rules_applied: usize,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
 /// The Orchestrator — follows the canonical pipeline (FR-001).
 ///
-/// Pipeline:
-/// 1. Language Compilation → Spec IR
-/// 2. Intelligence Core consultation → applicable rules
-/// 3. Caging gate → spec completeness check
-/// 4. Memory search → relevant context (via Executor)
-/// 5. Provider dispatch → LLM response (via Executor)
-/// 6. Audit trail → every step recorded (via Executor)
+/// Two modes:
+/// - run(): single-shot task execution (terra run --task)
+/// - run_goal_turn(): interactive turn within Goal Mode (terra chat /goal)
 ///
-/// CRITICAL: The orchestrator NEVER directly calls MemoryDatabase,
-/// ProviderAdapter, or filesystem. ALL operations go through
-/// the CommandExecutor (FR-002).
+/// Both go through: IC → system prompt → Executor → audit.
+/// CRITICAL: ALL operations through CommandExecutor (FR-002).
 pub struct Orchestrator {
     executor: Arc<CommandExecutor>,
     core: Arc<IntelligenceCore>,
@@ -44,7 +48,112 @@ impl Orchestrator {
         Self { executor, core }
     }
 
-    /// Run a task through the complete canonical pipeline.
+    /// Get a reference to the executor (for REPL to share).
+    pub fn executor(&self) -> &Arc<CommandExecutor> {
+        &self.executor
+    }
+
+    /// Get a reference to the IC (for REPL to share).
+    pub fn core(&self) -> &Arc<IntelligenceCore> {
+        &self.core
+    }
+
+    /// Build IC-enriched system prompt for Goal Mode.
+    fn build_goal_prompt(&self, goal: &str) -> String {
+        let rules = self.core.all_rules();
+        let rules_text: String = rules
+            .iter()
+            .map(|r| format!("- [{}] {}: {}", r.severity_str(), r.id, r.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            "You are a precise coding assistant operating under Terra Agent OS.\n\
+             \n\
+             ## Active Rules\n\
+             {}\n\
+             \n\
+             ## Current Goal\n\
+             {}\n\
+             \n\
+             Execute precisely. Report results concisely.",
+            rules_text, goal
+        )
+    }
+
+    /// Run a single conversation turn through the full Goal Mode pipeline.
+    ///
+    /// This is what REPL calls in Goal Mode instead of direct ProviderCall.
+    /// Pipeline: IC rules → system prompt → memory search → ProviderCall → audit.
+    pub async fn run_goal_turn(
+        &self,
+        user_input: &str,
+        goal: &str,
+        context_history: &str,
+    ) -> Result<GoalTurnResult> {
+        let ic_rules_count = self.core.all_rules().len();
+
+        // 1. Record turn start
+        let start_cmd = Command::new("main", CommandOp::TraceEvent {
+            event_type: "goal_turn".into(),
+            data: serde_json::json!({"input_len": user_input.len()}),
+        });
+        self.executor.execute(start_cmd).await;
+
+        // 2. Memory search for context
+        let search_cmd = Command::new("main", CommandOp::MemSearch {
+            query: user_input.to_string(),
+            top_k: 3,
+        });
+        let search_result = self.executor.execute(search_cmd).await;
+        let memory_context = search_result.data
+            .as_ref()
+            .and_then(|d| d.get("results"))
+            .map(|r| format!("{}", r))
+            .unwrap_or_default();
+
+        // 3. Build prompt with IC rules + goal + history + memory
+        let system_prompt = self.build_goal_prompt(goal);
+        let user_prompt = if context_history.is_empty() {
+            format!("{}\n\nMemory context: {}", user_input, memory_context)
+        } else {
+            format!("{}\n\nLatest: {}\n\nMemory context: {}", context_history, user_input, memory_context)
+        };
+
+        // 4. ProviderCall through Executor (cage-checked, audited)
+        let provider_cmd = Command::new("main", CommandOp::ProviderCall {
+            system_prompt,
+            user_prompt,
+            max_tokens: Some(2000),
+            temperature: Some(0.0),
+            output_contract: None,
+        });
+        let result = self.executor.execute(provider_cmd).await;
+
+        let response = result.data.as_ref()
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("(no response)")
+            .to_string();
+
+        let prompt_tokens = result.data.as_ref()
+            .and_then(|d| d.get("prompt_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32;
+        let completion_tokens = result.data.as_ref()
+            .and_then(|d| d.get("completion_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32;
+
+        Ok(GoalTurnResult {
+            response,
+            ic_rules_applied: ic_rules_count,
+            prompt_tokens,
+            completion_tokens,
+        })
+    }
+
+    /// Run a task through the complete canonical pipeline (single-shot).
     pub async fn run(&self, task_description: &str) -> Result<RunResult> {
         // 1. Language Compilation → Spec IR
         let spec = SpecIR::from_task_description(task_description);

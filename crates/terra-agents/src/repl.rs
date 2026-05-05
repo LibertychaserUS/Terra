@@ -16,6 +16,7 @@ use terra_executor::CommandExecutor;
 use terra_types::command::{Command, CommandOp};
 use terra_types::event::{StreamEvent, TokenTracker};
 
+use crate::orchestrator::Orchestrator;
 use crate::session::SessionManager;
 use crate::session_store::{SessionRecord, SessionStore};
 
@@ -37,7 +38,9 @@ pub enum ReplOutput {
 /// The interactive REPL core.
 pub struct Repl {
     executor: Arc<CommandExecutor>,
+    #[allow(dead_code)] // Available for future direct IC queries
     core: Arc<IntelligenceCore>,
+    orchestrator: Orchestrator,
     session: SessionManager,
     context: Vec<ConversationTurn>,
     token_tracker: TokenTracker,
@@ -54,8 +57,10 @@ struct ConversationTurn {
 
 impl Repl {
     pub fn new(executor: Arc<CommandExecutor>, core: Arc<IntelligenceCore>) -> Self {
+        let orchestrator = Orchestrator::new(executor.clone(), core.clone());
         Self {
             session: SessionManager::new(executor.clone()),
+            orchestrator,
             executor,
             core,
             context: Vec::new(),
@@ -301,46 +306,56 @@ impl Repl {
         });
         self.session_record.add_turn("user", input);
 
-        // Build system prompt from IC + mode
-        let mode_context = if self.session.mode().is_goal() {
-            let task_type = terra_core::TaskType::BugFix;
-            self.core.build_system_prompt(&task_type)
+        // Route based on mode:
+        // - Goal Mode → Orchestrator (full pipeline: IC + cage + memory + audit)
+        // - Conversation Mode → direct ProviderCall (lightweight)
+        let (response, prompt_tokens, completion_tokens) = if self.session.mode().is_goal() {
+            // Goal Mode: through Orchestrator
+            let goal = match self.session.mode() {
+                crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
+                _ => String::new(),
+            };
+            let history: String = self.context.iter()
+                .rev().skip(1).take(10).collect::<Vec<_>>().into_iter().rev()
+                .map(|t| format!("{}: {}", t.role, t.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            match self.orchestrator.run_goal_turn(input, &goal, &history).await {
+                Ok(result) => (result.response, result.prompt_tokens, result.completion_tokens),
+                Err(e) => (format!("Error: {}", e), 0, 0),
+            }
         } else {
-            "You are Terra, an AI Agent OS assistant. Be helpful and concise.".into()
+            // Conversation Mode: direct ProviderCall (lightweight)
+            let history: String = self.context.iter()
+                .map(|t| format!("{}: {}", t.role, t.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let cmd = Command::new("main", CommandOp::ProviderCall {
+                system_prompt: "You are Terra, an AI Agent OS assistant. Be helpful and concise.".into(),
+                user_prompt: history,
+                max_tokens: Some(2000),
+                temperature: Some(0.3),
+                output_contract: None,
+            });
+            let result = self.executor.execute(cmd).await;
+
+            let response = result.data.as_ref()
+                .and_then(|d| d.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("(no response)")
+                .to_string();
+            let pt = result.data.as_ref()
+                .and_then(|d| d.get("prompt_tokens"))
+                .and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+            let ct = result.data.as_ref()
+                .and_then(|d| d.get("completion_tokens"))
+                .and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+            (response, pt, ct)
         };
 
-        // Build conversation history for the prompt
-        let history: String = self.context.iter()
-            .map(|t| format!("{}: {}", t.role, t.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let cmd = Command::new("main", CommandOp::ProviderCall {
-            system_prompt: mode_context,
-            user_prompt: history,
-            max_tokens: Some(2000),
-            temperature: Some(0.3),
-            output_contract: None,
-        });
-
-        let result = self.executor.execute(cmd).await;
-
-        let response = result.data
-            .as_ref()
-            .and_then(|d| d.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("(no response)")
-            .to_string();
-
         // Track tokens
-        let prompt_tokens = result.data.as_ref()
-            .and_then(|d| d.get("prompt_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32;
-        let completion_tokens = result.data.as_ref()
-            .and_then(|d| d.get("completion_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32;
         self.token_tracker.record(prompt_tokens, completion_tokens);
 
         // Add assistant turn to context + session record
@@ -357,14 +372,7 @@ impl Repl {
         // Auto-save session to disk
         self.auto_save();
 
-        // Check for notification from auto-record
-        let mut out = Vec::new();
-        if let Some(ref notif) = result.notification {
-            out.push(ReplOutput::Notification(notif.clone()));
-        }
-        out.push(ReplOutput::Text(response));
-        out.push(self.prompt());
-        out
+        vec![ReplOutput::Text(response), self.prompt()]
     }
 
     /// Generate the prompt string based on current mode.
