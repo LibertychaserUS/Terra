@@ -9,6 +9,7 @@ members = [
     "crates/terra-providers",
     "crates/terra-compile",
     "crates/terra-trace",
+    "crates/terra-executor",
     "crates/terra-cli",
 ]
 
