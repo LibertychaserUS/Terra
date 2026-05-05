@@ -18,6 +18,7 @@ pub mod drift;
 pub mod profile;
 pub mod subagent;
 pub mod skill;
+pub mod repl;
 
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
@@ -27,3 +28,4 @@ pub use drift::{DriftDetector, DriftConfig};
 pub use profile::{AgentProfile, MemoryView};
 pub use subagent::SubAgentRunner;
 pub use skill::{SkillRegistry, SkillDef, TrustLevel};
+pub use repl::Repl;

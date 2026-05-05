@@ -27,6 +27,9 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    /// Interactive dialogue mode (REPL).
+    Chat,
+
     /// Check environment readiness.
     Doctor {
         #[arg(long, default_value_t = false)]
@@ -120,6 +123,84 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::Chat) => {
+            use std::io::{BufRead, Write};
+            use terra_agents::repl::{Repl, ReplOutput};
+
+            // Build REPL runtime directly (bootstrap returns Orchestrator, REPL needs lower-level access)
+            let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+            let artifacts_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".terra");
+            let artifacts = Arc::new(ArtifactStore::new(artifacts_root));
+            let audit = Arc::new(AuditLog::new());
+            let sandbox = SandboxGuard::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                vec![],
+            );
+            let caging = Arc::new(CagingEngine::new(vec![
+                Box::new(SpecificationCage),
+                Box::new(MemoryCage),
+                Box::new(ActionCage::new(sandbox)),
+                Box::new(VerificationCage),
+                Box::new(MetaCage),
+            ]));
+            let provider: Arc<dyn ProviderAdapter> = match OpenAICompatibleAdapter::from_env() {
+                Ok(adapter) => Arc::new(adapter),
+                Err(_) => Arc::new(terra_providers::adapter::DryRunAdapter::new()),
+            };
+            let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
+
+            let mut core = IntelligenceCore::new();
+            core.register(Box::new(CodingModule));
+            core.register(Box::new(AlgorithmModule));
+            let core = Arc::new(core);
+
+            let mut repl = Repl::new(executor, core);
+
+            println!("Terra v{} — Interactive Mode", env!("CARGO_PKG_VERSION"));
+            println!("Type /help for commands, /quit to exit.\n");
+
+            let stdin = std::io::stdin();
+            let mut stdout = std::io::stdout();
+
+            // Print initial prompt
+            print!("terra > ");
+            stdout.flush().ok();
+
+            for line in stdin.lock().lines() {
+                let input = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+
+                let outputs = repl.process_input(&input).await;
+
+                if Repl::should_quit(&outputs) {
+                    for o in &outputs {
+                        if let ReplOutput::Text(t) = o {
+                            println!("{}", t);
+                        }
+                    }
+                    break;
+                }
+
+                for output in &outputs {
+                    match output {
+                        ReplOutput::Text(t) => println!("{}", t),
+                        ReplOutput::Notification(n) => println!("[Terra] {}", n),
+                        ReplOutput::Token(t) => {
+                            print!("{}", t);
+                            stdout.flush().ok();
+                        }
+                        ReplOutput::Event(_) => {} // consumed by event-driven UIs
+                        ReplOutput::Prompt(p) => {
+                            print!("{}", p);
+                            stdout.flush().ok();
+                        }
+                    }
+                }
+            }
+        }
+
         Some(Commands::Doctor { as_json }) => {
             let report = detect_environment(None);
             if as_json {
