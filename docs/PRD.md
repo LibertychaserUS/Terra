@@ -583,3 +583,95 @@ not just DryRunAdapter.
 | ISSUE-012 | Architecture | Constitution loaded but not used to drive cage behavior (hardcoded). |
 | ISSUE-013 | Architecture | No context window management / compression protection. |
 | ISSUE-014 | Testing | 395 tests all use DryRunAdapter — zero tests against real LLM. |
+
+---
+
+## Patch 3 — Session Persistence, Dynamic Planning, Interactive Quality, Product Packaging
+
+> Patch ID: TERRA-PRS-002-P3
+> Date: 2026-05-06
+> Scope: Session management, dynamic self-evolution, TUI, compaction, distribution.
+> Rule: This patch only adds. No existing FR is modified.
+
+---
+
+### P3.1 Session Persistence + History
+
+Sessions SHALL be persisted to disk and recoverable across restarts.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-197 | MUST | Each session SHALL be assigned a unique ID and persisted to `.terra/sessions/{id}.json`. |
+| FR-198 | MUST | Session file SHALL contain: all conversation turns (role + content + timestamp), mode history, token consumption, goal (if any). |
+| FR-199 | MUST | `terra chat` SHALL resume the last active session by default. `terra chat --new` starts fresh. |
+| FR-200 | MUST | `/sessions` command SHALL list past sessions with date, turn count, and token summary. |
+| FR-201 | MUST | `terra chat --resume {id}` SHALL restore a specific historical session, including full context. |
+| FR-202 | MUST | Session context SHALL be loaded into LLM prompt on resume (subject to compaction if too long). |
+| FR-203 | SHOULD | Session files SHALL be human-readable (JSON with indentation). |
+
+### P3.2 Dynamic Self-Evolution (Conversational Planning)
+
+Terra SHALL support dynamic, conversation-driven planning.
+Goals and plans evolve through dialogue, not static specification.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-204 | MUST | In Goal Mode, Terra (LLM) SHALL be able to propose a plan (manifest/criteria) based on the goal description and project context. |
+| FR-205 | MUST | User SHALL be able to confirm, modify, or reject the proposed plan within the conversation. No /done + /goal restart needed. |
+| FR-206 | MUST | When user provides mid-task correction ("change direction", "skip this", "try a different approach"), Terra SHALL dynamically update the active SpecIR and execution plan. |
+| FR-207 | MUST | Plan versions SHALL be recorded in audit log. Previous plans recoverable. |
+| FR-208 | MUST | SpecIR SHALL support mutation after initial compilation: add/remove constraints, update target, add open_questions. |
+| FR-209 | SHOULD | Terra MAY proactively suggest plan adjustments when drift is detected or new information is discovered during execution. |
+| FR-210 | SHOULD | Dynamic plan changes SHALL NOT require exiting Goal Mode. The mode is additive — conversation continues while plan evolves. |
+
+### P3.3 Interactive Quality
+
+Basic interaction quality that every CLI product must have.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-211 | MUST | Input history SHALL be available via up/down arrow keys. Persisted across sessions. |
+| FR-212 | MUST | Ctrl+C SHALL cancel the current LLM call (not exit the process). Partial result preserved. |
+| FR-213 | MUST | `/commands` SHALL support tab completion. |
+| FR-214 | MUST | Cost estimation SHALL be displayed: token count + estimated cost per model. |
+| FR-215 | SHOULD | Spinner/progress indicator while waiting for LLM response. |
+
+### P3.4 Context Compaction
+
+Long conversations SHALL not crash or degrade.
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-216 | MUST | When conversation context exceeds 70% of model's max_context_tokens, compaction SHALL be triggered automatically. |
+| FR-217 | MUST | Compaction SHALL: externalize key decisions/facts to Memory (L2/L5), summarize conversation history, reduce token count below 50%. |
+| FR-218 | MUST | Compaction SHALL preserve: current goal, active plan, recent turns (last 5). |
+| FR-219 | MUST | Compaction events SHALL be logged in audit. User notified: "[Terra] Context compacted: N turns summarized." |
+| FR-220 | SHOULD | User MAY trigger compaction manually via `/compact`. |
+
+### P3.5 TUI + Logo + Visual Identity
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-221 | SHOULD | Terra SHALL have an ASCII art logo rendered at startup. |
+| FR-222 | SHOULD | TUI layout SHALL include: input area (bottom), output area (scrollable), status bar (mode + tokens + cost). |
+| FR-223 | SHOULD | Code blocks in LLM responses SHALL be syntax-highlighted. |
+| FR-224 | MAY | Pet status indicator as optional decorative element (decoupled, plug-in). |
+
+### P3.6 Product Packaging
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-225 | SHOULD | `cargo install terra-cli` SHALL work from crates.io. |
+| FR-226 | MAY | Pre-compiled binaries available via GitHub Releases for macOS/Linux/Windows. |
+| FR-227 | MAY | npm/bun wrapper package for `npx terra` convenience. |
+
+### P3.7 Known Issues
+
+| ID | Category | Description |
+|----|----------|-------------|
+| ISSUE-015 | UX | No session persistence — conversation lost on exit. |
+| ISSUE-016 | Architecture | Static pipeline — SpecIR compiled once, never evolves mid-conversation. |
+| ISSUE-017 | UX | No input history (no up arrow). |
+| ISSUE-018 | UX | Ctrl+C kills process instead of cancelling current call. |
+| ISSUE-019 | Architecture | Context grows unbounded — no compaction. 100 turns will exceed model limit. |
+| ISSUE-020 | UX | No cost estimation display. |

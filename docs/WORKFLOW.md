@@ -882,3 +882,204 @@ All of the following must be true:
 8. Main audits result → records to memory → reports to user
 9. All steps in audit log, all cages checked, all binary internally
 10. User sees Markdown-rendered result in terminal
+
+---
+
+## Productization — Iteration 18-22
+
+> Appended: 2026-05-06
+> Scope: Session persistence, dynamic planning, interactive quality,
+> context compaction, TUI. Make Terra a product, not a prototype.
+
+---
+
+### Iteration 18: Session Persistence
+
+**Goal:** Conversations survive process restart. History browsable.
+
+```
+Step 18.1: Session file format
+  - .terra/sessions/{session_id}.json
+  - Contains: turns[], mode_history[], tokens, goal, timestamps
+  - Human-readable JSON
+
+Step 18.2: Auto-save on every turn
+  - After each process_input(), write session to disk
+  - On startup, detect and offer to resume last session
+  - /sessions command lists history
+
+Step 18.3: Session resume
+  - terra chat → resume last session (load turns into context)
+  - terra chat --new → fresh session
+  - terra chat --resume {id} → specific session
+  - Context loaded into LLM prompt on resume
+
+Step 18.4: Tests
+  - T-SS-001 through T-SS-008
+```
+
+**Quality Gate:**
+- Chat → /quit → chat → previous conversation available
+- /sessions shows dated history
+- Session file is valid, readable JSON
+
+---
+
+### Iteration 19: Dynamic Self-Evolution
+
+**Goal:** Plans evolve through dialogue. SpecIR is mutable.
+This is the most important architectural change remaining.
+
+```
+Step 19.1: Mutable SpecIR
+  - SpecIR gains: update_target(), add_constraint(), add_question()
+  - Mutation creates new version (old version in audit)
+  - is_complete() re-evaluated after each mutation
+
+Step 19.2: LLM plan proposal
+  - On /goal, Terra asks LLM to propose execution plan
+  - Plan formatted as structured steps (not free text)
+  - User confirms ("yes"), modifies ("skip step 2"), or rejects ("different approach")
+
+Step 19.3: Mid-task correction
+  - User input during Goal Mode checked: is this a correction?
+  - If correction detected → update SpecIR + replan
+  - If conversation → respond normally (Goal Mode is additive)
+
+Step 19.4: Plan versioning
+  - Each plan change → audit entry with diff
+  - /plan command shows current active plan
+  - /plan history shows evolution
+
+Step 19.5: Tests
+  - T-DP-001 through T-DP-007
+```
+
+**Quality Gate:**
+- /goal → plan proposed → user modifies → updated plan executes
+- Mid-task "change direction" → plan updates without /done
+- Audit has full plan evolution history
+
+---
+
+### Iteration 20: Interactive Quality
+
+**Goal:** Professional CLI interaction: history, completion, interruption.
+
+```
+Step 20.1: Input history (rustyline)
+  - Replace stdin.lines() with rustyline editor
+  - History saved to .terra/history.txt
+  - Up/down arrow, search with Ctrl+R
+
+Step 20.2: Ctrl+C handling
+  - tokio signal handler for SIGINT
+  - During ProviderCall: cancel, return partial result
+  - Between commands: do nothing (just show new prompt)
+  - Never kill the process
+
+Step 20.3: Tab completion
+  - /goal, /done, /status, /remember, /sleep, /sessions, /compact, /plan
+  - rustyline completer
+
+Step 20.4: Cost display
+  - Track token price per model (configurable in config.toml)
+  - Show after each turn: "tokens: 150 | cost: $0.003"
+  - Cumulative in /status
+
+Step 20.5: Tests
+  - T-IQ-001 through T-IQ-005
+```
+
+**Quality Gate:**
+- Up arrow recalls previous input
+- Ctrl+C mid-LLM → partial result, process alive
+- Tab completes /goal from /go
+
+---
+
+### Iteration 21: Context Compaction
+
+**Goal:** Long conversations don't crash. Context managed automatically.
+
+```
+Step 21.1: Token counting
+  - Track cumulative context size (all turns)
+  - Know model max_context_tokens from ProviderCapability
+
+Step 21.2: Auto-compaction at 70%
+  - After each turn, check: context_tokens > 0.7 * max_tokens?
+  - If yes: trigger compaction
+
+Step 21.3: Compaction algorithm
+  - Preserve: current goal, active plan, last 5 turns
+  - Summarize: older turns → single summary turn
+  - Externalize: key decisions → MemWrite L2/L5
+  - Target: reduce to < 50% of max
+
+Step 21.4: Manual /compact
+  - User can force compaction at any time
+
+Step 21.5: Tests
+  - T-CC-001 through T-CC-006
+```
+
+**Quality Gate:**
+- 100-turn conversation doesn't crash
+- After compaction, LLM still knows the goal and recent context
+- Key decisions preserved in memory
+
+---
+
+### Iteration 22: TUI + Logo + Visual Polish
+
+**Goal:** Beautiful, professional CLI experience.
+
+```
+Step 22.1: ASCII art logo
+  - Terra rendered as styled ASCII art at startup
+  - Compact, fits in 80-column terminal
+
+Step 22.2: TUI layout (ratatui)
+  - Input area at bottom
+  - Output area scrollable
+  - Status bar: mode | tokens | cost | turns
+  - Optional: Pet status indicator (decoupled module)
+
+Step 22.3: Syntax highlighting
+  - Code blocks in LLM responses highlighted
+  - Language auto-detected or from ``` tag
+
+Step 22.4: Tests
+  - T-UI-001, T-UI-002
+```
+
+---
+
+## 15. Productization Dependency Graph
+
+```
+Iteration 18 (session persistence)
+    │
+    ├── Iteration 19 (dynamic planning) ← needs session for plan history
+    │
+    ├── Iteration 21 (compaction) ← needs session for context tracking
+    │
+    └── Iteration 20 (interactive quality) ← independent, can parallel
+            │
+            └── Iteration 22 (TUI + logo) ← after interactive basics
+
+After 22: Terra is a product.
+```
+
+## 16. Definition of "Terra Is a Product"
+
+All of the following must be true:
+1. `terra init` → one command to configure
+2. `terra chat` → interactive dialogue with history
+3. User resumes previous session seamlessly
+4. Plans evolve through conversation, not static spec
+5. Long conversations (100+ turns) don't crash
+6. Professional TUI with logo, colors, status bar
+7. All operations audited, caged, persistent
+8. `cargo install terra-cli` works from crates.io

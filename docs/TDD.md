@@ -739,3 +739,67 @@ All tests skip gracefully when no API key is configured.
 | T-E2E-004 | `output_cage_no_false_positive` | Real LLM coding response passes Output Cage (not flagged as bypass/escalation). |
 | T-E2E-005 | `full_pipeline_live` | User task → compile → IC → cage → Worker (CodeEditor) → audit. All stages verified. |
 | T-E2E-006 | `five_pass_compile_live` | Real LLM: Pass 3 resolves entities, Pass 4 finds missing info, Pass 5 flags ambiguity. |
+
+---
+
+## Patch 3 — Session Persistence, Dynamic Planning, Compaction
+
+> Patch ID: TERRA-TDD-002-P3
+> Date: 2026-05-06
+> Scope: Tests for PRD Patch 3 (FR-197 to FR-227).
+> Rule: This patch only adds. No existing test spec is modified.
+
+---
+
+### P3.1 Session Persistence Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-SS-001 | `session_saved_to_disk` | After conversation, .terra/sessions/{id}.json exists. |
+| T-SS-002 | `session_contains_turns` | Session file has user + assistant turns with timestamps. |
+| T-SS-003 | `session_resume_restores_context` | Resume session → LLM receives prior conversation context. |
+| T-SS-004 | `session_list_shows_history` | `/sessions` lists past sessions with dates and turn counts. |
+| T-SS-005 | `session_new_starts_fresh` | `--new` flag → empty context, new session ID. |
+| T-SS-006 | `session_survives_restart` | Chat → quit → chat → previous session available. |
+| T-SS-007 | `session_records_mode_changes` | Goal Mode enter/exit recorded in session file. |
+| T-SS-008 | `session_records_token_usage` | Total prompt/completion tokens in session metadata. |
+
+### P3.2 Dynamic Planning Tests (7 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-DP-001 | `goal_generates_plan` | /goal "optimize perf" → Terra proposes plan with steps. |
+| T-DP-002 | `user_modifies_plan` | User says "skip step 2" → plan updated, step 2 removed. |
+| T-DP-003 | `user_rejects_plan` | User says "no, different approach" → new plan proposed. |
+| T-DP-004 | `mid_task_correction` | During execution, user redirects → active SpecIR updated. |
+| T-DP-005 | `plan_versions_in_audit` | Each plan change → audit entry with old and new plan. |
+| T-DP-006 | `spec_mutable_after_compile` | SpecIR constraints/target updated mid-conversation. |
+| T-DP-007 | `no_restart_needed` | Plan change within Goal Mode — no /done + /goal required. |
+
+### P3.3 Interactive Quality Tests (5 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-IQ-001 | `input_history_persisted` | Up arrow recalls previous input from prior session. |
+| T-IQ-002 | `ctrl_c_cancels_call` | Ctrl+C during ProviderCall → partial result, process alive. |
+| T-IQ-003 | `tab_completes_commands` | Type "/go" + tab → "/goal". |
+| T-IQ-004 | `cost_displayed` | After ProviderCall, cost estimate shown (tokens × rate). |
+| T-IQ-005 | `spinner_during_llm` | While waiting for LLM, spinner/dots visible. |
+
+### P3.4 Context Compaction Tests (6 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-CC-001 | `compaction_triggers_at_threshold` | Context at 70% → automatic compaction fires. |
+| T-CC-002 | `compaction_reduces_tokens` | After compaction, token count < 50% of max. |
+| T-CC-003 | `compaction_preserves_goal` | Active goal/plan survives compaction. |
+| T-CC-004 | `compaction_preserves_recent` | Last 5 turns preserved verbatim after compaction. |
+| T-CC-005 | `compaction_externalizes_to_memory` | Key decisions written to L2/L5 during compaction. |
+| T-CC-006 | `manual_compact_command` | `/compact` → compaction runs, notification shown. |
+
+### P3.5 Visual Tests (2 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-UI-001 | `logo_renders` | Startup banner contains "Terra" in styled format. |
+| T-UI-002 | `plain_mode_no_ansi` | Piped output contains no ANSI escape sequences. |
