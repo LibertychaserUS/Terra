@@ -90,10 +90,11 @@ pub fn render_command(cmd: &Command) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{AgentRole, TaskPayload};
+    use crate::message::{AgentRole, ResultPayload, ResultStatus, TaskPayload};
 
+    // T-P-020: render message contains operation
     #[test]
-    fn render_task_message_to_markdown() {
+    fn render_message_contains_op() {
         let msg = AgentMessage::task_assignment(
             AgentRole::Worker,
             TaskPayload {
@@ -110,8 +111,9 @@ mod tests {
         assert!(md.contains("2000 tokens"));
     }
 
+    // T-P-021: render command contains agent
     #[test]
-    fn render_command_to_markdown() {
+    fn render_command_contains_agent() {
         let cmd = Command::new(
             "main",
             CommandOp::MemWrite {
@@ -122,7 +124,23 @@ mod tests {
             },
         );
         let md = render_command(&cmd);
+        assert!(md.contains("main"));
         assert!(md.contains("mem_write"));
         assert!(md.contains("auth_pattern"));
+    }
+
+    // T-P-022: render result contains status
+    #[test]
+    fn render_message_contains_status() {
+        let msg = AgentMessage::task_result(
+            AgentRole::Worker,
+            ResultPayload {
+                status: ResultStatus::Success,
+                outputs: serde_json::json!({"diff": "+fix"}),
+                error: None,
+            },
+        );
+        let md = render_message(&msg);
+        assert!(md.contains("Success"));
     }
 }

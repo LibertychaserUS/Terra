@@ -106,8 +106,9 @@ impl AgentMessage {
 mod tests {
     use super::*;
 
+    // T-P-001: task assignment with all fields
     #[test]
-    fn create_task_assignment() {
+    fn task_assignment_fields() {
         let msg = AgentMessage::task_assignment(
             AgentRole::Worker,
             TaskPayload {
@@ -121,19 +122,97 @@ mod tests {
         assert_eq!(msg.from, AgentRole::Main);
         assert_eq!(msg.to, AgentRole::Worker);
         assert_eq!(msg.kind, MessageKind::TaskAssignment);
+        assert!(!msg.id.is_empty());
     }
 
+    // T-P-002: result with success status
     #[test]
-    fn create_task_result() {
+    fn task_result_success() {
         let msg = AgentMessage::task_result(
             AgentRole::Worker,
             ResultPayload {
                 status: ResultStatus::Success,
-                outputs: serde_json::json!({"diff": "+    if password.is_empty() { return Err(...) }"}),
+                outputs: serde_json::json!({"diff": "+fix"}),
                 error: None,
             },
         );
         assert_eq!(msg.from, AgentRole::Worker);
         assert_eq!(msg.to, AgentRole::Main);
+        assert_eq!(msg.kind, MessageKind::TaskResult);
+        if let MessagePayload::Result(ref r) = msg.payload {
+            assert_eq!(r.status, ResultStatus::Success);
+            assert!(r.error.is_none());
+        } else {
+            panic!("expected Result payload");
+        }
+    }
+
+    // T-P-003: result with failure and error
+    #[test]
+    fn task_result_failure() {
+        let msg = AgentMessage::task_result(
+            AgentRole::Worker,
+            ResultPayload {
+                status: ResultStatus::Failed,
+                outputs: serde_json::json!(null),
+                error: Some("compilation failed".into()),
+            },
+        );
+        if let MessagePayload::Result(ref r) = msg.payload {
+            assert_eq!(r.status, ResultStatus::Failed);
+            assert_eq!(r.error.as_deref(), Some("compilation failed"));
+        } else {
+            panic!("expected Result payload");
+        }
+    }
+
+    // T-P-004: message ID uniqueness
+    #[test]
+    fn message_id_unique() {
+        let payload = TaskPayload {
+            op: "test".into(),
+            target: serde_json::json!(null),
+            constraints: vec![],
+            expected_outputs: vec![],
+            budget_max_tokens: None,
+        };
+        let msg1 = AgentMessage::task_assignment(AgentRole::Worker, payload.clone());
+        let msg2 = AgentMessage::task_assignment(AgentRole::Worker, payload);
+        assert_ne!(msg1.id, msg2.id);
+    }
+
+    // T-P-005: timestamp is UTC and recent
+    #[test]
+    fn message_timestamp_utc() {
+        let before = Utc::now();
+        let msg = AgentMessage::task_assignment(
+            AgentRole::Worker,
+            TaskPayload {
+                op: "test".into(),
+                target: serde_json::json!(null),
+                constraints: vec![],
+                expected_outputs: vec![],
+                budget_max_tokens: None,
+            },
+        );
+        let after = Utc::now();
+        assert!(msg.timestamp >= before);
+        assert!(msg.timestamp <= after);
+    }
+
+    // T-P-006: all AgentRole variants serialize/deserialize
+    #[test]
+    fn agent_role_serialization() {
+        let roles = vec![
+            AgentRole::Main,
+            AgentRole::Worker,
+            AgentRole::Explorer,
+            AgentRole::Cage,
+        ];
+        for role in roles {
+            let json = serde_json::to_string(&role).unwrap();
+            let decoded: AgentRole = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, role);
+        }
     }
 }

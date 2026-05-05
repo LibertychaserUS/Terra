@@ -102,30 +102,118 @@ impl CommandResult {
 mod tests {
     use super::*;
 
+    // T-P-013: MemWrite command
     #[test]
-    fn create_mem_write_command() {
+    fn command_mem_write() {
         let cmd = Command::new(
             "main",
             CommandOp::MemWrite {
                 key: "auth_pattern".into(),
-                content: "Input boundary check at function entry".into(),
+                content: "Input boundary check".into(),
                 scope: "project".into(),
                 level: "L1".into(),
             },
         );
         assert_eq!(cmd.agent, "main");
+        if let CommandOp::MemWrite { ref key, ref scope, ref level, .. } = cmd.op {
+            assert_eq!(key, "auth_pattern");
+            assert_eq!(scope, "project");
+            assert_eq!(level, "L1");
+        } else {
+            panic!("expected MemWrite");
+        }
     }
 
+    // T-P-014: MemRead command
+    #[test]
+    fn command_mem_read() {
+        let cmd = Command::new("worker", CommandOp::MemRead { key: "config".into() });
+        if let CommandOp::MemRead { ref key } = cmd.op {
+            assert_eq!(key, "config");
+        } else {
+            panic!("expected MemRead");
+        }
+    }
+
+    // T-P-015: MemSearch command
+    #[test]
+    fn command_mem_search() {
+        let cmd = Command::new(
+            "main",
+            CommandOp::MemSearch { query: "auth bug".into(), top_k: 5 },
+        );
+        if let CommandOp::MemSearch { ref query, top_k } = cmd.op {
+            assert_eq!(query, "auth bug");
+            assert_eq!(top_k, 5);
+        } else {
+            panic!("expected MemSearch");
+        }
+    }
+
+    // T-P-016: ArtifactSave command
+    #[test]
+    fn command_artifact_save() {
+        let cmd = Command::new(
+            "main",
+            CommandOp::ArtifactSave {
+                artifact_type: "plan".into(),
+                content: serde_json::json!({"steps": ["step1", "step2"]}),
+            },
+        );
+        if let CommandOp::ArtifactSave { ref artifact_type, ref content } = cmd.op {
+            assert_eq!(artifact_type, "plan");
+            assert!(content.get("steps").is_some());
+        } else {
+            panic!("expected ArtifactSave");
+        }
+    }
+
+    // T-P-017: TraceCheckpoint command
+    #[test]
+    fn command_trace_checkpoint() {
+        let cmd = Command::new(
+            "main",
+            CommandOp::TraceCheckpoint {
+                title: "MVP done".into(),
+                summary: "All tests pass".into(),
+            },
+        );
+        if let CommandOp::TraceCheckpoint { ref title, ref summary } = cmd.op {
+            assert_eq!(title, "MVP done");
+            assert_eq!(summary, "All tests pass");
+        } else {
+            panic!("expected TraceCheckpoint");
+        }
+    }
+
+    // T-P-018: CommandResult::ok
+    #[test]
+    fn command_result_ok() {
+        let result = CommandResult::ok("cmd-1", Some(serde_json::json!({"count": 3})));
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert!(result.data.is_some());
+        assert!(result.error.is_none());
+    }
+
+    // T-P-019: CommandResult::err
+    #[test]
+    fn command_result_error() {
+        let result = CommandResult::err("cmd-2", "not found");
+        assert_eq!(result.status, CommandStatus::Error);
+        assert!(result.data.is_none());
+        assert_eq!(result.error.as_deref(), Some("not found"));
+    }
+
+    // Existing: command roundtrip msgpack
     #[test]
     fn command_roundtrip_msgpack() {
         let cmd = Command::new(
             "worker-1",
             CommandOp::TraceCheckpoint {
                 title: "Bug fix complete".into(),
-                summary: "Fixed empty password validation in auth.py".into(),
+                summary: "Fixed empty password".into(),
             },
         );
-
         let bytes = crate::codec::encode(&cmd).unwrap();
         let decoded: Command = crate::codec::decode(&bytes).unwrap();
         assert_eq!(decoded.agent, "worker-1");

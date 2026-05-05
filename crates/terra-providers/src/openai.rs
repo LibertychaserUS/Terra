@@ -262,6 +262,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
 mod tests {
     use super::*;
 
+    // T-PR-006 (partial): env var names
     #[test]
     fn env_var_names_correct() {
         assert_eq!(ENV_API_KEY, "TERRA_PROVIDER_API_KEY");
@@ -269,27 +270,52 @@ mod tests {
         assert_eq!(ENV_MODEL, "TERRA_PROVIDER_MODEL");
     }
 
+    // T-PR-006: adapter creation
     #[test]
-    fn missing_api_key_error() {
-        // Temporarily unset env vars (this test assumes they're not set in test env)
+    fn openai_adapter_creation() {
+        let adapter = OpenAICompatibleAdapter::from_env();
+        // If env is set, should succeed; if not, should fail with clear error
+        match adapter {
+            Ok(a) => {
+                assert_eq!(a.capability.provider_id, "openai_compatible");
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains(ENV_API_KEY) || msg.contains(ENV_DASHSCOPE_KEY));
+            }
+        }
+    }
+
+    // T-PR-007: adapter capabilities
+    #[test]
+    fn openai_adapter_capabilities() {
+        let adapter = match OpenAICompatibleAdapter::from_env() {
+            Ok(a) => a,
+            Err(_) => return, // skip if no key
+        };
+        let cap = adapter.capabilities();
+        assert_eq!(cap.provider_id, "openai_compatible");
+        assert!(!cap.model_id.is_empty());
+        assert!(cap.max_context_tokens > 0);
+    }
+
+    // T-PR-008: missing key error
+    #[test]
+    fn openai_missing_key_error() {
         let terra_key = env::var(ENV_API_KEY).ok();
         let dash_key = env::var(ENV_DASHSCOPE_KEY).ok();
 
         if terra_key.is_some() || dash_key.is_some() {
-            // Keys are set in environment, can't test missing key
-            return;
+            return; // can't test missing key when keys are set
         }
 
         let result = OpenAICompatibleAdapter::from_env();
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains(ENV_API_KEY) || err.contains(ENV_DASHSCOPE_KEY));
     }
 
-    /// This test requires DASHSCOPE_API_KEY or TERRA_PROVIDER_API_KEY to be set.
-    /// It is skipped in CI environments without credentials.
+    // T-PR-009: live completion (skippable)
     #[tokio::test]
-    async fn live_completion_dashscope() {
+    async fn openai_completion_live() {
         let adapter = match OpenAICompatibleAdapter::from_env() {
             Ok(a) => a,
             Err(_) => {
@@ -306,21 +332,9 @@ mod tests {
         };
 
         let response = adapter.complete(request).await.unwrap();
-
-        assert!(!response.content.is_empty(), "response should not be empty");
-        assert!(response.usage_prompt_tokens > 0, "should have prompt tokens");
-        assert!(
-            response.usage_completion_tokens > 0,
-            "should have completion tokens"
-        );
-        assert!(!response.model.is_empty(), "model field should be set");
-
-        println!("Live test passed:");
-        println!("  Model: {}", response.model);
-        println!("  Response: {}", response.content);
-        println!(
-            "  Tokens: {} prompt + {} completion",
-            response.usage_prompt_tokens, response.usage_completion_tokens
-        );
+        assert!(!response.content.is_empty());
+        assert!(response.usage_prompt_tokens > 0);
+        assert!(response.usage_completion_tokens > 0);
+        assert!(!response.model.is_empty());
     }
 }

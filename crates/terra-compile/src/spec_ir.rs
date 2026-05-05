@@ -71,15 +71,24 @@ impl SpecIR {
 mod tests {
     use super::*;
 
+    // T-C-001: from_description sets intent
     #[test]
-    fn from_simple_description() {
+    fn from_description_sets_intent() {
         let spec = SpecIR::from_task_description("fix the login bug");
         assert_eq!(spec.intent, "fix the login bug");
-        assert!(!spec.is_complete());
     }
 
+    // T-C-002: from_description is incomplete
     #[test]
-    fn manually_built_spec_is_complete() {
+    fn from_description_is_incomplete() {
+        let spec = SpecIR::from_task_description("fix bug");
+        assert!(!spec.is_complete());
+        assert!(!spec.open_questions.is_empty());
+    }
+
+    // T-C-003: manually built spec is complete
+    #[test]
+    fn manual_spec_is_complete() {
         let spec = SpecIR {
             spec_id: "test-001".into(),
             intent: "fix_bug".into(),
@@ -102,11 +111,141 @@ mod tests {
         assert_eq!(spec.constraints.len(), 2);
     }
 
+    // T-C-004: JSON roundtrip
     #[test]
-    fn spec_ir_roundtrip_json() {
+    fn json_roundtrip() {
         let spec = SpecIR::from_task_description("optimize the query");
         let json = serde_json::to_string(&spec).unwrap();
         let decoded: SpecIR = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.intent, "optimize the query");
+        assert_eq!(decoded.spec_id, spec.spec_id);
+    }
+
+    // T-C-005: MessagePack roundtrip
+    #[test]
+    fn msgpack_roundtrip() {
+        let spec = SpecIR::from_task_description("refactor module");
+        let bytes = terra_protocol::codec::encode(&spec).unwrap();
+        let decoded: SpecIR = terra_protocol::codec::decode(&bytes).unwrap();
+        assert_eq!(decoded.intent, "refactor module");
+        assert_eq!(decoded.spec_id, spec.spec_id);
+    }
+
+    // T-C-006: target with file and line
+    #[test]
+    fn target_file_and_line() {
+        let target = Target {
+            file: Some("src/auth.py".into()),
+            line: Some(42),
+            function: None,
+            component: None,
+            scope: "module".into(),
+        };
+        assert_eq!(target.file.as_deref(), Some("src/auth.py"));
+        assert_eq!(target.line, Some(42));
+    }
+
+    // T-C-007: target with component
+    #[test]
+    fn target_component() {
+        let target = Target {
+            file: None,
+            line: None,
+            function: None,
+            component: Some("LoginButton".into()),
+            scope: "ui".into(),
+        };
+        assert_eq!(target.component.as_deref(), Some("LoginButton"));
+    }
+
+    // T-C-008: multiple constraints
+    #[test]
+    fn multiple_constraints() {
+        let spec = SpecIR {
+            spec_id: "t".into(),
+            intent: "t".into(),
+            target: Target { file: None, line: None, function: None, component: None, scope: "t".into() },
+            constraints: vec!["a".into(), "b".into(), "c".into()],
+            success_predicate: vec![],
+            open_questions: vec![],
+            resolved_terms: vec![],
+        };
+        assert_eq!(spec.constraints.len(), 3);
+    }
+
+    // T-C-009: success predicate
+    #[test]
+    fn success_predicate() {
+        let spec = SpecIR {
+            spec_id: "t".into(),
+            intent: "t".into(),
+            target: Target { file: None, line: None, function: None, component: None, scope: "t".into() },
+            constraints: vec![],
+            success_predicate: vec!["test passes".into(), "no regression".into()],
+            open_questions: vec![],
+            resolved_terms: vec![],
+        };
+        assert_eq!(spec.success_predicate.len(), 2);
+    }
+
+    // T-C-010: term mapping
+    #[test]
+    fn term_mapping() {
+        let mapping = TermMapping {
+            user_term: "login bug".into(),
+            normalized: "empty_password".into(),
+        };
+        let json = serde_json::to_string(&mapping).unwrap();
+        let decoded: TermMapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.user_term, "login bug");
+        assert_eq!(decoded.normalized, "empty_password");
+    }
+
+    // T-C-011: empty description
+    #[test]
+    fn empty_description() {
+        let spec = SpecIR::from_task_description("");
+        assert_eq!(spec.intent, "");
+        // Should not panic
+    }
+
+    // T-C-012: unicode description
+    #[test]
+    fn unicode_description() {
+        let spec = SpecIR::from_task_description("修复登录问题 🐛");
+        assert_eq!(spec.intent, "修复登录问题 🐛");
+    }
+
+    // T-C-013: long description
+    #[test]
+    fn long_description() {
+        let long = "x".repeat(10_000);
+        let spec = SpecIR::from_task_description(&long);
+        assert_eq!(spec.intent.len(), 10_000);
+    }
+
+    // T-C-014: spec_id is UUID format
+    #[test]
+    fn spec_id_format() {
+        let spec = SpecIR::from_task_description("test");
+        // UUID v4 format: 8-4-4-4-12 hex chars
+        assert_eq!(spec.spec_id.len(), 36);
+        assert_eq!(spec.spec_id.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    // T-C-015: multiple open questions
+    #[test]
+    fn multiple_open_questions() {
+        let spec = SpecIR {
+            spec_id: "t".into(),
+            intent: "t".into(),
+            target: Target { file: None, line: None, function: None, component: None, scope: "t".into() },
+            constraints: vec![],
+            success_predicate: vec![],
+            open_questions: vec!["q1".into(), "q2".into(), "q3".into()],
+            resolved_terms: vec![],
+        };
+        assert_eq!(spec.open_questions.len(), 3);
+        assert!(!spec.is_complete());
     }
 }
