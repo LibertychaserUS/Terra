@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/terra-types",
     "crates/terra-core",
     "crates/terra-memory",
     "crates/terra-protocol",

@@ -230,14 +230,14 @@ fn terminology_pass(description: &str, table: &TermTable) -> Vec<TermMapping> {
 mod tests {
     use super::*;
 
-    // T-C-001: from_description sets intent
+    // T-LC-001: from_description sets intent
     #[test]
     fn from_description_sets_intent() {
         let spec = SpecIR::from_task_description("fix the login bug");
         assert_eq!(spec.intent, "fix the login bug");
     }
 
-    // T-C-002: from_description is incomplete
+    // T-LC-002: from_description is incomplete
     #[test]
     fn from_description_is_incomplete() {
         let spec = SpecIR::from_task_description("fix bug");
@@ -245,7 +245,7 @@ mod tests {
         assert!(!spec.open_questions.is_empty());
     }
 
-    // T-C-003: manually built spec is complete
+    // T-LC-003: manually built spec is complete
     #[test]
     fn manual_spec_is_complete() {
         let spec = SpecIR {
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(spec.constraints.len(), 2);
     }
 
-    // T-C-004: JSON roundtrip
+    // T-LC-004: JSON roundtrip
     #[test]
     fn json_roundtrip() {
         let spec = SpecIR::from_task_description("optimize the query");
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(decoded.spec_id, spec.spec_id);
     }
 
-    // T-C-005: MessagePack roundtrip
+    // T-LC-005: MessagePack roundtrip
     #[test]
     fn msgpack_roundtrip() {
         let spec = SpecIR::from_task_description("refactor module");
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(decoded.spec_id, spec.spec_id);
     }
 
-    // T-C-006: target with file and line
+    // T-LC-006: target with file and line
     #[test]
     fn target_file_and_line() {
         let target = Target {
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(target.line, Some(42));
     }
 
-    // T-C-007: target with component
+    // T-LC-007: target with component
     #[test]
     fn target_component() {
         let target = Target {
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(target.component.as_deref(), Some("LoginButton"));
     }
 
-    // T-C-008: multiple constraints
+    // T-LC-008: multiple constraints
     #[test]
     fn multiple_constraints() {
         let spec = SpecIR {
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(spec.constraints.len(), 3);
     }
 
-    // T-C-009: success predicate
+    // T-LC-009: success predicate
     #[test]
     fn success_predicate() {
         let spec = SpecIR {
@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(spec.success_predicate.len(), 2);
     }
 
-    // T-C-010: term mapping
+    // T-LC-010: term mapping
     #[test]
     fn term_mapping() {
         let mapping = TermMapping {
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(decoded.normalized, "empty_password");
     }
 
-    // T-C-011: empty description
+    // T-LC-011: empty description
     #[test]
     fn empty_description() {
         let spec = SpecIR::from_task_description("");
@@ -368,14 +368,14 @@ mod tests {
         // Should not panic
     }
 
-    // T-C-012: unicode description
+    // T-LC-012: unicode description
     #[test]
     fn unicode_description() {
         let spec = SpecIR::from_task_description("修复登录问题 🐛");
         assert_eq!(spec.intent, "修复登录问题 🐛");
     }
 
-    // T-C-013: long description
+    // T-LC-013: long description
     #[test]
     fn long_description() {
         let long = "x".repeat(10_000);
@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(spec.intent.len(), 10_000);
     }
 
-    // T-C-014: spec_id is UUID format
+    // T-LC-014: spec_id is UUID format
     #[test]
     fn spec_id_format() {
         let spec = SpecIR::from_task_description("test");
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(spec.spec_id.chars().filter(|c| *c == '-').count(), 4);
     }
 
-    // T-C-015: multiple open questions
+    // T-LC-015: multiple open questions
     #[test]
     fn multiple_open_questions() {
         let spec = SpecIR {

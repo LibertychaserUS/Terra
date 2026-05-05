@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     use crate::message::{AgentRole, ResultPayload, ResultStatus, TaskPayload};
 
-    // T-P-020: render message contains operation
+    // T-PT-020: render message contains operation
     #[test]
     fn render_message_contains_op() {
         let msg = AgentMessage::task_assignment(
@@ -121,7 +121,7 @@ mod tests {
         assert!(md.contains("2000 tokens"));
     }
 
-    // T-P-021: render command contains agent
+    // T-PT-021: render command contains agent
     #[test]
     fn render_command_contains_agent() {
         let cmd = Command::new(
@@ -139,7 +139,7 @@ mod tests {
         assert!(md.contains("auth_pattern"));
     }
 
-    // T-P-022: render result contains status
+    // T-PT-022: render result contains status
     #[test]
     fn render_message_contains_status() {
         let msg = AgentMessage::task_result(

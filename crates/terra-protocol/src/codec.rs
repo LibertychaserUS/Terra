@@ -17,7 +17,7 @@ mod tests {
     use crate::command::{Command, CommandOp};
     use crate::message::*;
 
-    // T-P-007: task assignment roundtrip
+    // T-PT-007: task assignment roundtrip
     #[test]
     fn msgpack_roundtrip_task_assignment() {
         let msg = AgentMessage::task_assignment(
@@ -40,7 +40,7 @@ mod tests {
         assert_eq!(decoded.id, msg.id);
     }
 
-    // T-P-008: result roundtrip
+    // T-PT-008: result roundtrip
     #[test]
     fn msgpack_roundtrip_task_result() {
         let msg = AgentMessage::task_result(
@@ -58,7 +58,7 @@ mod tests {
         assert_eq!(decoded.kind, MessageKind::TaskResult);
     }
 
-    // T-P-009: command roundtrip
+    // T-PT-009: command roundtrip
     #[test]
     fn msgpack_roundtrip_command() {
         let cmd = Command::new("main", CommandOp::MemRead { key: "test".into() });
@@ -67,7 +67,7 @@ mod tests {
         assert_eq!(decoded.agent, "main");
     }
 
-    // T-P-010: msgpack smaller than json
+    // T-PT-010: msgpack smaller than json
     #[test]
     fn msgpack_smaller_than_json() {
         let msg = AgentMessage::task_assignment(
@@ -91,7 +91,7 @@ mod tests {
         );
     }
 
-    // T-P-011: optional fields as None
+    // T-PT-011: optional fields as None
     #[test]
     fn msgpack_optional_none() {
         let msg = AgentMessage::task_assignment(
@@ -115,7 +115,7 @@ mod tests {
         }
     }
 
-    // T-P-012: invalid bytes return Err
+    // T-PT-012: invalid bytes return Err
     #[test]
     fn decode_invalid_bytes() {
         let result = decode::<AgentMessage>(&[0xFF, 0xFE, 0x00, 0x01]);

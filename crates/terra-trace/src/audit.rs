@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use terra_protocol::command::{Command, CommandResult};
+use terra_types::command::{Command, CommandResult};
 
 /// A single entry in the audit log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +96,7 @@ impl AuditLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terra_protocol::command::{CommandOp, CommandResult};
+    use terra_types::command::{CommandOp, CommandResult};
 
     #[test]
     fn record_and_retrieve() {
@@ -147,7 +147,7 @@ mod tests {
         assert!(md.contains("MVP1 complete"));
     }
 
-    // T-TR-006: empty log renders valid markdown
+    // T-AT-006: empty log renders valid markdown
     #[test]
     fn empty_log_renders() {
         let log = AuditLog::new();
@@ -155,7 +155,7 @@ mod tests {
         assert!(md.contains("Terra Audit Log"));
     }
 
-    // T-TR-007: result for unknown seq doesn't panic
+    // T-AT-007: result for unknown seq doesn't panic
     #[test]
     fn unknown_seq_ignored() {
         let log = AuditLog::new();
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(log.len(), 0);
     }
 
-    // T-TR-008: concurrent writes from 10 threads
+    // T-AT-008: concurrent writes from 10 threads
     #[test]
     fn concurrent_recording_safe() {
         use std::sync::Arc;
@@ -203,7 +203,7 @@ mod tests {
         }
     }
 
-    // T-TR-009: large log performance
+    // T-AT-009: large log performance
     #[test]
     fn large_log_performance() {
         let log = AuditLog::new();

@@ -272,7 +272,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
 mod tests {
     use super::*;
 
-    // T-PR-006 (partial): env var names
+    // T-PV-006 (partial): env var names
     #[test]
     fn env_var_names_correct() {
         assert_eq!(ENV_API_KEY, "TERRA_PROVIDER_API_KEY");
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(ENV_MODEL, "TERRA_PROVIDER_MODEL");
     }
 
-    // T-PR-006: adapter creation
+    // T-PV-006: adapter creation
     #[test]
     fn openai_adapter_creation() {
         let adapter = OpenAICompatibleAdapter::from_env();
@@ -296,7 +296,7 @@ mod tests {
         }
     }
 
-    // T-PR-007: adapter capabilities
+    // T-PV-007: adapter capabilities
     #[test]
     fn openai_adapter_capabilities() {
         let adapter = match OpenAICompatibleAdapter::from_env() {
@@ -309,7 +309,7 @@ mod tests {
         assert!(cap.max_context_tokens > 0);
     }
 
-    // T-PR-008: missing key error
+    // T-PV-008: missing key error
     #[test]
     fn openai_missing_key_error() {
         let terra_key = env::var(ENV_API_KEY).ok();
@@ -323,7 +323,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // T-PR-009: live completion (skippable)
+    // T-PV-009: live completion (skippable)
     #[tokio::test]
     async fn openai_completion_live() {
         let adapter = match OpenAICompatibleAdapter::from_env() {
