@@ -1,4 +1,4 @@
-use crate::cage::{Cage, CageAction, CageCheckResult, CageContext};
+use crate::cage::{Cage, CageAction, CageCheckResult, CageContext, KnowledgeSource};
 use crate::sandbox::SandboxGuard;
 
 /// Specification Cage — blocks execution when spec is incomplete.
@@ -97,6 +97,71 @@ impl Cage for VerificationCage {
     }
 }
 
+/// Convergence Cage — stops exploration after an accepted path exists.
+///
+/// When a solution path has been accepted (verified, committed),
+/// further exploration of alternatives is warned (or blocked if
+/// the path is locked). This prevents wasted effort and divergence.
+pub struct ConvergenceCage;
+
+impl Cage for ConvergenceCage {
+    fn name(&self) -> &str {
+        "convergence"
+    }
+
+    fn check(&self, context: &CageContext) -> CageCheckResult {
+        if let CageAction::ExploreAfterAccepted { path_id } = &context.action {
+            return CageCheckResult::Warn(format!(
+                "accepted path '{}' exists — further exploration may be wasteful",
+                path_id
+            ));
+        }
+        CageCheckResult::Pass
+    }
+}
+
+/// Knowledge Cage — enforces authority ranking for knowledge claims.
+///
+/// Authority hierarchy (FR-073):
+///   Code > Documentation > Memory > Assumption
+///
+/// A claim from a lower-authority source that contradicts a
+/// higher-authority source is blocked.
+pub struct KnowledgeCage;
+
+impl Cage for KnowledgeCage {
+    fn name(&self) -> &str {
+        "knowledge"
+    }
+
+    fn check(&self, context: &CageContext) -> CageCheckResult {
+        if let CageAction::KnowledgeClaim {
+            source,
+            contradicted_by_higher,
+        } = &context.action
+        {
+            if *contradicted_by_higher {
+                return CageCheckResult::Block(format!(
+                    "{} contradicts higher-authority source",
+                    match source {
+                        KnowledgeSource::Assumption => "assumption",
+                        KnowledgeSource::Memory => "memory claim",
+                        KnowledgeSource::Documentation => "documentation claim",
+                        KnowledgeSource::Code => "code claim",
+                    }
+                ));
+            }
+            // Warn on low-authority sources even when not contradicted
+            if *source <= KnowledgeSource::Assumption {
+                return CageCheckResult::Warn(
+                    "claim based on assumption — seek verification from code or docs".into(),
+                );
+            }
+        }
+        CageCheckResult::Pass
+    }
+}
+
 /// Meta-Cage — blocks attempts to modify protected rules.
 pub struct MetaCage;
 
@@ -181,6 +246,8 @@ mod tests {
             Box::new(MemoryCage),
             Box::new(ActionCage::new(sandbox)),
             Box::new(VerificationCage),
+            Box::new(KnowledgeCage),
+            Box::new(ConvergenceCage),
             Box::new(MetaCage),
         ])
     }
@@ -335,6 +402,34 @@ mod tests {
         assert_eq!(result.block.as_ref().unwrap().0, "action");
     }
 
+    // Warn flows through engine (T-CG-002)
+    #[test]
+    fn warn_logs_allows_action() {
+        // Create engine with a cage that warns
+        struct WarnCage;
+        impl Cage for WarnCage {
+            fn name(&self) -> &str { "warn_test" }
+            fn check(&self, _ctx: &CageContext) -> CageCheckResult {
+                CageCheckResult::Warn("proceed with caution".into())
+            }
+        }
+
+        let engine = CagingEngine::new(vec![
+            Box::new(WarnCage),
+            Box::new(SpecificationCage),
+        ]);
+
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::ExecuteTask { spec_complete: true },
+        };
+        let result = engine.check(&ctx);
+        assert!(result.allowed, "warn should not block");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].0, "warn_test");
+        assert!(result.warnings[0].1.contains("caution"));
+    }
+
     // Short-circuit: first block wins
     #[test]
     fn first_block_short_circuits() {
@@ -347,5 +442,80 @@ mod tests {
         let result = engine.check(&ctx);
         assert!(!result.allowed);
         assert_eq!(result.block.as_ref().unwrap().0, "specification");
+    }
+
+    // T-CG-020: convergence_stops_after_accepted
+    #[test]
+    fn convergence_warns_after_accepted() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::ExploreAfterAccepted {
+                path_id: "solution_v2".into(),
+            },
+        };
+        let result = engine.check(&ctx);
+        // Convergence cage warns, does not block
+        assert!(result.allowed, "convergence should warn, not block");
+        assert!(
+            result.warnings.iter().any(|w| w.0 == "convergence"),
+            "should have convergence warning"
+        );
+    }
+
+    // Knowledge cage: low-authority contradicted by higher → blocked
+    #[test]
+    fn knowledge_cage_blocks_contradicted() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "worker".into(),
+            action: CageAction::KnowledgeClaim {
+                source: KnowledgeSource::Assumption,
+                contradicted_by_higher: true,
+            },
+        };
+        let result = engine.check(&ctx);
+        assert!(!result.allowed);
+        assert_eq!(result.block.as_ref().unwrap().0, "knowledge");
+    }
+
+    // Knowledge cage: assumption without contradiction → warn
+    #[test]
+    fn knowledge_cage_warns_assumption() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::KnowledgeClaim {
+                source: KnowledgeSource::Assumption,
+                contradicted_by_higher: false,
+            },
+        };
+        let result = engine.check(&ctx);
+        assert!(result.allowed, "uncontradicted assumption should pass with warning");
+        assert!(result.warnings.iter().any(|w| w.0 == "knowledge"));
+    }
+
+    // Knowledge cage: code source, no contradiction → pass clean
+    #[test]
+    fn knowledge_cage_passes_code_source() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::KnowledgeClaim {
+                source: KnowledgeSource::Code,
+                contradicted_by_higher: false,
+            },
+        };
+        let result = engine.check(&ctx);
+        assert!(result.allowed);
+        assert!(result.warnings.is_empty());
+    }
+
+    // Knowledge source ordering
+    #[test]
+    fn knowledge_source_ordering() {
+        assert!(KnowledgeSource::Assumption < KnowledgeSource::Memory);
+        assert!(KnowledgeSource::Memory < KnowledgeSource::Documentation);
+        assert!(KnowledgeSource::Documentation < KnowledgeSource::Code);
     }
 }

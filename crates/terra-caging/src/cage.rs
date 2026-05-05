@@ -58,6 +58,29 @@ pub enum CageAction {
     ClaimComplete { verified: bool },
     /// Agent attempts to modify a protected rule.
     ModifyRule { rule_name: String },
+    /// Agent wants to continue exploring after path was accepted.
+    ExploreAfterAccepted { path_id: String },
+    /// Agent makes a knowledge claim. Authority ranking determines trust.
+    KnowledgeClaim {
+        /// The source of this knowledge
+        source: KnowledgeSource,
+        /// Whether a higher-authority source contradicts this claim
+        contradicted_by_higher: bool,
+    },
+}
+
+/// Authority ranking for knowledge claims (FR-073).
+/// Higher rank = higher authority. Lower never overrides higher.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KnowledgeSource {
+    /// Rank 0 (lowest): Agent assumption / inference
+    Assumption,
+    /// Rank 1: From memory database (L1-L6)
+    Memory,
+    /// Rank 2: From project documentation
+    Documentation,
+    /// Rank 3 (highest): From current source code
+    Code,
 }
 
 #[cfg(test)]

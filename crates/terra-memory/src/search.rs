@@ -1,8 +1,5 @@
 use std::collections::HashMap;
 
-use crate::error::MemoryError;
-use crate::types::MemoryEntry;
-
 /// A simple vector search index using TF-IDF cosine similarity.
 ///
 /// This is the fallback implementation when no ONNX embedding model

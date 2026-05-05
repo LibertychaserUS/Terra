@@ -8,6 +8,9 @@ pub enum SandboxViolation {
 
     #[error("write to protected path: {0}")]
     ProtectedPath(PathBuf),
+
+    #[error("symlink escape: {link} resolves to {target} outside sandbox")]
+    SymlinkEscape { link: PathBuf, target: PathBuf },
 }
 
 /// File system permission enforcer.
@@ -15,6 +18,7 @@ pub enum SandboxViolation {
 /// Rules:
 /// - Writes/deletes MUST be within the sandbox root (project directory).
 /// - Writes to protected paths (e.g., .terra/constitution) are blocked.
+/// - Symlinks that resolve outside the sandbox are blocked for writes.
 /// - Reads are allowed anywhere (read-only access outside sandbox).
 pub struct SandboxGuard {
     root: PathBuf,
@@ -45,16 +49,41 @@ impl SandboxGuard {
         Ok(())
     }
 
+    /// Check a path for symlink escape: if it's a symlink,
+    /// resolve it and verify the target is within sandbox.
+    pub fn check_symlink(&self, path: &Path) -> Result<(), SandboxViolation> {
+        // Try to read symlink target. If not a symlink, this returns Err,
+        // which means no escape — that's fine.
+        if let Ok(target) = std::fs::read_link(path) {
+            // Resolve relative symlink targets relative to the symlink's parent
+            let resolved = if target.is_relative() {
+                path.parent()
+                    .unwrap_or(Path::new("."))
+                    .join(&target)
+            } else {
+                target.clone()
+            };
+
+            if !resolved.starts_with(&self.root) {
+                return Err(SandboxViolation::SymlinkEscape {
+                    link: path.to_path_buf(),
+                    target: resolved,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Internal: check if a mutation (write/delete) is allowed.
     fn check_mutation(&self, path: &Path) -> Result<(), SandboxViolation> {
-        // Normalize the path for comparison.
-        // In production we'd canonicalize, but for testing
-        // we use starts_with on the provided path.
         let normalized = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.root.join(path)
         };
+
+        // Check symlink escape before other checks
+        self.check_symlink(&normalized)?;
 
         // Must be within sandbox root
         if !normalized.starts_with(&self.root) {
@@ -141,5 +170,45 @@ mod tests {
         let guard = test_guard();
         let result = guard.check_write(Path::new("/projects/myapp/.terra/cage_rules/meta.toml"));
         assert!(matches!(result, Err(SandboxViolation::ProtectedPath(_))));
+    }
+
+    // T-CG-015: symlink escape detection
+    #[test]
+    fn sandbox_symlink_escape_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        // Create a symlink inside the sandbox pointing outside
+        let link_path = root.join("escape_link");
+        std::os::unix::fs::symlink("/etc/passwd", &link_path).unwrap();
+
+        let guard = SandboxGuard::new(root, vec![]);
+
+        // Writing through the symlink should be blocked
+        let result = guard.check_write(&link_path);
+        assert!(
+            matches!(result, Err(SandboxViolation::SymlinkEscape { .. })),
+            "symlink pointing outside sandbox should be blocked: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn sandbox_symlink_inside_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        // Create a target file inside sandbox
+        let target = root.join("real_file.txt");
+        std::fs::write(&target, "data").unwrap();
+
+        // Create a symlink inside sandbox pointing to another file inside
+        let link_path = root.join("safe_link");
+        std::os::unix::fs::symlink(&target, &link_path).unwrap();
+
+        let guard = SandboxGuard::new(root, vec![]);
+
+        // Writing through an internal symlink should pass
+        assert!(guard.check_write(&link_path).is_ok());
     }
 }
