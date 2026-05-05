@@ -19,14 +19,34 @@ pub enum LatencyClass {
     Slow,
 }
 
+/// A streaming chunk from the provider.
+#[derive(Debug, Clone)]
+pub struct StreamChunk {
+    /// Incremental text content.
+    pub text: String,
+    /// True if this is the final chunk.
+    pub done: bool,
+}
+
 /// Trait for LLM provider adapters.
 ///
 /// Terra is provider-agnostic. Any OpenAI-compatible endpoint
 /// implements this trait.
 #[async_trait::async_trait]
 pub trait ProviderAdapter: Send + Sync {
-    /// Send a prompt and get a response.
+    /// Send a prompt and get a complete response (buffered).
     async fn complete(&self, request: CompletionRequest) -> anyhow::Result<CompletionResponse>;
+
+    /// Send a prompt and get a streaming response.
+    /// Returns a Vec of chunks (simplified stream — real impl would use async channel).
+    /// Default: falls back to complete() and returns single chunk.
+    async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<Vec<StreamChunk>> {
+        let response = self.complete(request).await?;
+        Ok(vec![StreamChunk {
+            text: response.content,
+            done: true,
+        }])
+    }
 
     /// Get the capabilities of this provider.
     fn capabilities(&self) -> &ProviderCapability;
@@ -82,6 +102,24 @@ impl ProviderAdapter for DryRunAdapter {
             usage_completion_tokens: 0,
             model: "dry_run".into(),
         })
+    }
+
+    async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<Vec<StreamChunk>> {
+        let full = format!(
+            "DRY_RUN response to: {}",
+            &request.user_prompt[..request.user_prompt.len().min(100)]
+        );
+        // Emit word by word to simulate streaming
+        let words: Vec<&str> = full.split_whitespace().collect();
+        let mut chunks = Vec::new();
+        for (i, word) in words.iter().enumerate() {
+            let is_last = i == words.len() - 1;
+            chunks.push(StreamChunk {
+                text: if i == 0 { word.to_string() } else { format!(" {}", word) },
+                done: is_last,
+            });
+        }
+        Ok(chunks)
     }
 
     fn capabilities(&self) -> &ProviderCapability {

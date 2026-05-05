@@ -155,4 +155,35 @@ mod tests {
         assert_eq!(r1.mode, DispatchMode::DryRun);
         assert_eq!(r2.mode, DispatchMode::Live);
     }
+
+    // T-STR-001: streaming provider emits tokens
+    #[tokio::test]
+    async fn streaming_provider_emits_tokens() {
+        let adapter = DryRunAdapter::new();
+        let request = CompletionRequest {
+            system_prompt: "test".into(),
+            user_prompt: "hello world test".into(),
+            max_tokens: None,
+            temperature: None,
+        };
+        let chunks = adapter.complete_stream(request).await.unwrap();
+
+        // Should have multiple chunks (word by word)
+        assert!(chunks.len() > 1, "should emit multiple chunks, got {}", chunks.len());
+
+        // Last chunk should be done
+        assert!(chunks.last().unwrap().done);
+
+        // Concatenated text should form the full response
+        let full: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(full.contains("DRY_RUN"));
+
+        // Non-last chunks should not be done
+        for chunk in &chunks[..chunks.len() - 1] {
+            assert!(!chunk.done);
+        }
+    }
+
+    // T-STR-005: progress events structure (tested via event module in terra-types)
+    // Already covered by T-STR-006/007 in terra-types/event.rs
 }
