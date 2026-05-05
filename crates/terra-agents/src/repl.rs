@@ -17,6 +17,7 @@ use terra_types::command::{Command, CommandOp};
 use terra_types::event::{StreamEvent, TokenTracker};
 
 use crate::session::SessionManager;
+use crate::session_store::{SessionRecord, SessionStore};
 
 /// Output from the REPL — UI-agnostic, renderable by any frontend.
 #[derive(Debug, Clone)]
@@ -40,6 +41,8 @@ pub struct Repl {
     session: SessionManager,
     context: Vec<ConversationTurn>,
     token_tracker: TokenTracker,
+    session_record: SessionRecord,
+    session_store: Option<SessionStore>,
 }
 
 /// A single turn in the conversation.
@@ -57,6 +60,41 @@ impl Repl {
             core,
             context: Vec::new(),
             token_tracker: TokenTracker::new(),
+            session_record: SessionRecord::new(),
+            session_store: None,
+        }
+    }
+
+    /// Set the session store for persistence.
+    pub fn with_store(mut self, store: SessionStore) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// Resume a previous session by loading its record.
+    pub fn resume_session(&mut self, record: SessionRecord) {
+        // Restore context from turns
+        self.context = record.turns.iter().map(|t| ConversationTurn {
+            role: t.role.clone(),
+            content: t.content.clone(),
+        }).collect();
+        self.token_tracker = TokenTracker::new();
+        self.token_tracker.record(
+            record.total_prompt_tokens as u32,
+            record.total_completion_tokens as u32,
+        );
+        self.session_record = record;
+    }
+
+    /// Get the current session ID.
+    pub fn session_id(&self) -> &str {
+        &self.session_record.id
+    }
+
+    /// Save current session to disk (if store attached).
+    fn auto_save(&self) {
+        if let Some(ref store) = self.session_store {
+            let _ = store.save(&self.session_record);
         }
     }
 
@@ -183,6 +221,34 @@ impl Repl {
                 out.push(self.prompt());
                 out
             }
+            "/sessions" => {
+                match &self.session_store {
+                    Some(store) => {
+                        let list = store.list();
+                        if list.is_empty() {
+                            vec![
+                                ReplOutput::Text("No previous sessions.".into()),
+                                self.prompt(),
+                            ]
+                        } else {
+                            let mut out = vec![ReplOutput::Text("Sessions:".into())];
+                            for s in &list {
+                                out.push(ReplOutput::Text(format!(
+                                    "  {} — {} turns, {} tokens{}",
+                                    s.id, s.turn_count, s.total_tokens,
+                                    s.goal.as_ref().map(|g| format!(" ({})", g)).unwrap_or_default(),
+                                )));
+                            }
+                            out.push(self.prompt());
+                            out
+                        }
+                    }
+                    None => vec![
+                        ReplOutput::Text("No session store (run terra init first).".into()),
+                        self.prompt(),
+                    ],
+                }
+            }
             "/trace" => {
                 // Executor holds the audit log — we can't directly access it here.
                 // In a full implementation, we'd have a reference to AuditLog.
@@ -233,10 +299,11 @@ impl Repl {
             role: "user".into(),
             content: input.to_string(),
         });
+        self.session_record.add_turn("user", input);
 
         // Build system prompt from IC + mode
         let mode_context = if self.session.mode().is_goal() {
-            let task_type = terra_core::TaskType::BugFix; // default for Goal Mode
+            let task_type = terra_core::TaskType::BugFix;
             self.core.build_system_prompt(&task_type)
         } else {
             "You are Terra, an AI Agent OS assistant. Be helpful and concise.".into()
@@ -276,11 +343,19 @@ impl Repl {
             .unwrap_or(0) as u32;
         self.token_tracker.record(prompt_tokens, completion_tokens);
 
-        // Add assistant turn to context
+        // Add assistant turn to context + session record
         self.context.push(ConversationTurn {
             role: "assistant".into(),
             content: response.clone(),
         });
+        self.session_record.add_turn("assistant", &response);
+        self.session_record.update_tokens(
+            self.token_tracker.prompt_tokens,
+            self.token_tracker.completion_tokens,
+        );
+
+        // Auto-save session to disk
+        self.auto_save();
 
         // Check for notification from auto-record
         let mut out = Vec::new();
