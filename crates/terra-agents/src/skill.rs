@@ -41,17 +41,21 @@ pub struct SkillContext {
 }
 
 /// A plan of CommandOps that the Skill wants to execute in sequence.
-#[derive(Debug, Clone)]
+/// Steps can be static (fixed CommandOp) or dynamic (built from prev result).
 pub struct SkillPlan {
     pub steps: Vec<SkillStep>,
 }
 
 /// A single step in a Skill execution plan.
-#[derive(Debug, Clone)]
 pub struct SkillStep {
     pub op_name: String,
+    /// Static command (used when resolve_fn is None).
     pub command: CommandOp,
+    /// Description for progress display.
     pub description: String,
+    /// Dynamic resolver: builds CommandOp from previous step's result.
+    /// When Some, this is called instead of using `command`.
+    pub resolve_fn: Option<Box<dyn Fn(&serde_json::Value) -> CommandOp + Send + Sync>>,
 }
 
 /// Result of executing a Skill.
@@ -111,6 +115,9 @@ impl SkillRegistry {
     }
 
     /// Execute a Skill plan through the Executor.
+    ///
+    /// Each step receives the previous step's CommandResult.data as prev_result.
+    /// Steps with resolve_fn build their CommandOp dynamically from prev_result.
     pub async fn execute_plan(
         &self,
         plan: &SkillPlan,
@@ -118,10 +125,17 @@ impl SkillRegistry {
         executor: &CommandExecutor,
     ) -> SkillResult {
         let mut output = serde_json::json!({});
+        let mut prev_result = serde_json::json!({});
         let total = plan.steps.len();
 
         for (i, step) in plan.steps.iter().enumerate() {
-            let cmd = Command::new(agent_id, step.command.clone());
+            // Resolve command: dynamic (from prev result) or static
+            let op = match &step.resolve_fn {
+                Some(resolve) => resolve(&prev_result),
+                None => step.command.clone(),
+            };
+
+            let cmd = Command::new(agent_id, op);
             let result = executor.execute(cmd).await;
 
             if result.status != CommandStatus::Ok {
@@ -135,8 +149,9 @@ impl SkillRegistry {
                 };
             }
 
-            if let Some(data) = result.data {
-                output[&step.op_name] = data;
+            if let Some(ref data) = result.data {
+                output[&step.op_name] = data.clone();
+                prev_result = data.clone();
             }
         }
 
@@ -162,15 +177,17 @@ pub fn code_editor_skill() -> SkillDef {
         required_ops: vec!["FileRead".into(), "ProviderCall".into(), "FileWrite".into()],
         description: "Read a file, modify via LLM, write back.".into(),
         execute_fn: Box::new(|ctx| {
-            let file = ctx.input.get("file").and_then(|f| f.as_str()).unwrap_or("unknown");
-            let instruction = ctx.input.get("instruction").and_then(|i| i.as_str()).unwrap_or("");
+            let file = ctx.input.get("file").and_then(|f| f.as_str()).unwrap_or("unknown").to_string();
+            let instruction = ctx.input.get("instruction").and_then(|i| i.as_str()).unwrap_or("").to_string();
+            let file_for_write = file.clone();
 
             SkillPlan {
                 steps: vec![
                     SkillStep {
                         op_name: "read".into(),
-                        command: CommandOp::FileRead { path: file.into() },
+                        command: CommandOp::FileRead { path: file.clone() },
                         description: format!("Read {}", file),
+                        resolve_fn: None,
                     },
                     SkillStep {
                         op_name: "modify".into(),
@@ -182,14 +199,27 @@ pub fn code_editor_skill() -> SkillDef {
                             output_contract: Some("file_write".into()),
                         },
                         description: format!("Modify {} via LLM", file),
+                        resolve_fn: None,
                     },
                     SkillStep {
                         op_name: "write".into(),
                         command: CommandOp::FileWrite {
-                            path: file.into(),
-                            content: String::new(), // filled from LLM response at runtime
+                            path: file_for_write.clone(),
+                            content: String::new(),
                         },
-                        description: format!("Write back {}", file),
+                        description: format!("Write back {}", file_for_write),
+                        // Dynamic: takes LLM content from prev step
+                        resolve_fn: Some(Box::new(move |prev| {
+                            let content = prev
+                                .get("content")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            CommandOp::FileWrite {
+                                path: file_for_write.clone(),
+                                content,
+                            }
+                        })),
                     },
                 ],
             }
@@ -219,6 +249,7 @@ pub fn test_runner_skill() -> SkillDef {
                             timeout_ms: Some(60_000),
                         },
                         description: format!("Run: {}", command),
+                        resolve_fn: None,
                     },
                     SkillStep {
                         op_name: "record".into(),
@@ -227,6 +258,7 @@ pub fn test_runner_skill() -> SkillDef {
                             data: serde_json::json!({"command": command}),
                         },
                         description: "Record test result".into(),
+                        resolve_fn: None,
                     },
                 ],
             }
@@ -254,6 +286,7 @@ pub fn memory_inspector_skill() -> SkillDef {
                             top_k: 5,
                         },
                         description: format!("Search memory: {}", query),
+                        resolve_fn: None,
                     },
                 ],
             }
@@ -264,7 +297,7 @@ pub fn memory_inspector_skill() -> SkillDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::sync::Arc;
     use terra_caging::engine::*;
     use terra_caging::sandbox::SandboxGuard;
     use terra_memory::{ArtifactStore, MemoryDatabase};
@@ -402,5 +435,193 @@ mod tests {
         let reg = test_registry();
         let result = reg.validate_agent("nonexistent", &[]);
         assert!(result.is_err());
+    }
+
+    // --- Skill Data Flow Tests (T-SKL) ---
+
+    // T-SKL-001: step output feeds next step
+    #[tokio::test]
+    async fn step_output_feeds_next() {
+        let (exec, dir) = test_executor();
+        let reg = test_registry();
+
+        // Write a file first
+        let file_path = dir.path().join("feed_test.txt");
+        std::fs::write(&file_path, "original content").unwrap();
+
+        // Create a 2-step plan: read → then a step that uses prev result
+        let path_str = file_path.to_string_lossy().to_string();
+        let plan = SkillPlan {
+            steps: vec![
+                SkillStep {
+                    op_name: "read".into(),
+                    command: CommandOp::FileRead { path: path_str.clone() },
+                    description: "Read file".into(),
+                    resolve_fn: None,
+                },
+                SkillStep {
+                    op_name: "trace".into(),
+                    command: CommandOp::TraceEvent {
+                        event_type: "noop".into(),
+                        data: serde_json::json!({}),
+                    },
+                    description: "Use prev result".into(),
+                    // Dynamic step that verifies prev_result has file content
+                    resolve_fn: Some(Box::new(|prev| {
+                        let content = prev.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        assert!(!content.is_empty(), "prev_result should have file content");
+                        CommandOp::TraceEvent {
+                            event_type: "verified".into(),
+                            data: serde_json::json!({"prev_content_len": content.len()}),
+                        }
+                    })),
+                },
+            ],
+        };
+
+        let result = reg.execute_plan(&plan, "worker-1", &exec).await;
+        assert!(result.success, "data flow should work: {:?}", result.error);
+        assert_eq!(result.steps_completed, 2);
+    }
+
+    // T-SKL-002: code_editor LLM to write (DryRun — content from LLM feeds FileWrite)
+    #[tokio::test]
+    async fn code_editor_llm_to_write() {
+        let (exec, dir) = test_executor();
+        let reg = test_registry();
+        let skill = reg.lookup("code_editor").unwrap();
+
+        // Create a source file
+        let file_path = dir.path().join("edit_me.txt");
+        std::fs::write(&file_path, "original").unwrap();
+
+        let ctx = SkillContext {
+            agent_id: "worker-1".into(),
+            agent_allowed_ops: vec!["FileRead".into(), "ProviderCall".into(), "FileWrite".into()],
+            input: serde_json::json!({
+                "file": file_path.to_string_lossy(),
+                "instruction": "add a comment"
+            }),
+        };
+
+        let plan = (skill.execute_fn)(&ctx);
+        assert_eq!(plan.steps.len(), 3);
+
+        // Step 3 should have resolve_fn (dynamic)
+        assert!(plan.steps[2].resolve_fn.is_some(), "write step should be dynamic");
+
+        let result = reg.execute_plan(&plan, "worker-1", &exec).await;
+        assert!(result.success, "code editor should succeed: {:?}", result.error);
+        assert_eq!(result.steps_completed, 3);
+    }
+
+    // T-SKL-003: step failure stops chain
+    #[tokio::test]
+    async fn step_failure_stops_chain() {
+        let (exec, _dir) = test_executor();
+        let reg = test_registry();
+
+        let plan = SkillPlan {
+            steps: vec![
+                SkillStep {
+                    op_name: "bad_read".into(),
+                    command: CommandOp::FileRead { path: "/nonexistent/file.txt".into() },
+                    description: "Read nonexistent".into(),
+                    resolve_fn: None,
+                },
+                SkillStep {
+                    op_name: "should_not_run".into(),
+                    command: CommandOp::TraceEvent {
+                        event_type: "unreachable".into(),
+                        data: serde_json::json!({}),
+                    },
+                    description: "This should never execute".into(),
+                    resolve_fn: None,
+                },
+            ],
+        };
+
+        let result = reg.execute_plan(&plan, "worker-1", &exec).await;
+        assert!(!result.success);
+        assert_eq!(result.steps_completed, 0, "should fail at step 0");
+        assert_eq!(result.steps_total, 2);
+        assert!(result.error.is_some());
+    }
+
+    // T-SKL-004: test runner captures output
+    #[tokio::test]
+    async fn test_runner_captures_output() {
+        let (exec, _dir) = test_executor();
+        let reg = test_registry();
+        let skill = reg.lookup("test_runner").unwrap();
+
+        let ctx = SkillContext {
+            agent_id: "worker-1".into(),
+            agent_allowed_ops: vec!["ShellExec".into(), "TraceEvent".into()],
+            input: serde_json::json!({"command": "echo test_output_captured"}),
+        };
+
+        let plan = (skill.execute_fn)(&ctx);
+        let result = reg.execute_plan(&plan, "worker-1", &exec).await;
+        assert!(result.success);
+
+        let stdout = result.output.get("test")
+            .and_then(|d| d.get("stdout"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        assert!(stdout.contains("test_output_captured"), "should capture stdout: {}", stdout);
+    }
+
+    // T-SKL-005: memory inspector returns findings
+    #[tokio::test]
+    async fn memory_inspector_returns_findings() {
+        let (exec, _dir) = test_executor();
+        let reg = test_registry();
+        let skill = reg.lookup("memory_inspector").unwrap();
+
+        let ctx = SkillContext {
+            agent_id: "explorer-1".into(),
+            agent_allowed_ops: vec!["MemSearch".into(), "MemRead".into()],
+            input: serde_json::json!({"query": "test"}),
+        };
+
+        let plan = (skill.execute_fn)(&ctx);
+        let result = reg.execute_plan(&plan, "explorer-1", &exec).await;
+        assert!(result.success);
+        assert!(result.output.get("search").is_some(), "should have search output");
+    }
+
+    // T-SKL-006: skill result reports correct step counts
+    #[tokio::test]
+    async fn skill_result_step_counts() {
+        let (exec, _dir) = test_executor();
+        let reg = test_registry();
+
+        // Success case: 2 steps
+        let plan = SkillPlan {
+            steps: vec![
+                SkillStep {
+                    op_name: "a".into(),
+                    command: CommandOp::TraceEvent {
+                        event_type: "a".into(), data: serde_json::json!({}),
+                    },
+                    description: "step a".into(),
+                    resolve_fn: None,
+                },
+                SkillStep {
+                    op_name: "b".into(),
+                    command: CommandOp::TraceEvent {
+                        event_type: "b".into(), data: serde_json::json!({}),
+                    },
+                    description: "step b".into(),
+                    resolve_fn: None,
+                },
+            ],
+        };
+
+        let result = reg.execute_plan(&plan, "main", &exec).await;
+        assert!(result.success);
+        assert_eq!(result.steps_completed, 2);
+        assert_eq!(result.steps_total, 2);
     }
 }
