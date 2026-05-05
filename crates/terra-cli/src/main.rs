@@ -55,6 +55,13 @@ enum Commands {
 enum ConfigAction {
     /// Show current configuration.
     Show,
+    /// Set a configuration value (dotted key: "provider.model").
+    Set {
+        /// Key in dotted format (e.g., "provider.model").
+        key: String,
+        /// Value to set.
+        value: String,
+    },
 }
 
 fn resolve_provider(force_dry_run: bool) -> Arc<dyn ProviderAdapter> {
@@ -141,6 +148,11 @@ async fn main() -> anyhow::Result<()> {
             ConfigAction::Show => {
                 let config = resolve_config(None);
                 print!("{}", to_toml_string(&config)?);
+            }
+            ConfigAction::Set { key, value } => {
+                let config_path = config::global_config_path();
+                config::config_set(&config_path, &key, &value)?;
+                println!("Set {} = {} in {}", key, value, config_path.display());
             }
         },
 

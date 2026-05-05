@@ -105,8 +105,18 @@ impl OpenAICompatibleAdapter {
         let base_url = env::var(ENV_BASE_URL).unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let model = env::var(ENV_MODEL).unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
+        Self::new(api_key, base_url, model, DEFAULT_TIMEOUT_SECS)
+    }
+
+    /// Create with explicit parameters (for testing with mock servers).
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        model: String,
+        timeout_secs: u64,
+    ) -> Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .context("failed to build HTTP client")?;
 

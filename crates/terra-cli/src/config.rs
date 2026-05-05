@@ -136,6 +136,58 @@ pub fn to_toml_string(config: &TerraConfig) -> Result<String> {
     Ok(output)
 }
 
+/// Set a config value using dotted key notation (e.g., "provider.model").
+/// Writes to the specified config file (creates if not exists).
+pub fn config_set(config_path: &Path, dotted_key: &str, value: &str) -> Result<()> {
+    // Load existing config or start fresh
+    let mut doc: toml::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        content.parse().with_context(|| format!("failed to parse {}", config_path.display()))?
+    } else {
+        toml::Table::new()
+    };
+
+    // Parse dotted key: "provider.model" → ["provider", "model"]
+    let parts: Vec<&str> = dotted_key.split('.').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("key must be in format 'section.key', got '{}'", dotted_key);
+    }
+
+    let section = parts[0];
+    let key = parts[1];
+
+    // Get or create section table
+    let section_table = doc
+        .entry(section.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+
+    if let toml::Value::Table(ref mut table) = section_table {
+        // Try to parse as integer first, then as string
+        if let Ok(num) = value.parse::<i64>() {
+            table.insert(key.to_string(), toml::Value::Integer(num));
+        } else {
+            table.insert(key.to_string(), toml::Value::String(value.to_string()));
+        }
+    } else {
+        anyhow::bail!("'{}' is not a table in config", section);
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    // Write back
+    let output = toml::to_string_pretty(&doc)
+        .context("failed to serialize config")?;
+    std::fs::write(config_path, &output)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    Ok(())
+}
+
 /// Environment detection for `terra doctor`.
 #[derive(Debug, Serialize)]
 pub struct EnvironmentReport {
@@ -263,5 +315,57 @@ mod tests {
         assert!(!report.os.is_empty());
         assert!(!report.arch.is_empty());
         assert!(!report.terra_version.is_empty());
+    }
+
+    // T-CF-005: config set persists
+    #[test]
+    fn config_set_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        // Set a value
+        config_set(&config_path, "provider.model", "gpt-4o").unwrap();
+
+        // Read back and verify
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("gpt-4o"));
+
+        // Load and verify via TOML parser
+        let parsed: toml::Value = content.parse().unwrap();
+        assert_eq!(
+            parsed["provider"]["model"].as_str(),
+            Some("gpt-4o")
+        );
+    }
+
+    #[test]
+    fn config_set_integer_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        config_set(&config_path, "memory.cache_capacity", "2000").unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = content.parse().unwrap();
+        assert_eq!(parsed["memory"]["cache_capacity"].as_integer(), Some(2000));
+    }
+
+    #[test]
+    fn config_set_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("subdir").join("config.toml");
+
+        assert!(!config_path.exists());
+        config_set(&config_path, "provider.model", "test").unwrap();
+        assert!(config_path.exists());
+    }
+
+    #[test]
+    fn config_set_invalid_key_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        let result = config_set(&config_path, "no_dot_key", "value");
+        assert!(result.is_err());
     }
 }
