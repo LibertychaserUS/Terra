@@ -11,6 +11,8 @@ use terra_core::domain::{AlgorithmModule, CodingModule};
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_memory::MemoryDatabase;
+use terra_providers::adapter::{DryRunAdapter, ProviderAdapter};
+use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
 
 use config::{detect_environment, resolve_config, to_toml_string};
@@ -83,8 +85,14 @@ fn bootstrap() -> Orchestrator {
         Box::new(MetaCage),
     ]));
 
-    // L3+: Command Executor (the single gateway)
-    let executor = Arc::new(CommandExecutor::new(memory, audit, caging));
+    // L1: Provider (auto-detect: live if key available, dry_run otherwise)
+    let provider: Arc<dyn ProviderAdapter> = match OpenAICompatibleAdapter::from_env() {
+        Ok(adapter) => Arc::new(adapter),
+        Err(_) => Arc::new(DryRunAdapter::new()),
+    };
+
+    // L3+: Command Executor (the single gateway, includes provider)
+    let executor = Arc::new(CommandExecutor::new(memory, audit, caging, provider));
 
     // L4: Intelligence Core with domain modules
     let mut core = IntelligenceCore::new();
@@ -128,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
 
         Some(Commands::Run { task, as_json }) => {
             let orchestrator = bootstrap();
-            let result = orchestrator.run(&task)?;
+            let result = orchestrator.run(&task).await?;
 
             if as_json {
                 let output = serde_json::json!({

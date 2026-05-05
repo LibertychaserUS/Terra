@@ -47,6 +47,12 @@ pub enum CommandOp {
         title: String,
         summary: String,
     },
+    ProviderCall {
+        system_prompt: String,
+        user_prompt: String,
+        max_tokens: Option<u32>,
+        temperature: Option<f32>,
+    },
 }
 
 /// Result of executing a command.

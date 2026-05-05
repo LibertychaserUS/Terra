@@ -20,3 +20,4 @@ async-trait.workspace = true
 terra-memory = { path = "../terra-memory" }
 terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }
+terra-providers = { path = "../terra-providers" }

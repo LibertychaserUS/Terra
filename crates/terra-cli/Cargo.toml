@@ -14,6 +14,7 @@ terra-executor = { path = "../terra-executor" }
 terra-memory = { path = "../terra-memory" }
 terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }
+terra-providers = { path = "../terra-providers" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -28,4 +29,6 @@ dirs.workspace = true
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+tokio = { workspace = true, features = ["full", "test-util"] }
 terra-protocol = { path = "../terra-protocol" }
+terra-providers = { path = "../terra-providers" }

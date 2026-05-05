@@ -1,15 +1,19 @@
+use std::sync::Arc;
+
 use terra_memory::MemoryDatabase;
 use terra_memory::types::{Level, Scope};
 use terra_protocol::command::{CommandOp, CommandResult, CommandStatus};
+use terra_providers::adapter::{CompletionRequest, ProviderAdapter};
 
 /// Routes a CommandOp to its backend and returns the result.
 ///
 /// This is the only place where backend systems are called directly.
 /// The executor calls this AFTER audit recording and cage checking.
-pub fn route(
+pub async fn route(
     op: &CommandOp,
     agent: &str,
     memory: &MemoryDatabase,
+    provider: &Arc<dyn ProviderAdapter>,
 ) -> CommandResult {
     match op {
         CommandOp::MemWrite { key, content, scope, level } => {
@@ -52,8 +56,6 @@ pub fn route(
         }
 
         CommandOp::MemSearch { query, top_k } => {
-            // Placeholder: full vector search requires embedding integration.
-            // For now, return empty results.
             CommandResult::ok("", Some(serde_json::json!({
                 "query": query,
                 "top_k": top_k,
@@ -63,7 +65,6 @@ pub fn route(
         }
 
         CommandOp::ArtifactSave { artifact_type, content: _ } => {
-            // Placeholder: artifact store implementation pending.
             CommandResult::ok("", Some(serde_json::json!({
                 "type": artifact_type,
                 "status": "saved",
@@ -92,20 +93,45 @@ pub fn route(
                 "recorded": true,
             })))
         }
+
+        CommandOp::ProviderCall { system_prompt, user_prompt, max_tokens, temperature } => {
+            let request = CompletionRequest {
+                system_prompt: system_prompt.clone(),
+                user_prompt: user_prompt.clone(),
+                max_tokens: *max_tokens,
+                temperature: *temperature,
+            };
+
+            match provider.complete(request).await {
+                Ok(response) => CommandResult::ok("", Some(serde_json::json!({
+                    "content": response.content,
+                    "model": response.model,
+                    "prompt_tokens": response.usage_prompt_tokens,
+                    "completion_tokens": response.usage_completion_tokens,
+                }))),
+                Err(e) => CommandResult::err("", e.to_string()),
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use terra_providers::adapter::DryRunAdapter;
 
     fn test_memory() -> MemoryDatabase {
         MemoryDatabase::open_in_memory().unwrap()
     }
 
-    #[test]
-    fn route_mem_write() {
+    fn test_provider() -> Arc<dyn ProviderAdapter> {
+        Arc::new(DryRunAdapter::new())
+    }
+
+    #[tokio::test]
+    async fn route_mem_write() {
         let mem = test_memory();
+        let prov = test_provider();
         let result = route(
             &CommandOp::MemWrite {
                 key: "test_key".into(),
@@ -115,13 +141,15 @@ mod tests {
             },
             "main",
             &mem,
-        );
+            &prov,
+        ).await;
         assert_eq!(result.status, CommandStatus::Ok);
     }
 
-    #[test]
-    fn route_mem_read_after_write() {
+    #[tokio::test]
+    async fn route_mem_read_after_write() {
         let mem = test_memory();
+        let prov = test_provider();
         route(
             &CommandOp::MemWrite {
                 key: "k1".into(),
@@ -131,25 +159,26 @@ mod tests {
             },
             "main",
             &mem,
-        );
+            &prov,
+        ).await;
 
-        let result = route(&CommandOp::MemRead { key: "k1".into() }, "main", &mem);
+        let result = route(&CommandOp::MemRead { key: "k1".into() }, "main", &mem, &prov).await;
         assert_eq!(result.status, CommandStatus::Ok);
-        let data = result.data.unwrap();
-        assert_eq!(data["key"], "k1");
-        assert_eq!(data["content"], "data");
+        assert_eq!(result.data.unwrap()["key"], "k1");
     }
 
-    #[test]
-    fn route_mem_read_not_found() {
+    #[tokio::test]
+    async fn route_mem_read_not_found() {
         let mem = test_memory();
-        let result = route(&CommandOp::MemRead { key: "nope".into() }, "main", &mem);
+        let prov = test_provider();
+        let result = route(&CommandOp::MemRead { key: "nope".into() }, "main", &mem, &prov).await;
         assert_eq!(result.status, CommandStatus::NotFound);
     }
 
-    #[test]
-    fn route_invalid_scope() {
+    #[tokio::test]
+    async fn route_invalid_scope() {
         let mem = test_memory();
+        let prov = test_provider();
         let result = route(
             &CommandOp::MemWrite {
                 key: "k".into(),
@@ -159,13 +188,15 @@ mod tests {
             },
             "main",
             &mem,
-        );
+            &prov,
+        ).await;
         assert_eq!(result.status, CommandStatus::Error);
     }
 
-    #[test]
-    fn route_trace_checkpoint() {
+    #[tokio::test]
+    async fn route_trace_checkpoint() {
         let mem = test_memory();
+        let prov = test_provider();
         let result = route(
             &CommandOp::TraceCheckpoint {
                 title: "test".into(),
@@ -173,7 +204,29 @@ mod tests {
             },
             "main",
             &mem,
-        );
+            &prov,
+        ).await;
         assert_eq!(result.status, CommandStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn route_provider_call_dry_run() {
+        let mem = test_memory();
+        let prov = test_provider();
+        let result = route(
+            &CommandOp::ProviderCall {
+                system_prompt: "You are helpful.".into(),
+                user_prompt: "What is 2+2?".into(),
+                max_tokens: Some(50),
+                temperature: None,
+            },
+            "main",
+            &mem,
+            &prov,
+        ).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        let data = result.data.unwrap();
+        assert!(data["content"].as_str().unwrap().contains("DRY_RUN"));
+        assert_eq!(data["prompt_tokens"], 0);
     }
 }

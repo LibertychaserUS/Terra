@@ -82,6 +82,16 @@ pub fn render_command(cmd: &Command) -> String {
             lines.push(format!("- **Title**: {}", title));
             lines.push(format!("- **Summary**: {}", summary));
         }
+        CommandOp::ProviderCall { system_prompt: _, user_prompt, max_tokens, temperature } => {
+            lines.push(format!("- **Op**: provider_call"));
+            lines.push(format!("- **Prompt**: {}", &user_prompt[..user_prompt.len().min(100)]));
+            if let Some(mt) = max_tokens {
+                lines.push(format!("- **Max tokens**: {}", mt));
+            }
+            if let Some(t) = temperature {
+                lines.push(format!("- **Temperature**: {}", t));
+            }
+        }
     }
 
     lines.join("\n")

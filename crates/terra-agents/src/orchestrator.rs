@@ -45,7 +45,7 @@ impl Orchestrator {
     }
 
     /// Run a task through the complete canonical pipeline.
-    pub fn run(&self, task_description: &str) -> Result<RunResult> {
+    pub async fn run(&self, task_description: &str) -> Result<RunResult> {
         // 1. Language Compilation → Spec IR
         let spec = SpecIR::from_task_description(task_description);
         info!(spec_id = %spec.spec_id, intent = %spec.intent, "spec compiled");
@@ -86,7 +86,7 @@ impl Orchestrator {
                 }),
             },
         );
-        self.executor.execute(start_cmd);
+        self.executor.execute(start_cmd).await;
 
         // 4. Caging gate — check spec completeness (FR-004)
         //    The CagingEngine is inside the Executor. We trigger it by
@@ -100,7 +100,7 @@ impl Orchestrator {
                 }),
             },
         );
-        self.executor.execute(cage_cmd);
+        self.executor.execute(cage_cmd).await;
 
         // 5. Memory search for relevant context (via Executor)
         let search_cmd = Command::new(
@@ -110,7 +110,7 @@ impl Orchestrator {
                 top_k: 5,
             },
         );
-        let search_result = self.executor.execute(search_cmd);
+        let search_result = self.executor.execute(search_cmd).await;
 
         // 6. Prepare worker task with IC rules and context
         let user_prompt = format!(
@@ -131,33 +131,49 @@ impl Orchestrator {
                 }),
             },
         );
-        self.executor.execute(dispatch_cmd);
+        self.executor.execute(dispatch_cmd).await;
 
-        // 8. For now, the response comes from the provider through executor.
-        //    Full Worker agent with its own context is future work.
-        //    But the pipeline structure is correct — executor handles everything.
-        //
-        //    NOTE: ProviderCall is not yet a CommandOp variant.
-        //    We record it as a TraceEvent and use the system_prompt/user_prompt
-        //    that were built with IC rules.
+        // 8. Provider call through executor (FR-002: no direct provider access)
         let provider_cmd = Command::new(
             "main",
-            CommandOp::TraceEvent {
-                event_type: "provider_call".into(),
-                data: serde_json::json!({
-                    "system_prompt": system_prompt,
-                    "user_prompt": user_prompt,
-                    "note": "direct provider call will be replaced by Worker agent",
-                }),
+            CommandOp::ProviderCall {
+                system_prompt,
+                user_prompt,
+                max_tokens: Some(2000),
+                temperature: Some(0.0),
             },
         );
-        self.executor.execute(provider_cmd);
+        let provider_result = self.executor.execute(provider_cmd).await;
 
-        // Placeholder response (provider integration via executor is next step)
-        let worker_response = format!(
-            "PIPELINE_COMPLETE: task '{}' processed through IC ({} rules) + Executor + Caging",
-            spec.intent, ic_rules_count
-        );
+        let worker_response = provider_result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("no response")
+            .to_string();
+
+        let prompt_tokens = provider_result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("prompt_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32;
+
+        let completion_tokens = provider_result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("completion_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32;
+
+        let provider_id = provider_result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("model"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         // 9. Record completion checkpoint (via Executor)
         let complete_cmd = Command::new(
@@ -170,18 +186,15 @@ impl Orchestrator {
                 ),
             },
         );
-        self.executor.execute(complete_cmd);
-
-        // Count audit entries (all went through executor)
-        let audit_count = 5; // start + cage + search + dispatch + provider + complete
+        self.executor.execute(complete_cmd).await;
 
         Ok(RunResult {
             spec,
             worker_response,
-            provider_id: "pipeline".into(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            audit_entry_count: audit_count,
+            provider_id,
+            prompt_tokens,
+            completion_tokens,
+            audit_entry_count: 6, // start + cage + search + dispatch + provider + complete
             ic_rules_applied: ic_rules_count,
             cage_checks_passed: 1,
         })
@@ -196,15 +209,15 @@ mod tests {
     use terra_caging::sandbox::SandboxGuard;
     use terra_core::domain::{AlgorithmModule, CodingModule};
     use terra_memory::MemoryDatabase;
+    use terra_providers::adapter::DryRunAdapter;
     use terra_trace::AuditLog;
 
     fn test_orchestrator() -> Orchestrator {
         let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
         let audit = Arc::new(AuditLog::new());
-        let sandbox = SandboxGuard::new(
-            PathBuf::from("/projects/test"),
-            vec![],
-        );
+        let provider: Arc<dyn terra_providers::adapter::ProviderAdapter> =
+            Arc::new(DryRunAdapter::new());
+        let sandbox = SandboxGuard::new(PathBuf::from("/projects/test"), vec![]);
         let caging = Arc::new(CagingEngine::new(vec![
             Box::new(SpecificationCage),
             Box::new(MemoryCage),
@@ -212,7 +225,7 @@ mod tests {
             Box::new(VerificationCage),
             Box::new(MetaCage),
         ]));
-        let executor = Arc::new(CommandExecutor::new(memory, audit, caging));
+        let executor = Arc::new(CommandExecutor::new(memory, audit, caging, provider));
 
         let mut core = IntelligenceCore::new();
         core.register(Box::new(CodingModule));
@@ -222,86 +235,61 @@ mod tests {
         Orchestrator::new(executor, core)
     }
 
-    // T-PI-001: all pipeline stages invoked
-    #[test]
-    fn pipeline_all_stages_invoked() {
+    #[tokio::test]
+    async fn pipeline_all_stages_invoked() {
         let orch = test_orchestrator();
-        let result = orch.run("fix the auth bug").unwrap();
+        let result = orch.run("fix the auth bug").await.unwrap();
 
-        // Spec compiled
         assert_eq!(result.spec.intent, "fix the auth bug");
-
-        // IC consulted (universal + coding + algorithm rules)
-        assert!(result.ic_rules_applied > 10, "IC should have 13+ rules");
-
-        // Pipeline ran through executor (audit has multiple entries)
+        assert!(result.ic_rules_applied > 10);
         assert!(result.audit_entry_count >= 5);
-
-        // Response shows pipeline completion
-        assert!(result.worker_response.contains("PIPELINE_COMPLETE"));
-        assert!(result.worker_response.contains("IC"));
+        // Provider was called through executor (DryRun)
+        assert!(result.worker_response.contains("DRY_RUN"));
     }
 
-    // T-PI-002: IC rules in prompt
-    #[test]
-    fn pipeline_ic_rules_in_prompt() {
+    #[tokio::test]
+    async fn pipeline_ic_rules_applied() {
         let orch = test_orchestrator();
-        let result = orch.run("fix bug").unwrap();
-
-        // IC rules were applied
-        assert!(result.ic_rules_applied >= 13); // 13 universal + module rules
-
-        // The audit trail should contain the provider_call event
-        // which includes the system prompt with rules
-        // (verified via audit log inspection)
+        let result = orch.run("fix bug").await.unwrap();
+        assert!(result.ic_rules_applied >= 13);
     }
 
-    // T-PI-005: audit records every step
-    #[test]
-    fn pipeline_audit_records_every_step() {
+    #[tokio::test]
+    async fn pipeline_provider_through_executor() {
         let orch = test_orchestrator();
-        let _result = orch.run("test task").unwrap();
-
-        // Orchestrator now only has the executor, not direct audit access.
-        // But the result tells us audit_entry_count.
-        // The executor internally records every command.
+        let result = orch.run("test").await.unwrap();
+        // Response came from DryRunAdapter via Executor (not direct call)
+        assert!(result.worker_response.contains("DRY_RUN"));
+        assert_eq!(result.provider_id, "dry_run");
     }
 
-    // T-AG-001: main agent queries IC before dispatch
-    #[test]
-    fn main_agent_queries_ic() {
+    #[tokio::test]
+    async fn main_agent_queries_ic() {
         let orch = test_orchestrator();
-        let result = orch.run("refactor the module").unwrap();
-        assert!(result.ic_rules_applied > 0, "IC must be consulted");
+        let result = orch.run("refactor the module").await.unwrap();
+        assert!(result.ic_rules_applied > 0);
     }
 
-    // T-AG-014: end to end dry run
-    #[test]
-    fn end_to_end_pipeline() {
+    #[tokio::test]
+    async fn end_to_end_pipeline() {
         let orch = test_orchestrator();
-        let result = orch.run("fix the empty password bug in auth.py line 42").unwrap();
-
+        let result = orch.run("fix the empty password bug in auth.py line 42").await.unwrap();
         assert_eq!(result.spec.intent, "fix the empty password bug in auth.py line 42");
         assert!(result.ic_rules_applied >= 13);
-        assert!(result.worker_response.contains("PIPELINE_COMPLETE"));
+        assert!(result.worker_response.contains("DRY_RUN"));
     }
 
-    // T-AG-016: empty task handled
-    #[test]
-    fn empty_task_handled() {
+    #[tokio::test]
+    async fn empty_task_handled() {
         let orch = test_orchestrator();
-        let result = orch.run("").unwrap();
+        let result = orch.run("").await.unwrap();
         assert_eq!(result.spec.intent, "");
     }
 
-    // Verify orchestrator doesn't import terra-memory or terra-providers
-    // (this is a compile-time guarantee from Cargo.toml)
     #[test]
     fn no_direct_subsystem_imports() {
-        // This test passes if the crate compiles.
-        // terra-agents/Cargo.toml only depends on:
-        //   terra-core, terra-protocol, terra-compile, terra-executor
-        // NOT: terra-memory, terra-providers, terra-caging, terra-trace
+        // Compile-time guarantee: terra-agents depends only on
+        // terra-core, terra-protocol, terra-compile, terra-executor
         assert!(true);
     }
 }

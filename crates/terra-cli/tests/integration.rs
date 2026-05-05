@@ -16,9 +16,12 @@ use terra_memory::MemoryDatabase;
 use terra_memory::types::{Level, Scope};
 use terra_trace::AuditLog;
 
+use terra_providers::adapter::{DryRunAdapter, ProviderAdapter};
+
 fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>) {
     let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
     let audit = Arc::new(AuditLog::new());
+    let provider: Arc<dyn ProviderAdapter> = Arc::new(DryRunAdapter::new());
     let sandbox = SandboxGuard::new(PathBuf::from("/projects/test"), vec![]);
     let caging = Arc::new(CagingEngine::new(vec![
         Box::new(SpecificationCage),
@@ -27,7 +30,7 @@ fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>) {
         Box::new(VerificationCage),
         Box::new(MetaCage),
     ]));
-    let executor = Arc::new(CommandExecutor::new(memory, audit.clone(), caging));
+    let executor = Arc::new(CommandExecutor::new(memory, audit.clone(), caging, provider));
 
     let mut core = IntelligenceCore::new();
     core.register(Box::new(CodingModule));
@@ -38,10 +41,10 @@ fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>) {
 }
 
 /// T-INT-001: Run task → result available.
-#[test]
-fn run_produces_result() {
+#[tokio::test]
+async fn run_produces_result() {
     let (orch, _audit) = test_orchestrator();
-    let result = orch.run("fix the auth bug").unwrap();
+    let result = orch.run("fix the auth bug").await.unwrap();
     assert!(!result.worker_response.is_empty());
     assert!(result.ic_rules_applied > 0);
 }
@@ -85,10 +88,10 @@ fn full_caging_chain() {
 }
 
 /// T-INT-004: Audit trail records pipeline steps.
-#[test]
-fn audit_trail_pipeline() {
+#[tokio::test]
+async fn audit_trail_pipeline() {
     let (orch, audit) = test_orchestrator();
-    orch.run("test task").unwrap();
+    orch.run("test task").await.unwrap();
 
     let entries = audit.entries();
     assert!(entries.len() >= 5, "pipeline should record at least 5 audit entries");
@@ -116,10 +119,10 @@ fn project_isolation() {
 }
 
 /// T-PI-001: Pipeline IC rules applied.
-#[test]
-fn pipeline_ic_rules_applied() {
+#[tokio::test]
+async fn pipeline_ic_rules_applied() {
     let (orch, _) = test_orchestrator();
-    let result = orch.run("refactor module").unwrap();
+    let result = orch.run("refactor module").await.unwrap();
     // Universal (13) + CodingModule (3) + AlgorithmModule (2) = 18
     assert!(result.ic_rules_applied >= 15, "should have 15+ rules, got {}", result.ic_rules_applied);
 }
