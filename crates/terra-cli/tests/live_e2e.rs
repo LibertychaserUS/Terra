@@ -22,6 +22,13 @@ use terra_trace::AuditLog;
 use terra_types::contract::file_write_contract;
 use terra_types::command::{Command, CommandOp};
 
+fn safe_truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 fn has_api_key() -> bool {
     std::env::var("DASHSCOPE_API_KEY").is_ok()
         || std::env::var("TERRA_PROVIDER_API_KEY").is_ok()
@@ -97,7 +104,7 @@ async fn code_editor_live() {
     if result.success {
         let modified = std::fs::read_to_string(&file_path).unwrap();
         eprintln!("Original: {:?}", original);
-        eprintln!("Modified: {:?}", &modified[..modified.len().min(200)]);
+        eprintln!("Modified: {:?}", safe_truncate(&modified, 200));
         // We don't assert content changed because the LLM write step
         // depends on OutputContract parsing which DashScope may format differently.
         // The key assertion: all 3 steps completed without error.
@@ -174,7 +181,7 @@ async fn output_contract_live() {
         .and_then(|c| c.as_str())
         .unwrap_or("");
 
-    eprintln!("LLM response: {:?}", &content[..content.len().min(300)]);
+    eprintln!("LLM response: {:?}", safe_truncate(content, 300));
 
     // Try parsing against contract
     let parse_result = contract.parse(content);
@@ -220,7 +227,7 @@ async fn output_cage_no_false_positive() {
         .and_then(|c| c.as_str())
         .unwrap_or("");
 
-    eprintln!("LLM coding response: {:?}", &content[..content.len().min(200)]);
+    eprintln!("LLM coding response: {:?}", safe_truncate(content, 200));
 
     // Output Cage should NOT flag normal coding response
     let cage_result = check_output(content);
@@ -251,7 +258,7 @@ async fn full_pipeline_live() {
 
     let result = orch.run("What is 2+2? Reply with just the number.").await.unwrap();
 
-    eprintln!("Full pipeline result: response={:?}", &result.worker_response[..result.worker_response.len().min(100)]);
+    eprintln!("Full pipeline result: response={:?}", safe_truncate(&result.worker_response, 100));
 
     assert!(!result.worker_response.is_empty(), "should have non-empty response");
     assert!(!result.worker_response.contains("DRY_RUN"), "should use real provider");

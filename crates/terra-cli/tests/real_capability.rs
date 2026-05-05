@@ -17,6 +17,13 @@ use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
 use terra_types::command::{Command, CommandOp, CommandStatus};
 
+fn safe_truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 fn has_api_key() -> bool {
     std::env::var("DASHSCOPE_API_KEY").is_ok()
 }
@@ -137,7 +144,7 @@ async fn build_simple_webpage() {
         "Create a single HTML file with embedded CSS and JS: a landing page with a centered title 'Terra Agent OS', a subtitle 'Efficiency is Intelligence', a dark theme, and a button that shows an alert when clicked.",
     ).await;
 
-    eprintln!("=== Webpage ===\n{}", &response[..response.len().min(500)]);
+    eprintln!("=== Webpage ===\n{}", safe_truncate(&response, 500));
 
     // Write to file and verify structure
     let html_path = dir.path().join("index.html");
@@ -168,7 +175,7 @@ async fn architecture_design() {
         "Design the architecture for a real-time collaborative document editing system (like Google Docs) that supports 10,000 concurrent users. Include:\n1. System components and their responsibilities\n2. Technology stack with justification\n3. Data consistency strategy (CRDT vs OT)\n4. Scaling approach\n5. Key trade-offs\nBe specific about technology choices.",
     ).await;
 
-    eprintln!("=== Architecture Design ===\n{}", &response[..response.len().min(1000)]);
+    eprintln!("=== Architecture Design ===\n{}", safe_truncate(&response, 1000));
 
     // Knowledge depth checks
     let mentions_crdt = response.to_lowercase().contains("crdt");
@@ -202,7 +209,7 @@ async fn research_exploration() {
         "Propose a novel approach to formally verifying AI agent behavior using ideas from type theory and linear logic. Specifically:\n1. How could linear types prevent an agent from using a resource (API call, file access) more than its budget allows?\n2. How could session types model and enforce multi-agent communication protocols?\n3. What are the open problems in making this practical?\nBe technically precise.",
     ).await;
 
-    eprintln!("=== Research Exploration ===\n{}", &response[..response.len().min(1200)]);
+    eprintln!("=== Research Exploration ===\n{}", safe_truncate(&response, 1200));
 
     // Depth checks
     let mentions_linear = response.to_lowercase().contains("linear");
