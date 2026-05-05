@@ -858,3 +858,23 @@ Coding agents need git.
 | ISSUE-032 | UX | No first-launch guidance — user doesn't know what Terra can do. |
 | ISSUE-033 | Distribution | No packaged installation — requires Rust toolchain. |
 | ISSUE-034 | UX | No usage declaration / permission disclosure at startup. |
+
+---
+
+### P5.9 TUI Status Display + Model Info
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-280 | MUST | Startup banner SHALL display: model name, model version, provider source (DashScope/OpenAI/local/dry_run). |
+| FR-281 | MUST | Status bar SHALL display: current mode (conversation/goal), model name, token count. |
+| FR-282 | SHOULD | Status bar SHALL display reasoning effort level (low/medium/high mapped from token budget). |
+| FR-283 | SHOULD | Session token budget remaining SHALL be visible in /status. |
+| FR-284 | MAY | `/model <name>` command SHALL switch the active model mid-session. |
+
+### P5.10 User Input Prediction
+
+| FR | Priority | Requirement |
+|----|----------|-------------|
+| FR-285 | SHOULD | Tab completion SHALL predict user input based on command history + current context. |
+| FR-286 | SHOULD | Prediction SHALL be local (no LLM call, zero token cost). |
+| FR-287 | MAY | Future: lightweight LLM-assisted prediction as optional mode. |

@@ -926,3 +926,17 @@ All tests skip gracefully when no API key is configured.
 |----|------|-------------------|
 | T-DIST-001 | `binary_named_terra` | Compiled binary is named "terra" (not "terra-cli"). |
 | T-DIST-002 | `version_flag` | `terra --version` outputs version number. |
+
+### P5.9 TUI Status + Model Tests (3 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-TUI-001 | `banner_shows_model` | Startup banner contains model name + provider source. |
+| T-TUI-002 | `status_shows_mode_model` | /status includes mode + model name + token count. |
+| T-TUI-003 | `model_switch` | /model qwen-max → subsequent calls use new model. |
+
+### P5.10 Input Prediction Tests (1 test)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-PRED-001 | `tab_predicts_from_history` | Previous input "/goal fix bug" → typing "/go" + tab → "/goal" completed. |
