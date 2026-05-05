@@ -17,6 +17,7 @@ pub mod session;
 pub mod drift;
 pub mod profile;
 pub mod subagent;
+pub mod skill;
 
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
@@ -25,3 +26,4 @@ pub use session::{SessionManager, SessionMode, SessionStatus, SleepSettings};
 pub use drift::{DriftDetector, DriftConfig};
 pub use profile::{AgentProfile, MemoryView};
 pub use subagent::SubAgentRunner;
+pub use skill::{SkillRegistry, SkillDef, TrustLevel};
