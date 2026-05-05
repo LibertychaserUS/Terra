@@ -1,0 +1,17 @@
+[package]
+name = "terra-agents"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+terra-core = { path = "../terra-core" }
+terra-memory = { path = "../terra-memory" }
+terra-protocol = { path = "../terra-protocol" }
+terra-providers = { path = "../terra-providers" }
+terra-caging = { path = "../terra-caging" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true

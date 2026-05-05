@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/terra-core",
+    "crates/terra-memory",
+    "crates/terra-protocol",
+    "crates/terra-agents",
+    "crates/terra-caging",
+    "crates/terra-providers",
+    "crates/terra-compile",
+    "crates/terra-trace",
+    "crates/terra-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rmp-serde = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+async-openai = "0.27"
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }

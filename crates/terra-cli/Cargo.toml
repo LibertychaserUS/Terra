@@ -1,0 +1,24 @@
+[package]
+name = "terra-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "terra"
+path = "src/main.rs"
+
+[dependencies]
+terra-core = { path = "../terra-core" }
+terra-memory = { path = "../terra-memory" }
+terra-protocol = { path = "../terra-protocol" }
+terra-agents = { path = "../terra-agents" }
+terra-caging = { path = "../terra-caging" }
+terra-providers = { path = "../terra-providers" }
+terra-compile = { path = "../terra-compile" }
+terra-trace = { path = "../terra-trace" }
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

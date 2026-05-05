@@ -1,0 +1,13 @@
+[package]
+name = "terra-caging"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+terra-core = { path = "../terra-core" }
+terra-protocol = { path = "../terra-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
