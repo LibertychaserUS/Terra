@@ -1,3 +1,5 @@
+mod config;
+
 use std::sync::Arc;
 
 use clap::Parser;
@@ -5,6 +7,8 @@ use terra_agents::Orchestrator;
 use terra_providers::adapter::{DryRunAdapter, ProviderAdapter};
 use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
+
+use config::{detect_environment, resolve_config, to_toml_string};
 
 #[derive(Parser)]
 #[command(name = "terra", version, about = "Terra — Agent OS")]
@@ -16,7 +20,11 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum Commands {
     /// Check environment readiness.
-    Doctor,
+    Doctor {
+        /// Output as JSON.
+        #[arg(long, default_value_t = false)]
+        as_json: bool,
+    },
 
     /// Run a task end-to-end.
     Run {
@@ -35,6 +43,18 @@ enum Commands {
 
     /// Show the audit trail.
     Trace,
+
+    /// Configuration management.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ConfigAction {
+    /// Show current configuration.
+    Show,
 }
 
 fn resolve_provider(force_dry_run: bool) -> Arc<dyn ProviderAdapter> {
@@ -62,16 +82,23 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Doctor) => {
-            let has_key = std::env::var("TERRA_PROVIDER_API_KEY").is_ok()
-                || std::env::var("DASHSCOPE_API_KEY").is_ok();
-            let provider_status = if has_key { "configured" } else { "not configured (dry_run only)" };
-
-            println!("Terra doctor: environment check");
-            println!("  Version:  {}", env!("CARGO_PKG_VERSION"));
-            println!("  OS:       {} {}", std::env::consts::OS, std::env::consts::ARCH);
-            println!("  Provider: {}", provider_status);
-            println!("  Status:   OK");
+        Some(Commands::Doctor { as_json }) => {
+            let report = detect_environment(None);
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Terra doctor: environment check");
+                println!("  Version:    {}", report.terra_version);
+                println!("  OS:         {} {}", report.os, report.arch);
+                println!("  Provider:   {}", if report.provider_configured {
+                    format!("configured ({})", report.provider_source)
+                } else {
+                    "not configured (dry_run only)".into()
+                });
+                println!("  Global cfg: {}", if report.global_config_exists { "found" } else { "not found" });
+                println!("  Project cfg:{}", if report.project_config_exists { "found" } else { "not found" });
+                println!("  Status:     OK");
+            }
         }
 
         Some(Commands::Run { task, dry_run, as_json }) => {
@@ -107,8 +134,15 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Some(Commands::Trace) => {
-            println!("(No persistent trace in MVP1 — trace is session-only)");
+            println!("(No persistent trace in MVP — trace is session-only)");
         }
+
+        Some(Commands::Config { action }) => match action {
+            ConfigAction::Show => {
+                let config = resolve_config(None);
+                print!("{}", to_toml_string(&config)?);
+            }
+        },
 
         None => {
             println!("Terra v{}", env!("CARGO_PKG_VERSION"));
