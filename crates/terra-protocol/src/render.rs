@@ -92,6 +92,29 @@ pub fn render_command(cmd: &Command) -> String {
                 lines.push(format!("- **Temperature**: {}", t));
             }
         }
+        CommandOp::FileRead { path } => {
+            lines.push(format!("- **Op**: file_read"));
+            lines.push(format!("- **Path**: `{}`", path));
+        }
+        CommandOp::FileWrite { path, content } => {
+            lines.push(format!("- **Op**: file_write"));
+            lines.push(format!("- **Path**: `{}`", path));
+            lines.push(format!("- **Bytes**: {}", content.len()));
+        }
+        CommandOp::FileDelete { path } => {
+            lines.push(format!("- **Op**: file_delete"));
+            lines.push(format!("- **Path**: `{}`", path));
+        }
+        CommandOp::ShellExec { command, workdir, timeout_ms } => {
+            lines.push(format!("- **Op**: shell_exec"));
+            lines.push(format!("- **Command**: `{}`", command));
+            if let Some(dir) = workdir {
+                lines.push(format!("- **Workdir**: `{}`", dir));
+            }
+            if let Some(t) = timeout_ms {
+                lines.push(format!("- **Timeout**: {}ms", t));
+            }
+        }
     }
 
     lines.join("\n")

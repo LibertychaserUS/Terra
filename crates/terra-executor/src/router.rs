@@ -171,6 +171,90 @@ pub async fn route(
                 Err(e) => CommandResult::err("", e.to_string()),
             }
         }
+
+        CommandOp::FileRead { path } => {
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    let len = content.len();
+                    CommandResult::ok("", Some(serde_json::json!({
+                        "path": path,
+                        "content": content,
+                        "bytes": len,
+                    })))
+                }
+                Err(e) => CommandResult::err("", format!("FileRead {}: {}", path, e)),
+            }
+        }
+
+        CommandOp::FileWrite { path, content } => {
+            // Ensure parent directory exists
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.exists() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return CommandResult::err("", format!("mkdir {}: {}", parent.display(), e));
+                    }
+                }
+            }
+            match std::fs::write(path, content) {
+                Ok(()) => CommandResult::ok("", Some(serde_json::json!({
+                    "path": path,
+                    "bytes_written": content.len(),
+                }))),
+                Err(e) => CommandResult::err("", format!("FileWrite {}: {}", path, e)),
+            }
+        }
+
+        CommandOp::FileDelete { path } => {
+            match std::fs::remove_file(path) {
+                Ok(()) => CommandResult::ok("", Some(serde_json::json!({
+                    "path": path,
+                    "deleted": true,
+                }))),
+                Err(e) => CommandResult::err("", format!("FileDelete {}: {}", path, e)),
+            }
+        }
+
+        CommandOp::ShellExec { command, workdir, timeout_ms } => {
+            use std::process::Stdio;
+
+            let _timeout = std::time::Duration::from_millis(
+                timeout_ms.unwrap_or(30_000)
+            );
+            // TODO: enforce timeout with tokio::time::timeout in async context
+
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", command])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            if let Some(dir) = workdir {
+                cmd.current_dir(dir);
+            }
+
+            match cmd.output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let exit_code = output.status.code().unwrap_or(-1);
+
+                    if output.status.success() {
+                        CommandResult::ok("", Some(serde_json::json!({
+                            "command": command,
+                            "exit_code": exit_code,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        })))
+                    } else {
+                        CommandResult::err("", format!(
+                            "ShellExec exit {}: {}",
+                            exit_code,
+                            if stderr.is_empty() { &stdout } else { &stderr }
+                        ))
+                    }
+                }
+                Err(e) => CommandResult::err("", format!("ShellExec failed: {}", e)),
+            }
+        }
     }
 }
 

@@ -176,6 +176,26 @@ impl CommandExecutor {
                 // Provider calls are allowed (they go through the pipeline)
                 CageAction::ExecuteTask { spec_complete: true }
             }
+            CommandOp::FileRead { path } => {
+                CageAction::FileRead {
+                    path: std::path::PathBuf::from(path),
+                }
+            }
+            CommandOp::FileWrite { path, .. } => {
+                CageAction::FileWrite {
+                    path: std::path::PathBuf::from(path),
+                }
+            }
+            CommandOp::FileDelete { path } => {
+                CageAction::FileDelete {
+                    path: std::path::PathBuf::from(path),
+                }
+            }
+            CommandOp::ShellExec { command, .. } => {
+                CageAction::ShellExec {
+                    command: command.clone(),
+                }
+            }
         };
 
         CageContext {
@@ -203,8 +223,8 @@ mod tests {
             Arc::new(DryRunAdapter::new());
 
         let sandbox = SandboxGuard::new(
-            PathBuf::from("/projects/test"),
-            vec![PathBuf::from("/projects/test/.terra/constitution.toml")],
+            dir.path().to_path_buf(),
+            vec![dir.path().join(".terra/constitution.toml")],
         );
 
         let caging = Arc::new(CagingEngine::new(vec![
@@ -367,5 +387,98 @@ mod tests {
         let entries = exec.audit.entries();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].result.is_some());
+    }
+
+    // --- FileOps syscall tests ---
+
+    #[tokio::test]
+    async fn file_write_and_read() {
+        let (exec, dir) = test_executor();
+        let file_path = dir.path().join("test_file.txt");
+
+        // Write
+        let cmd = Command::new("main", CommandOp::FileWrite {
+            path: file_path.to_string_lossy().to_string(),
+            content: "hello terra".into(),
+        });
+        let result = exec.execute(cmd).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert_eq!(result.data.as_ref().unwrap()["bytes_written"], 11);
+
+        // Read back
+        let cmd = Command::new("main", CommandOp::FileRead {
+            path: file_path.to_string_lossy().to_string(),
+        });
+        let result = exec.execute(cmd).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert_eq!(result.data.as_ref().unwrap()["content"], "hello terra");
+    }
+
+    #[tokio::test]
+    async fn file_delete() {
+        let (exec, dir) = test_executor();
+        let file_path = dir.path().join("to_delete.txt");
+        std::fs::write(&file_path, "temp").unwrap();
+
+        let cmd = Command::new("main", CommandOp::FileDelete {
+            path: file_path.to_string_lossy().to_string(),
+        });
+        let result = exec.execute(cmd).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn file_read_nonexistent() {
+        let (exec, _dir) = test_executor();
+        let cmd = Command::new("main", CommandOp::FileRead {
+            path: "/nonexistent/path/file.txt".into(),
+        });
+        let result = exec.execute(cmd).await;
+        assert_eq!(result.status, CommandStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn shell_exec_simple() {
+        let (exec, _dir) = test_executor();
+        let cmd = Command::new("main", CommandOp::ShellExec {
+            command: "echo hello".into(),
+            workdir: None,
+            timeout_ms: Some(5000),
+        });
+        let result = exec.execute(cmd).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        let stdout = result.data.as_ref().unwrap()["stdout"].as_str().unwrap();
+        assert!(stdout.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn shell_exec_failure() {
+        let (exec, _dir) = test_executor();
+        let cmd = Command::new("main", CommandOp::ShellExec {
+            command: "exit 1".into(),
+            workdir: None,
+            timeout_ms: None,
+        });
+        let result = exec.execute(cmd).await;
+        assert_eq!(result.status, CommandStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn file_ops_audited() {
+        let (exec, dir) = test_executor();
+        let file_path = dir.path().join("audit_test.txt");
+
+        exec.execute(Command::new("main", CommandOp::FileWrite {
+            path: file_path.to_string_lossy().to_string(),
+            content: "audit me".into(),
+        })).await;
+
+        exec.execute(Command::new("main", CommandOp::FileRead {
+            path: file_path.to_string_lossy().to_string(),
+        })).await;
+
+        let entries = exec.audit.entries();
+        assert_eq!(entries.len(), 2, "both file ops should be audited");
     }
 }

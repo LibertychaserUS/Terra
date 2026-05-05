@@ -53,6 +53,25 @@ pub enum CommandOp {
         max_tokens: Option<u32>,
         temperature: Option<f32>,
     },
+    /// Read a file from the filesystem.
+    FileRead {
+        path: String,
+    },
+    /// Write content to a file. Creates or overwrites.
+    FileWrite {
+        path: String,
+        content: String,
+    },
+    /// Delete a file.
+    FileDelete {
+        path: String,
+    },
+    /// Execute a shell command.
+    ShellExec {
+        command: String,
+        workdir: Option<String>,
+        timeout_ms: Option<u64>,
+    },
 }
 
 /// Result of executing a command.

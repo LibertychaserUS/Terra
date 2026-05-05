@@ -114,6 +114,15 @@ impl Cage for ActionCage {
                 Ok(()) => CageCheckResult::Pass,
                 Err(e) => CageCheckResult::Block(e.to_string()),
             },
+            CageAction::ShellExec { command } => {
+                // Block dangerous patterns
+                let lower = command.to_lowercase();
+                if lower.contains("rm -rf /") || lower.contains("mkfs") || lower.contains("> /dev/") {
+                    CageCheckResult::Block(format!("destructive shell command blocked: {}", command))
+                } else {
+                    CageCheckResult::Warn(format!("shell execution: {}", command))
+                }
+            }
             _ => CageCheckResult::Pass,
         }
     }

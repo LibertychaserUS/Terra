@@ -74,6 +74,8 @@ pub enum CageAction {
     ClaimComplete { verified: bool },
     /// Agent attempts to modify a protected rule.
     ModifyRule { rule_name: String },
+    /// Agent wants to execute a shell command.
+    ShellExec { command: String },
     /// Agent wants to continue exploring after path was accepted.
     ExploreAfterAccepted { path_id: String },
     /// Agent makes a knowledge claim. Authority ranking determines trust.
