@@ -146,4 +146,84 @@ mod tests {
         assert!(md.contains("Terra Audit Log"));
         assert!(md.contains("MVP1 complete"));
     }
+
+    // T-TR-006: empty log renders valid markdown
+    #[test]
+    fn empty_log_renders() {
+        let log = AuditLog::new();
+        let md = log.render_markdown();
+        assert!(md.contains("Terra Audit Log"));
+    }
+
+    // T-TR-007: result for unknown seq doesn't panic
+    #[test]
+    fn unknown_seq_ignored() {
+        let log = AuditLog::new();
+        log.record_result(999, CommandResult::ok("x", None), 0);
+        assert_eq!(log.len(), 0);
+    }
+
+    // T-TR-008: concurrent writes from 10 threads
+    #[test]
+    fn concurrent_recording_safe() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let log = Arc::new(AuditLog::new());
+        let mut handles = Vec::new();
+
+        for thread_id in 0..10 {
+            let log = Arc::clone(&log);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    let cmd = Command::new(
+                        &format!("agent-{}", thread_id),
+                        CommandOp::MemRead {
+                            key: format!("key-{}-{}", thread_id, i),
+                        },
+                    );
+                    log.record_command(cmd);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // 10 threads × 100 commands = 1000 entries
+        assert_eq!(log.len(), 1000);
+
+        // Verify no gaps in sequence numbers
+        let entries = log.entries();
+        let mut seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
+        seqs.sort();
+        for (i, seq) in seqs.iter().enumerate() {
+            assert_eq!(*seq, (i + 1) as u64, "gap at position {}", i);
+        }
+    }
+
+    // T-TR-009: large log performance
+    #[test]
+    fn large_log_performance() {
+        let log = AuditLog::new();
+        let start = std::time::Instant::now();
+
+        for i in 0..10_000 {
+            let cmd = Command::new(
+                "main",
+                CommandOp::MemRead { key: format!("key-{}", i) },
+            );
+            log.record_command(cmd);
+        }
+
+        let elapsed = start.elapsed();
+        assert_eq!(log.len(), 10_000);
+        // Should complete well under 1 second
+        assert!(
+            elapsed.as_secs() < 2,
+            "10K entries took {:?}, expected < 2s",
+            elapsed
+        );
+    }
 }
