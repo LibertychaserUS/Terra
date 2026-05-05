@@ -8,7 +8,7 @@ use uuid::Uuid;
 ///
 /// All downstream operations (Plan, Code, Test) consume this
 /// shared representation, ensuring terminology consistency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpecIR {
     pub spec_id: String,
     pub intent: String,
@@ -20,7 +20,7 @@ pub struct SpecIR {
 }
 
 /// The target of an operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Target {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -34,7 +34,7 @@ pub struct Target {
 }
 
 /// A mapping from user terminology to normalized terminology.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TermMapping {
     pub user_term: String,
     pub normalized: String,

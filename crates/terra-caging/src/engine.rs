@@ -19,6 +19,10 @@ impl Cage for SpecificationCage {
         }
         CageCheckResult::Pass
     }
+
+    fn goal_only(&self) -> bool {
+        true
+    }
 }
 
 /// Memory Cage — enforces ownership rules on memory writes.
@@ -95,6 +99,10 @@ impl Cage for VerificationCage {
         }
         CageCheckResult::Pass
     }
+
+    fn goal_only(&self) -> bool {
+        true
+    }
 }
 
 /// Convergence Cage — stops exploration after an accepted path exists.
@@ -117,6 +125,10 @@ impl Cage for ConvergenceCage {
             ));
         }
         CageCheckResult::Pass
+    }
+
+    fn goal_only(&self) -> bool {
+        true
     }
 }
 
@@ -203,10 +215,16 @@ impl CagingEngine {
     }
 
     /// Run all cages against the given context.
+    /// Goal-only cages are skipped when context.goal_mode is false.
     pub fn check(&self, context: &CageContext) -> CagingResult {
         let mut warnings = Vec::new();
 
         for cage in &self.cages {
+            // Skip goal-only cages in Conversation Mode
+            if cage.goal_only() && !context.goal_mode {
+                continue;
+            }
+
             match cage.check(context) {
                 CageCheckResult::Pass => {}
                 CageCheckResult::Warn(msg) => {
@@ -259,6 +277,7 @@ mod tests {
         let ctx = CageContext {
             agent: "main".into(),
             action: CageAction::ExecuteTask { spec_complete: true },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(result.allowed);
@@ -271,6 +290,7 @@ mod tests {
         let ctx = CageContext {
             agent: "main".into(),
             action: CageAction::ExecuteTask { spec_complete: false },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -287,6 +307,7 @@ mod tests {
                 key: "key1".into(),
                 owner: "main".into(),
             },
+            goal_mode: true,
         };
         assert!(engine.check(&ctx).allowed);
     }
@@ -301,6 +322,7 @@ mod tests {
                 key: "key1".into(),
                 owner: "main".into(),
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -316,6 +338,7 @@ mod tests {
             action: CageAction::FileRead {
                 path: PathBuf::from("/projects/myapp/src/main.rs"),
             },
+            goal_mode: true,
         };
         assert!(engine.check(&ctx).allowed);
     }
@@ -327,6 +350,7 @@ mod tests {
         let ctx = CageContext {
             agent: "main".into(),
             action: CageAction::ClaimComplete { verified: false },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -340,6 +364,7 @@ mod tests {
         let ctx = CageContext {
             agent: "main".into(),
             action: CageAction::ClaimComplete { verified: true },
+            goal_mode: true,
         };
         assert!(engine.check(&ctx).allowed);
     }
@@ -353,6 +378,7 @@ mod tests {
             action: CageAction::ModifyRule {
                 rule_name: "constitution.article_1".into(),
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -368,6 +394,7 @@ mod tests {
             action: CageAction::ModifyRule {
                 rule_name: "sandbox.root".into(),
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -382,6 +409,7 @@ mod tests {
             action: CageAction::FileWrite {
                 path: PathBuf::from("/etc/passwd"),
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -396,6 +424,7 @@ mod tests {
             action: CageAction::FileWrite {
                 path: PathBuf::from("/projects/myapp/.terra/constitution.toml"),
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -422,6 +451,7 @@ mod tests {
         let ctx = CageContext {
             agent: "main".into(),
             action: CageAction::ExecuteTask { spec_complete: true },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(result.allowed, "warn should not block");
@@ -438,6 +468,7 @@ mod tests {
         let ctx = CageContext {
             agent: "worker".into(),
             action: CageAction::ExecuteTask { spec_complete: false },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -453,6 +484,7 @@ mod tests {
             action: CageAction::ExploreAfterAccepted {
                 path_id: "solution_v2".into(),
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         // Convergence cage warns, does not block
@@ -473,6 +505,7 @@ mod tests {
                 source: KnowledgeSource::Assumption,
                 contradicted_by_higher: true,
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(!result.allowed);
@@ -489,6 +522,7 @@ mod tests {
                 source: KnowledgeSource::Assumption,
                 contradicted_by_higher: false,
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(result.allowed, "uncontradicted assumption should pass with warning");
@@ -505,6 +539,7 @@ mod tests {
                 source: KnowledgeSource::Code,
                 contradicted_by_higher: false,
             },
+            goal_mode: true,
         };
         let result = engine.check(&ctx);
         assert!(result.allowed);
@@ -517,5 +552,57 @@ mod tests {
         assert!(KnowledgeSource::Assumption < KnowledgeSource::Memory);
         assert!(KnowledgeSource::Memory < KnowledgeSource::Documentation);
         assert!(KnowledgeSource::Documentation < KnowledgeSource::Code);
+    }
+
+    // T-DM-004: goal_mode_cages_active
+    #[test]
+    fn goal_mode_cages_active() {
+        let engine = test_engine();
+        // In Goal Mode, SpecificationCage blocks incomplete specs
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::ExecuteTask { spec_complete: false },
+            goal_mode: true,
+        };
+        let result = engine.check(&ctx);
+        assert!(!result.allowed, "spec cage should block in goal mode");
+        assert_eq!(result.block.as_ref().unwrap().0, "specification");
+    }
+
+    // T-DM-005: conversation_cages_minimal
+    #[test]
+    fn conversation_cages_minimal() {
+        let engine = test_engine();
+        // In Conversation Mode, SpecificationCage is skipped
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::ExecuteTask { spec_complete: false },
+            goal_mode: false,
+        };
+        let result = engine.check(&ctx);
+        assert!(result.allowed, "spec cage should be skipped in conversation mode");
+    }
+
+    // T-DM-006: conversation_no_spec_required
+    #[test]
+    fn conversation_no_spec_required() {
+        let engine = test_engine();
+        // VerificationCage also skipped in Conversation Mode
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::ClaimComplete { verified: false },
+            goal_mode: false,
+        };
+        let result = engine.check(&ctx);
+        assert!(result.allowed, "verification cage should be skipped in conversation mode");
+
+        // But always-on cages still work
+        let ctx_meta = CageContext {
+            agent: "main".into(),
+            action: CageAction::ModifyRule { rule_name: "test".into() },
+            goal_mode: false,
+        };
+        let result_meta = engine.check(&ctx_meta);
+        assert!(!result_meta.allowed, "meta cage should still block in conversation mode");
     }
 }

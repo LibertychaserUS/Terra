@@ -80,12 +80,14 @@ fn full_caging_chain() {
     let ctx = CageContext {
         agent: "main".into(),
         action: CageAction::ExecuteTask { spec_complete: true },
+        goal_mode: true,
     };
     assert!(engine.check(&ctx).allowed);
 
     let bad_ctx = CageContext {
         agent: "main".into(),
         action: CageAction::ExecuteTask { spec_complete: false },
+        goal_mode: true,
     };
     assert!(!engine.check(&bad_ctx).allowed);
 }

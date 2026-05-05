@@ -154,6 +154,7 @@ impl CommandExecutor {
         CageContext {
             agent: agent.to_string(),
             action,
+            goal_mode: true, // TODO: receive mode from session manager
         }
     }
 }

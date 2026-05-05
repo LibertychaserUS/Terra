@@ -30,6 +30,12 @@ pub trait Cage: Send + Sync {
 
     /// Check whether the given action is allowed.
     fn check(&self, context: &CageContext) -> CageCheckResult;
+
+    /// Whether this cage only activates in Goal Mode.
+    /// Default: false (always active).
+    fn goal_only(&self) -> bool {
+        false
+    }
 }
 
 /// Context passed to cage checks.
@@ -39,6 +45,9 @@ pub trait Cage: Send + Sync {
 pub struct CageContext {
     pub agent: String,
     pub action: CageAction,
+    /// Whether the session is in Goal Mode.
+    /// Goal-only cages skip when this is false.
+    pub goal_mode: bool,
 }
 
 /// The action being checked by the caging engine.

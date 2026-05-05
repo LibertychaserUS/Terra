@@ -18,4 +18,4 @@ pub mod session;
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
 pub use dispatch::{ModelDispatcher, ModelCapability, DispatchParams};
-pub use session::SessionManager;
+pub use session::{SessionManager, SessionMode, SessionStatus};
