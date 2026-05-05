@@ -151,6 +151,91 @@ fn walk_dir(root: &Path, dir: &Path, ignore: &[&str], entries: &mut Vec<FileEntr
     }
 }
 
+// --- Git Integration ---
+
+/// Git status information.
+#[derive(Debug, Clone)]
+pub struct GitInfo {
+    pub is_repo: bool,
+    pub branch: String,
+    pub has_changes: bool,
+    pub changed_files: usize,
+}
+
+/// Detect git repository info.
+pub fn detect_git(root: &Path) -> GitInfo {
+    if !root.join(".git").exists() {
+        return GitInfo { is_repo: false, branch: String::new(), has_changes: false, changed_files: 0 };
+    }
+
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
+        .unwrap_or_else(|| "unknown".into());
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(root)
+        .output()
+        .ok();
+
+    let (has_changes, changed_files) = status
+        .map(|o| {
+            let lines: Vec<&str> = std::str::from_utf8(&o.stdout).unwrap_or("").lines().filter(|l| !l.is_empty()).collect();
+            (!lines.is_empty(), lines.len())
+        })
+        .unwrap_or((false, 0));
+
+    GitInfo { is_repo: true, branch, has_changes, changed_files }
+}
+
+/// Get a diff summary for a specific file.
+pub fn git_diff_file(root: &Path, file_path: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--stat", file_path])
+        .current_dir(root)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let diff = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if diff.is_empty() { None } else { Some(diff) }
+    } else {
+        None
+    }
+}
+
+/// Stage files and create a commit with the given message.
+pub fn git_commit(root: &Path, files: &[&str], message: &str) -> Result<String, String> {
+    // Stage files
+    for file in files {
+        let result = std::process::Command::new("git")
+            .args(["add", file])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("git add failed: {}", e))?;
+        if !result.status.success() {
+            return Err(format!("git add {} failed: {}", file, String::from_utf8_lossy(&result.stderr)));
+        }
+    }
+
+    // Commit
+    let result = std::process::Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git commit failed: {}", e))?;
+
+    if result.status.success() {
+        Ok(String::from_utf8_lossy(&result.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&result.stderr).trim().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +296,22 @@ mod tests {
         let ctx = ProjectContext::scan(dir.path());
         let has_terra = ctx.files.iter().any(|f| f.path.contains(".terra"));
         assert!(!has_terra, "should not include .terra/");
+    }
+
+    // T-GIT-001: git repo detected
+    #[test]
+    fn git_repo_detected() {
+        // Use the actual Terra project root (which is a git repo)
+        let terra_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let info = detect_git(terra_root);
+        assert!(info.is_repo, "Terra project should be a git repo");
+        assert!(!info.branch.is_empty(), "should have a branch name");
+    }
+
+    #[test]
+    fn non_git_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = detect_git(dir.path());
+        assert!(!info.is_repo);
     }
 }

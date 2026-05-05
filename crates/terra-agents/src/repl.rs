@@ -276,6 +276,59 @@ impl Repl {
                     self.prompt(),
                 ]
             }
+            "/commit" => {
+                let project_root = std::env::current_dir().unwrap_or_default();
+                let git_info = crate::codebase::detect_git(&project_root);
+                if !git_info.is_repo {
+                    return vec![
+                        ReplOutput::Text("Not a git repository.".into()),
+                        self.prompt(),
+                    ];
+                }
+                if !git_info.has_changes {
+                    return vec![
+                        ReplOutput::Text("No changes to commit.".into()),
+                        self.prompt(),
+                    ];
+                }
+                // Ask LLM for commit message
+                let diff_cmd = Command::new("main", CommandOp::ShellExec {
+                    command: "git diff --stat".into(),
+                    workdir: Some(project_root.to_string_lossy().to_string()),
+                    timeout_ms: Some(5000),
+                });
+                let diff_result = self.executor.execute(diff_cmd).await;
+                let diff_text = diff_result.data.as_ref()
+                    .and_then(|d| d.get("stdout"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("(no diff)");
+
+                let msg_cmd = Command::new("main", CommandOp::ProviderCall {
+                    system_prompt: "Generate a concise git commit message (1-2 lines) for these changes. Output ONLY the message.".into(),
+                    user_prompt: format!("Changes:\n{}", diff_text),
+                    max_tokens: Some(100),
+                    temperature: Some(0.0),
+                    output_contract: None,
+                });
+                let msg_result = self.executor.execute(msg_cmd).await;
+                let commit_msg = msg_result.data.as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("Terra: auto-commit");
+
+                // Stage all + commit
+                match crate::codebase::git_commit(&project_root, &["."], commit_msg) {
+                    Ok(output) => vec![
+                        ReplOutput::Notification(format!("  ✓ Committed: {}", commit_msg.lines().next().unwrap_or(commit_msg))),
+                        ReplOutput::Text(output),
+                        self.prompt(),
+                    ],
+                    Err(e) => vec![
+                        ReplOutput::Text(format!("Commit failed: {}", e)),
+                        self.prompt(),
+                    ],
+                }
+            }
             "/plan" => {
                 // Show current plan if in Goal Mode
                 if !self.session.mode().is_goal() {
@@ -324,6 +377,7 @@ impl Repl {
                     ReplOutput::Text("  /remember \"x\" — Save to L1 memory".into()),
                     ReplOutput::Text("  /sleep         — Manual sleep consolidation".into()),
                     ReplOutput::Text("  /trace         — View audit trail".into()),
+                    ReplOutput::Text("  /commit        — Stage + commit with LLM message".into()),
                     ReplOutput::Text("  /plan          — Show/propose execution plan".into()),
                     ReplOutput::Text("  /compact       — Compact context (free memory)".into()),
                     ReplOutput::Text("  /clear         — Clear screen and context".into()),
