@@ -1,1332 +1,600 @@
 # Terra Technical Design Document
 
-> Document ID: TERRA-TDD-001
-> Version: 1.0.0
-> Status: DRAFT
-> Date: 2026-05-20
+> Document ID: TERRA-TDD-002
+> Version: 2.0.0
+> Status: APPROVED
+> Date: 2026-05-21
 > Author: Oliver Zhang, Claude (Anthropic)
-> Classification: Public
 >
-> This document follows the structure of POSIX interface documentation
-> and Linux kernel module specifications. Each module is described with:
-> PURPOSE, INTERFACE, BEHAVIOR, ERROR CONDITIONS, and TEST CASES.
->
-> RFC 2119 keywords (MUST, SHALL, SHOULD, MAY) apply as defined
-> in the companion PRD (TERRA-PRS-001).
+> POSIX-style module specs. RFC 2119 keywords.
+> All tests verify BEHAVIOR, not just field existence.
+> No MVP simplification — complete specification.
 
 ---
 
-## Table of Contents
+## 1. Architecture
 
-1. System Architecture
-2. Module Specifications
-3. Test Specification
-4. Data Schemas
-5. Error Taxonomy
-6. Performance Contracts
-7. Migration and Versioning
-
----
-
-## 1. System Architecture
-
-### 1.1 OS Layer Mapping
+### 1.1 Layer Model
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Layer 6: Shell                                               │
-│   terra-cli — user-facing CLI, config management             │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 5: Application Services                                │
-│   terra-agents — orchestrator, worker, explorer, cage agent  │
-│   terra-compile — language compilation, Spec IR              │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 4: Kernel Services                                     │
-│   terra-caging — 8 cages, SandboxGuard                       │
-│   terra-core — Intelligence Core, domain modules             │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 3: Syscall Interface                                   │
-│   terra-protocol — Command Protocol, MessagePack codec       │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 2: Subsystems                                          │
-│   terra-memory — Memory Database, cache, vector index        │
-│   terra-trace — audit log, checkpoints                       │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 1: Drivers                                             │
-│   terra-providers — LLM adapters, capability detection       │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 0: Hardware Abstraction                                │
-│   SQLite, FAISS/usearch, moka, ONNX Runtime, file system     │
-└─────────────────────────────────────────────────────────────┘
+L6 Shell:        terra-cli (CLI, config)
+L5 Application:  terra-agents (orchestrator, worker, explorer, cage)
+                 terra-compile (language compilation, Spec IR)
+L4 Kernel:       terra-caging (8 cages, SandboxGuard)
+                 terra-core (Intelligence Core, domain modules)
+L3 Syscall:      terra-protocol (Command Protocol, MessagePack codec)
+L2 Subsystems:   terra-memory (Memory Database, cache, vector index)
+                 terra-trace (audit log, checkpoints)
+L1 Drivers:      terra-providers (LLM adapters)
+L0 Hardware:     SQLite, FAISS/usearch, moka, ONNX Runtime, fs
 ```
 
-**Dependency Rule:** Higher layers MAY depend on lower layers.
-Lower layers MUST NOT depend on higher layers. Circular
-dependencies are forbidden.
+**Dependency Rule:** Higher MAY depend on lower. Lower MUST NOT depend on higher.
 
-### 1.2 Crate Dependency Graph
+**Critical Constraint (from audit):** L5 (terra-agents) MUST NOT import L2 (terra-memory) or L1 (terra-providers) directly. All operations go through L3 (terra-protocol) Command Executor.
 
-```
-terra-cli
-  └── terra-agents
-        ├── terra-core
-        ├── terra-compile
-        ├── terra-providers
-        ├── terra-caging
-        │     ├── terra-core
-        │     └── terra-protocol
-        ├── terra-memory
-        │     └── terra-protocol
-        ├── terra-trace
-        │     └── terra-protocol
-        └── terra-protocol
-```
+### 1.2 Technology Stack
 
-### 1.3 Technology Stack
-
-| Component | Crate | Version | Purpose |
-|-----------|-------|---------|---------|
-| Async runtime | tokio | 1.x | Multi-agent concurrency |
-| Serialization | serde + rmp-serde | 1.x | MessagePack codec |
-| Database | rusqlite | 0.32+ | SQLite with WAL |
-| Cache | moka | 0.12+ | Concurrent TTL/TTI cache |
-| Vector search | usearch or faiss-rs | latest | Embedding retrieval |
-| LLM SDK | async-openai | 0.27+ | OpenAI-compatible dispatch |
-| CLI | clap | 4.x | Derive-based arg parsing |
-| Logging | tracing | 0.1.x | Structured logging |
-| Errors | anyhow + thiserror | latest | Error handling |
-| Embedding | ort | latest | ONNX Runtime for local models |
-| HTTP | reqwest | 0.12+ | Provider communication |
+| Component | Crate | Purpose |
+|-----------|-------|---------|
+| Async | tokio | Multi-agent concurrency |
+| Serialization | serde + rmp-serde | MessagePack |
+| Database | rusqlite | SQLite WAL |
+| Cache | moka | Concurrent TTL/TTI |
+| Vector | usearch or faiss-rs | Embedding retrieval |
+| LLM | async-openai | Provider dispatch |
+| CLI | clap | Arg parsing |
+| Logging | tracing | Structured logging |
+| Errors | anyhow + thiserror | Error handling |
+| Embedding | ort | ONNX Runtime |
+| HTTP | reqwest | Provider calls |
 
 ---
 
 ## 2. Module Specifications
 
-### 2.1 terra-protocol
+### 2.1 Command Executor (NEW — was completely missing)
 
-#### 2.1.1 PURPOSE
+#### PURPOSE
+Single gateway for all agent-system interactions. Enforces audit + caging + routing.
 
-Defines the communication protocol between all Terra components:
-agent-to-agent messages, agent-to-system commands, and the
-serialization/rendering layers.
-
-#### 2.1.2 INTERFACE
-
+#### INTERFACE
 ```rust
-// --- Messages ---
-
-pub struct AgentMessage {
-    pub id: String,           // UUID v4
-    pub from: AgentRole,      // Main | Worker | Explorer | Cage
-    pub to: AgentRole,
-    pub kind: MessageKind,    // TaskAssignment | TaskResult | CageReport
-    pub timestamp: DateTime<Utc>,
-    pub payload: MessagePayload,
+pub struct CommandExecutor {
+    memory: MemoryDatabase,
+    artifacts: ArtifactStore,
+    audit: PersistentAuditLog,
+    caging: CagingEngine,
+    sandbox: SandboxGuard,
 }
 
-impl AgentMessage {
-    pub fn task_assignment(to: AgentRole, payload: TaskPayload) -> Self;
-    pub fn task_result(from: AgentRole, payload: ResultPayload) -> Self;
+impl CommandExecutor {
+    pub async fn execute(&self, cmd: Command, agent: &str) -> CommandResult;
 }
-
-// --- Commands ---
-
-pub struct Command {
-    pub id: String,           // UUID v4
-    pub agent: String,        // agent identifier
-    pub timestamp: DateTime<Utc>,
-    pub op: CommandOp,        // one of ~15 variants
-}
-
-pub struct CommandResult {
-    pub command_id: String,
-    pub status: CommandStatus, // Ok | NotFound | PermissionDenied | Error
-    pub data: Option<Value>,
-    pub error: Option<String>,
-}
-
-// --- Codec ---
-
-pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>>;
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T>;
-
-// --- Render ---
-
-pub fn render_message(msg: &AgentMessage) -> String;  // → Markdown
-pub fn render_command(cmd: &Command) -> String;        // → Markdown
 ```
 
-#### 2.1.3 BEHAVIOR
+#### BEHAVIOR
+```
+execute(cmd, agent):
+  1. seq = audit.record_command(cmd)
+  2. cage_result = caging.check(cmd_to_cage_context(cmd, agent))
+  3. IF cage_result.is_blocked():
+       audit.record_result(seq, PermissionDenied, 0)
+       RETURN CommandResult::blocked(cage_result.reason)
+  4. result = route_and_execute(cmd)
+  5. audit.record_result(seq, result, elapsed)
+  6. RETURN result
+```
 
-- `encode` uses `rmp_serde::to_vec_named` (named fields for Option compatibility).
-- `decode` uses `rmp_serde::from_slice`.
-- All IDs are UUID v4, generated at creation time.
-- Timestamps are UTC, generated at creation time.
-- `render_*` functions produce deterministic Markdown output.
-  No LLM involvement. No side effects.
-
-#### 2.1.4 ERROR CONDITIONS
-
-| Error | Condition | Response |
-|-------|-----------|----------|
-| `SerializationError` | Value cannot be serialized to MessagePack | Return `Err` |
-| `DeserializationError` | Bytes are not valid MessagePack or wrong schema | Return `Err` |
-
-No panics. No `.unwrap()`.
+#### ERROR CONDITIONS
+| Error | Condition |
+|-------|-----------|
+| PermissionDenied | Cage blocked the action |
+| NotFound | Memory key doesn't exist |
+| ExecutionError | Backend operation failed |
 
 ---
 
-### 2.2 terra-compile
+### 2.2 Orchestrator (REWRITTEN — must use pipeline)
 
-#### 2.2.1 PURPOSE
+#### PURPOSE
+Main Agent orchestration through the canonical pipeline.
 
-Transforms user natural language into a standardized Spec IR
-(Specification Intermediate Representation).
-
-#### 2.2.2 INTERFACE
-
-```rust
-pub struct SpecIR {
-    pub spec_id: String,              // UUID v4
-    pub intent: String,               // normalized task intent
-    pub target: Target,               // what to operate on
-    pub constraints: Vec<String>,     // rules the agent must follow
-    pub success_predicate: Vec<String>, // how to verify success
-    pub open_questions: Vec<String>,  // unresolved ambiguities
-    pub resolved_terms: Vec<TermMapping>, // user term → normalized
-}
-
-pub struct Target {
-    pub file: Option<String>,
-    pub line: Option<u32>,
-    pub function: Option<String>,
-    pub component: Option<String>,
-    pub scope: String,
-}
-
-impl SpecIR {
-    pub fn from_task_description(description: &str) -> Self;
-    pub fn is_complete(&self) -> bool;
-}
-```
-
-#### 2.2.3 BEHAVIOR
-
-- `from_task_description`: MVP creates a minimal SpecIR with the
-  description as intent, no target resolution, one open question.
-- `is_complete`: returns `true` iff `open_questions.is_empty()`.
-- All string fields accept UTF-8 (including CJK, emoji).
-- Empty description is valid (produces SpecIR with empty intent).
-
-#### 2.2.4 PRECONDITIONS
-
-None. This function is infallible.
-
-#### 2.2.5 POSTCONDITIONS
-
-- `spec_id` is a valid UUID v4 string.
-- `intent == description` (in MVP; future: normalized).
-- `open_questions.len() >= 1` (in MVP, always incomplete).
-
----
-
-### 2.3 terra-providers
-
-#### 2.3.1 PURPOSE
-
-Abstracts LLM providers behind a common trait, supporting
-dispatch with retry and capability detection.
-
-#### 2.3.2 INTERFACE
-
-```rust
-#[async_trait]
-pub trait ProviderAdapter: Send + Sync {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse>;
-    fn capabilities(&self) -> &ProviderCapability;
-}
-
-pub struct CompletionRequest {
-    pub system_prompt: String,
-    pub user_prompt: String,
-    pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
-}
-
-pub struct CompletionResponse {
-    pub content: String,
-    pub usage_prompt_tokens: u32,
-    pub usage_completion_tokens: u32,
-    pub model: String,
-}
-
-pub async fn dispatch(
-    adapter: &dyn ProviderAdapter,
-    request: CompletionRequest,
-    mode: DispatchMode,  // DryRun | Live
-) -> Result<DispatchResult>;
-```
-
-#### 2.3.3 IMPLEMENTATIONS
-
-**DryRunAdapter:**
-- Returns `"DRY_RUN response to: {first 100 chars of user_prompt}"`.
-- Usage is always 0/0.
-- No network calls. No API key required.
-- Capabilities: structured_output=true, streaming=false, latency=Fast.
-
-**OpenAICompatibleAdapter (MVP2):**
-- Reads `TERRA_PROVIDER_API_KEY` from env.
-- Reads `TERRA_PROVIDER_BASE_URL` from env (default: `https://api.openai.com/v1`).
-- Calls `/v1/chat/completions` via `async-openai` crate.
-- Retry: 3 attempts, exponential backoff (1s, 2s, 4s), on HTTP 429/500/502/503.
-- Timeout: 60 seconds per request.
-
-#### 2.3.4 ERROR CONDITIONS
-
-| Error | Condition | Response |
-|-------|-----------|----------|
-| `ProviderError::MissingApiKey` | TERRA_PROVIDER_API_KEY not set in Live mode | Return `Err` |
-| `ProviderError::NetworkError` | Connection failed after retries | Return `Err` |
-| `ProviderError::RateLimit` | 429 after all retries exhausted | Return `Err` |
-| `ProviderError::Timeout` | Request exceeded 60s | Return `Err` |
-| `ProviderError::InvalidResponse` | Response body unparseable | Return `Err` |
-
----
-
-### 2.4 terra-memory
-
-#### 2.4.1 PURPOSE
-
-Rust-safe Memory Database. Manages scoped, leveled memory
-with ownership, borrowing, lifetime, cache, and vector retrieval.
-
-#### 2.4.2 INTERFACE
-
-```rust
-pub struct MemoryDatabase {
-    // Internal: SQLite + moka + optional vector index
-}
-
-impl MemoryDatabase {
-    pub async fn new(db_path: &Path) -> Result<Self>;
-    pub async fn write(&self, entry: MemoryEntry) -> Result<()>;
-    pub async fn read(&self, key: &str) -> Result<Option<MemoryEntry>>;
-    pub async fn update(&self, key: &str, content: Vec<u8>, agent: &str) -> Result<()>;
-    pub async fn delete(&self, key: &str, agent: &str) -> Result<()>;
-    pub async fn promote(&self, key: &str, target_level: Level) -> Result<()>;
-    pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryEntry>>;
-    pub async fn gc(&self) -> Result<GcReport>;
-}
-
-pub struct MemoryEntry {
-    pub id: String,
-    pub key: String,
-    pub scope: Scope,       // Global | Project | Session | Task
-    pub level: Level,       // L0..L6
-    pub owner: String,
-    pub content: Vec<u8>,   // MessagePack blob
-    pub version: u64,
-    pub ref_count: u64,
-    pub alive: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-```
-
-#### 2.4.3 STORAGE ARCHITECTURE
-
-```
-Query path (read):
-  Bloom Filter (ns) → moka cache (ns) → Project SQLite (ms) → Global SQLite (ms)
-
-Write path:
-  Validate ownership → moka cache (sync) → SQLite (write-through for L0-L1, write-back for L2+)
-
-Startup:
-  Open/create SQLite → create tables if needed → PRAGMA journal_mode=WAL
-  → build Bloom Filter from all keys → warm moka cache with recent entries
-```
-
-#### 2.4.4 SCHEMA (SQLite)
-
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA user_version = 1;  -- schema version for migration
-
-CREATE TABLE IF NOT EXISTS memories (
-    id          TEXT PRIMARY KEY,
-    key         TEXT NOT NULL UNIQUE,
-    scope       TEXT NOT NULL CHECK (scope IN ('global','project','session','task')),
-    level       TEXT NOT NULL CHECK (level IN ('L0','L1','L2','L3','L4','L5','L6')),
-    owner       TEXT NOT NULL,
-    content     BLOB NOT NULL,
-    version     INTEGER NOT NULL DEFAULT 1,
-    ref_count   INTEGER NOT NULL DEFAULT 0,
-    alive       INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-    id          TEXT PRIMARY KEY,
-    type        TEXT NOT NULL CHECK (type IN ('plan','spec','test','review')),
-    version     INTEGER NOT NULL,
-    content     BLOB NOT NULL,
-    created_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp   TEXT NOT NULL,
-    agent       TEXT NOT NULL,
-    command     BLOB NOT NULL,
-    result      BLOB,
-    duration_us INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
-CREATE INDEX IF NOT EXISTS idx_memories_level ON memories(level);
-CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories(owner);
-CREATE INDEX IF NOT EXISTS idx_memories_alive ON memories(alive);
-```
-
-#### 2.4.5 ERROR CONDITIONS
-
-| Error | Condition | Response |
-|-------|-----------|----------|
-| `MemoryError::NotFound` | Key does not exist | Return `None` (read) or `Err` (update) |
-| `MemoryError::DuplicateKey` | Key already exists on write | Return `Err` |
-| `MemoryError::PermissionDenied` | Non-owner attempting write/delete | Return `Err` |
-| `MemoryError::Dangling` | Pointer to deleted (alive=false) entry | Return `Err` |
-| `MemoryError::Stale` | Version mismatch (optimistic lock) | Return `Err` |
-| `MemoryError::PromotionBlocked` | L6 promotion without review flag | Return `Err` |
-| `MemoryError::DatabaseError` | SQLite internal error | Return `Err` |
-
----
-
-### 2.5 terra-core
-
-#### 2.5.1 PURPOSE
-
-Intelligence Core — agent's built-in first principles.
-Provides universal reasoning/behavioral frameworks and
-domain module registry.
-
-#### 2.5.2 INTERFACE
-
-```rust
-pub struct IntelligenceCore {
-    universal: UniversalFramework,
-    modules: Vec<Box<dyn DomainModule>>,
-}
-
-pub trait DomainModule: Send + Sync {
-    fn name(&self) -> &str;
-    fn perspectives(&self) -> Vec<Perspective>;
-    fn rules(&self) -> Vec<Rule>;
-    fn verifiers(&self) -> Vec<Box<dyn Verifier>>;
-}
-
-pub struct Perspective {
-    pub name: String,
-    pub description: String,
-    pub query_template: String,  // template for generating search query
-}
-
-pub struct Rule {
-    pub id: String,
-    pub category: RuleCategory,  // Reasoning | Behavioral | Diagnostic
-    pub description: String,
-    pub severity: Severity,      // Must | Should | May
-}
-```
-
-#### 2.5.3 BEHAVIOR
-
-- Universal framework rules are loaded once at startup, immutable.
-- Domain modules are registered at startup from Skill manifests.
-- `perspectives()` collects perspectives from all registered modules.
-- `rules()` collects rules from all registered modules + universal.
-- Rules are checked by the Caging Engine, not by the Core itself.
-
----
-
-### 2.6 terra-caging
-
-#### 2.6.1 PURPOSE
-
-Implements Caging Engineering's 8 cages as runtime constraint checkers.
-
-#### 2.6.2 INTERFACE
-
-```rust
-pub trait Cage: Send + Sync {
-    fn name(&self) -> &str;
-    fn check(&self, state: &AgentState) -> CageCheckResult;
-}
-
-pub enum CageCheckResult {
-    Pass,
-    Warn(String),
-    Block(String),
-}
-
-pub struct SandboxGuard {
-    root: PathBuf,
-    protected: Vec<PathBuf>,
-}
-
-impl SandboxGuard {
-    pub fn new(root: PathBuf, protected: Vec<PathBuf>) -> Self;
-    pub fn check_write(&self, path: &Path) -> Result<(), SandboxViolation>;
-    pub fn check_read(&self, path: &Path) -> Result<(), SandboxViolation>;
-    pub fn check_delete(&self, path: &Path) -> Result<(), SandboxViolation>;
-}
-```
-
-#### 2.6.3 BEHAVIOR
-
-- Cages are checked in order: Spec → Knowledge → Memory → Action → Verify → Meta.
-- First `Block` result short-circuits: action is prevented.
-- `Warn` results are logged but do not prevent action.
-- SandboxGuard canonicalizes paths before comparison (resolves symlinks).
-
-#### 2.6.4 ERROR CONDITIONS
-
-| Error | Condition | Response |
-|-------|-----------|----------|
-| `SandboxViolation::OutsideSandbox` | Write/delete path outside root | Block + log |
-| `SandboxViolation::ProtectedPath` | Write to constitution/cage config | Block + log |
-| `CageViolation::IncompleteSpec` | Task execution with open questions | Block |
-| `CageViolation::NoVerification` | Completion claim without verification | Block |
-| `CageViolation::ConstitutionModified` | Attempt to modify constitution | Block |
-
----
-
-### 2.7 terra-agents
-
-#### 2.7.1 PURPOSE
-
-Multi-agent orchestrator: Main → Sub-agent dispatch → result audit.
-
-#### 2.7.2 INTERFACE
-
+#### INTERFACE
 ```rust
 pub struct Orchestrator {
+    executor: Arc<CommandExecutor>,
+    core: Arc<IntelligenceCore>,
     provider: Arc<dyn ProviderAdapter>,
-    audit_log: Arc<AuditLog>,
 }
 
 impl Orchestrator {
-    pub fn new(provider: Arc<dyn ProviderAdapter>, audit_log: Arc<AuditLog>) -> Self;
-    pub async fn run(&self, task_description: &str) -> Result<RunResult>;
-}
-
-pub struct RunResult {
-    pub spec: SpecIR,
-    pub worker_response: String,
-    pub dispatch_mode: DispatchMode,
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub audit_entry_count: usize,
+    pub async fn run(&self, task: &str) -> Result<RunResult>;
 }
 ```
 
-#### 2.7.3 PIPELINE
-
+#### BEHAVIOR
 ```
-1. task_description → SpecIR::from_task_description()
-2. Record trace_event("task_start")
-3. Create TaskPayload from SpecIR
-4. Record trace_event("worker_dispatch")
-5. Call provider.complete() via dispatch()
-6. Create ResultPayload from provider response
-7. Record trace_checkpoint("task_completed")
-8. Return RunResult
+run(task):
+  1. spec = compile(task)                    // Language Compilation
+  2. rules = core.applicable_rules(&spec)    // IC consultation
+  3. perspectives = core.all_perspectives()
+  4. cage_result = executor.execute(CageCheck(spec))  // Caging gate
+  5. IF blocked: RETURN error
+  6. memories = executor.execute(MemSearch(perspectives))  // Attention retrieval
+  7. prompt = build_prompt(spec, rules, memories)
+  8. response = executor.execute(ProviderCall(prompt))  // Through executor
+  9. executor.execute(TraceCheckpoint("completed"))
+  10. RETURN RunResult
+```
+
+**Critical difference from current code:** Steps 2, 3, 4, 6 are new. Step 8 goes through executor, not direct provider call.
+
+---
+
+### 2.3 Memory Database
+
+#### STORAGE ARCHITECTURE
+```
+Query:  Bloom Filter (ns) → moka cache (ns) → Project SQLite (ms) → Global SQLite (ms)
+Write:  Validate ownership → SQLite (truth) → cache update
+Startup: Open SQLite → WAL mode → build Bloom from keys → warm cache
+```
+
+#### SCHEMA
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA user_version = 2;
+
+CREATE TABLE memories (
+    id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL CHECK(scope IN ('global','project','session','task')),
+    level TEXT NOT NULL CHECK(level IN ('L0','L1','L2','L3','L4','L5','L6')),
+    owner TEXT NOT NULL, content BLOB NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    ref_count INTEGER NOT NULL DEFAULT 0,
+    alive INTEGER NOT NULL DEFAULT 1,
+    embedding BLOB,  -- 384-dim float32 vector (NEW)
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+
+CREATE TABLE artifacts (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL CHECK(type IN ('plan','spec','test','review')),
+    version INTEGER NOT NULL, content BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(type, version)
+);
+
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    project_root TEXT NOT NULL,
+    goal TEXT, status TEXT NOT NULL DEFAULT 'active',
+    started_at TEXT NOT NULL, ended_at TEXT
+);
+```
+
+#### VECTOR INDEX
+- Embedding model: all-MiniLM-L6-v2 (384-dim, ONNX)
+- Index: FAISS IndexFlatIP or usearch
+- Built from `memories.embedding` column on startup
+- Incremental: add/remove on write/delete
+- Re-index: full rebuild when embedding model changes
+
+#### ATTENTION RETRIEVAL
+```
+search(context, perspectives):
+  queries = [perspective.generate_query(context) for p in perspectives]
+  vectors = [embed(q) for q in queries]  // Multi-Head
+  results_per_head = [index.search(v, top_k) for v in vectors]
+  merged = deduplicate(flatten(results_per_head))
+  RETURN sorted_by_max_score(merged)
 ```
 
 ---
 
-### 2.8 terra-trace
+### 2.4 Caging Engine
 
-#### 2.8.1 PURPOSE
+#### 8 CAGES
+| Cage | Checks | Block Condition |
+|------|--------|-----------------|
+| Specification | SpecIR completeness | open_questions non-empty |
+| Knowledge | Authority ranking | Lower-authority source overriding higher |
+| Memory | Ownership + promotion | Non-owner write, backwards promotion |
+| Action | SandboxGuard | Write outside root or to protected |
+| Verification | External verifier | Completion without verification pass |
+| Convergence | Stop condition | Exploration after accepted path |
+| Parametric | L6 gate | Promote without review |
+| Meta | Constitution | Any cage/constitution rule modification |
 
-Audit trail: sequential command logging with replay capability.
-
-#### 2.8.2 INTERFACE
-
+#### SANDBOX
 ```rust
-pub struct AuditLog {
-    // Internal: Mutex<Vec<AuditEntry>> + atomic seq counter
-}
-
-impl AuditLog {
-    pub fn new() -> Self;
-    pub fn record_command(&self, command: Command) -> u64;  // returns seq
-    pub fn record_result(&self, seq: u64, result: CommandResult, duration_us: u64);
-    pub fn entries(&self) -> Vec<AuditEntry>;
-    pub fn len(&self) -> usize;
-    pub fn is_empty(&self) -> bool;
-    pub fn render_markdown(&self) -> String;
+impl SandboxGuard {
+    fn check_mutation(&self, path: &Path) -> Result<(), SandboxViolation> {
+        let canonical = path.canonicalize()?;  // Symlink escape prevention
+        if !canonical.starts_with(&self.root) { return Err(OutsideSandbox) }
+        for p in &self.protected { if canonical.starts_with(p) { return Err(ProtectedPath) } }
+        Ok(())
+    }
 }
 ```
 
-#### 2.8.3 BEHAVIOR
+---
 
-- Sequence numbers start at 1 and increment monotonically.
-- `record_result` attaches to existing entry by seq number.
-- Thread-safe via `Mutex`. Future: lock-free with crossbeam.
-- `render_markdown` produces a complete report of all entries.
+### 2.5 Session Manager (NEW)
+
+#### PURPOSE
+Manages session lifecycle: S2 scope creation, project switching, Sleep Consolidation.
+
+#### INTERFACE
+```rust
+pub struct SessionManager {
+    current_session: Option<Session>,
+    memory: Arc<MemoryDatabase>,
+}
+
+impl SessionManager {
+    pub fn start(&mut self, project_root: &Path, goal: &str) -> Result<Session>;
+    pub fn switch(&mut self, project_root: &Path) -> Result<Session>;
+    pub fn end(&mut self) -> Result<SleepConsolidationReport>;
+}
+```
+
+#### SLEEP CONSOLIDATION
+```
+end():
+  1. Collect all S3 (Task) entries from current session
+  2. For each accepted path (L3):
+     a. abstract: "added null check to auth.py:42" → "validate input boundaries at function entry"
+     b. create promotion candidate
+  3. Clean S3 entries (not promoted)
+  4. Generate SleepConsolidationReport with candidates
+  5. Present to user for accept/reject/defer
+  6. Promote accepted candidates to S1
+```
 
 ---
 
 ## 3. Test Specification
 
-### 3.1 Test Organization
-
-Tests are organized by crate and category. Each test has:
-- **ID**: unique identifier (T-XX-NNN)
-- **Precondition**: required state before execution
-- **Steps**: exact operations to perform
-- **Expected**: verifiable outcome
-- **Priority**: MUST (blocks release) | SHOULD (important) | MAY (nice to have)
-
-### 3.2 terra-protocol Tests (22 tests)
-
-**T-P-001: task_assignment_fields** [MUST]
-- Pre: None
-- Steps: Create AgentMessage::task_assignment(Worker, payload)
-- Expected: from=Main, to=Worker, kind=TaskAssignment, id is UUID, timestamp is UTC
-
-**T-P-002: task_result_success** [MUST]
-- Pre: None
-- Steps: Create AgentMessage::task_result(Worker, ResultPayload{status: Success})
-- Expected: from=Worker, to=Main, kind=TaskResult, status=Success
-
-**T-P-003: task_result_failure** [MUST]
-- Pre: None
-- Steps: Create result with status=Failed and error message
-- Expected: error field is Some(message)
-
-**T-P-004: message_id_unique** [MUST]
-- Pre: None
-- Steps: Create two messages
-- Expected: msg1.id != msg2.id
-
-**T-P-005: message_timestamp_utc** [MUST]
-- Pre: None
-- Steps: Create message, check timestamp
-- Expected: Timestamp within 1 second of Utc::now()
-
-**T-P-006: agent_role_serialization** [MUST]
-- Pre: None
-- Steps: Serialize/deserialize each AgentRole variant
-- Expected: All 4 variants round-trip correctly
-
-**T-P-007: msgpack_roundtrip_task_assignment** [MUST]
-- Pre: None
-- Steps: encode(task_msg) → bytes → decode(bytes)
-- Expected: All fields preserved
-
-**T-P-008: msgpack_roundtrip_task_result** [MUST]
-- Pre: None
-- Steps: encode(result_msg) → bytes → decode(bytes)
-- Expected: All fields preserved
-
-**T-P-009: msgpack_roundtrip_command** [MUST]
-- Pre: None
-- Steps: encode(command) → bytes → decode(bytes)
-- Expected: All fields preserved
-
-**T-P-010: msgpack_smaller_than_json** [MUST]
-- Pre: None
-- Steps: Serialize same message as MessagePack and JSON
-- Expected: msgpack_bytes.len() < json_bytes.len()
-
-**T-P-011: msgpack_optional_none** [MUST]
-- Pre: None
-- Steps: Encode message with all Optional fields set to None
-- Expected: Decode succeeds, Optional fields are None
-
-**T-P-012: decode_invalid_bytes** [MUST]
-- Pre: None
-- Steps: decode::<AgentMessage>(&[0xFF, 0xFE])
-- Expected: Returns Err (not panic)
-
-**T-P-013: command_mem_write** [MUST]
-- Pre: None
-- Steps: Create Command with MemWrite op
-- Expected: All MemWrite fields accessible
-
-**T-P-014: command_mem_read** [MUST]
-- Pre: None
-- Steps: Create Command with MemRead op
-- Expected: key field accessible
-
-**T-P-015: command_mem_search** [MUST]
-- Pre: None
-- Steps: Create Command with MemSearch op
-- Expected: query and top_k fields accessible
-
-**T-P-016: command_artifact_save** [MUST]
-- Pre: None
-- Steps: Create Command with ArtifactSave op
-- Expected: type and content fields accessible
-
-**T-P-017: command_trace_checkpoint** [MUST]
-- Pre: None
-- Steps: Create Command with TraceCheckpoint op
-- Expected: title and summary fields accessible
-
-**T-P-018: command_result_ok** [MUST]
-- Pre: None
-- Steps: CommandResult::ok("id", Some(data))
-- Expected: status=Ok, data=Some, error=None
-
-**T-P-019: command_result_error** [MUST]
-- Pre: None
-- Steps: CommandResult::err("id", "message")
-- Expected: status=Error, data=None, error=Some
-
-**T-P-020: render_message_contains_op** [MUST]
-- Pre: Task assignment message with op="fix_bug"
-- Steps: render_message(&msg)
-- Expected: Output contains "fix_bug"
-
-**T-P-021: render_command_contains_agent** [MUST]
-- Pre: Command from agent "main"
-- Steps: render_command(&cmd)
-- Expected: Output contains "main"
-
-**T-P-022: render_message_contains_status** [MUST]
-- Pre: Result message with status=Success
-- Steps: render_message(&msg)
-- Expected: Output contains "Success"
-
-### 3.3 terra-compile Tests (15 tests)
-
-**T-C-001: from_description_sets_intent** [MUST]
-- Steps: SpecIR::from_task_description("fix the login bug")
-- Expected: spec.intent == "fix the login bug"
-
-**T-C-002: from_description_is_incomplete** [MUST]
-- Steps: SpecIR::from_task_description("fix bug")
-- Expected: spec.is_complete() == false
-
-**T-C-003: manual_spec_is_complete** [MUST]
-- Steps: Build SpecIR with all fields, empty open_questions
-- Expected: spec.is_complete() == true
-
-**T-C-004: json_roundtrip** [MUST]
-- Steps: serde_json::to_string → serde_json::from_str
-- Expected: All fields preserved
-
-**T-C-005: msgpack_roundtrip** [MUST]
-- Steps: encode → decode
-- Expected: All fields preserved
-
-**T-C-006: target_file_and_line** [MUST]
-- Steps: Create Target with file="src/auth.py", line=42
-- Expected: Fields accessible
-
-**T-C-007: target_component** [SHOULD]
-- Steps: Create Target with component="LoginButton"
-- Expected: component is Some("LoginButton")
-
-**T-C-008: multiple_constraints** [MUST]
-- Steps: Build SpecIR with 3 constraints
-- Expected: constraints.len() == 3
-
-**T-C-009: success_predicate** [MUST]
-- Steps: Build SpecIR with 2 success predicates
-- Expected: success_predicate.len() == 2
-
-**T-C-010: term_mapping** [SHOULD]
-- Steps: Build TermMapping { user: "login bug", normalized: "empty_password" }
-- Expected: Both fields preserved after serialization
-
-**T-C-011: empty_description** [MUST]
-- Steps: SpecIR::from_task_description("")
-- Expected: No panic, intent == ""
-
-**T-C-012: unicode_description** [MUST]
-- Steps: SpecIR::from_task_description("修复登录问题 🐛")
-- Expected: No panic, intent preserved
-
-**T-C-013: long_description** [SHOULD]
-- Steps: SpecIR::from_task_description(&"x".repeat(10_000))
-- Expected: No panic, intent length == 10_000
-
-**T-C-014: spec_id_format** [MUST]
-- Steps: Create SpecIR, parse spec_id as UUID
-- Expected: Valid UUID v4
-
-**T-C-015: multiple_open_questions** [SHOULD]
-- Steps: Build SpecIR with 3 open questions
-- Expected: open_questions.len() == 3, is_complete() == false
-
-### 3.4 terra-providers Tests (18 tests)
-
-**T-PR-001: dry_run_deterministic** [MUST]
-- Steps: Two calls with same input
-- Expected: Both responses contain "DRY_RUN" and input substring
-
-**T-PR-002: dry_run_zero_tokens** [MUST]
-- Steps: DryRunAdapter.complete(request)
-- Expected: usage_prompt_tokens == 0, usage_completion_tokens == 0
-
-**T-PR-003: dry_run_capabilities** [MUST]
-- Steps: DryRunAdapter.capabilities()
-- Expected: provider_id="dry_run", structured_output=true
-
-**T-PR-004: dry_run_no_network** [MUST]
-- Steps: Complete with network disabled (dry_run doesn't need network)
-- Expected: Succeeds
-
-**T-PR-005: dry_run_model_field** [MUST]
-- Steps: DryRunAdapter.complete(request)
-- Expected: response.model == "dry_run"
-
-**T-PR-006: openai_adapter_creation** [MUST]
-- Pre: TERRA_PROVIDER_API_KEY set
-- Steps: Create OpenAICompatibleAdapter
-- Expected: No error
-
-**T-PR-007: openai_adapter_capabilities** [MUST]
-- Steps: adapter.capabilities()
-- Expected: All capability fields populated
-
-**T-PR-008: openai_missing_key_error** [MUST]
-- Pre: TERRA_PROVIDER_API_KEY not set
-- Steps: Attempt live dispatch
-- Expected: ProviderError::MissingApiKey
-
-**T-PR-009: openai_completion_live** [MAY]
-- Pre: TERRA_PROVIDER_API_KEY set, network available
-- Steps: Complete a simple prompt
-- Expected: Non-empty response, positive token counts
-- Note: Skipped in CI if no key
-
-**T-PR-010: openai_retry_on_429** [SHOULD]
-- Pre: Mock server returning 429 then 200
-- Steps: dispatch with Live mode
-- Expected: Succeeds after retry
-
-**T-PR-011: openai_timeout** [SHOULD]
-- Pre: Mock server with 61s delay
-- Steps: dispatch with Live mode
-- Expected: ProviderError::Timeout
-
-**T-PR-012: openai_streaming** [MAY]
-- Pre: Provider supports streaming
-- Steps: Stream completion
-- Expected: Tokens arrive incrementally (future test)
-
-**T-PR-013: dispatch_dry_run** [MUST]
-- Steps: dispatch(adapter, request, DryRun)
-- Expected: result.mode == DryRun
-
-**T-PR-014: dispatch_live** [MUST]
-- Steps: dispatch(adapter, request, Live)
-- Expected: result.mode == Live
-
-**T-PR-015: dispatch_result_has_response** [MUST]
-- Steps: dispatch → result
-- Expected: result.response.content is non-empty
-
-**T-PR-016: dispatch_result_has_usage** [MUST]
-- Steps: dispatch → result
-- Expected: usage fields are present (even if 0 for dry_run)
-
-**T-PR-017: dispatch_propagates_error** [MUST]
-- Pre: Adapter that returns Err
-- Steps: dispatch
-- Expected: Err propagated
-
-**T-PR-018: dispatch_mode_in_result** [MUST]
-- Steps: dispatch with DryRun mode
-- Expected: result.mode matches input mode
-
-### 3.5 terra-memory Tests (25 tests)
-
-**T-M-001: create_database** [MUST]
-- Steps: MemoryDatabase::new(path)
-- Expected: SQLite file created, tables exist
-
-**T-M-002: write_and_read** [MUST]
-- Steps: write(entry), read(key)
-- Expected: Entry returned with matching content
-
-**T-M-003: write_duplicate_key** [MUST]
-- Steps: write(key="a"), write(key="a")
-- Expected: Second write returns MemoryError::DuplicateKey
-
-**T-M-004: read_missing_key** [MUST]
-- Steps: read("nonexistent")
-- Expected: Returns Ok(None)
-
-**T-M-005: update_version** [MUST]
-- Steps: write(key), update(key), read(key)
-- Expected: version incremented
-
-**T-M-006: delete_soft** [MUST]
-- Steps: write(key), delete(key), read(key)
-- Expected: Entry has alive=false
-
-**T-M-007: content_is_msgpack** [MUST]
-- Steps: write(entry with msgpack content), read, decode
-- Expected: Content deserializes from MessagePack
-
-**T-M-008: scope_constraint** [MUST]
-- Steps: write(scope="invalid")
-- Expected: Error (SQL CHECK violation)
-
-**T-M-009: level_constraint** [MUST]
-- Steps: write(level="invalid")
-- Expected: Error (SQL CHECK violation)
-
-**T-M-010: owner_set** [MUST]
-- Steps: write(entry with owner="main")
-- Expected: read().owner == "main"
-
-**T-M-011: non_owner_cannot_update** [MUST]
-- Steps: write(owner="main"), update(agent="worker")
-- Expected: MemoryError::PermissionDenied
-
-**T-M-012: non_owner_can_read** [MUST]
-- Steps: write(owner="main"), read(by any agent)
-- Expected: Ok(Some(entry))
-
-**T-M-013: ownership_transfer** [SHOULD]
-- Steps: write(owner="main"), transfer(new_owner="worker")
-- Expected: owner changed
-
-**T-M-014: pointer_alive_check** [MUST]
-- Steps: write(key), read(key)
-- Expected: entry.alive == true
-
-**T-M-015: dangling_pointer** [MUST]
-- Steps: write(key), delete(key), attempt deref
-- Expected: MemoryError::Dangling
-
-**T-M-016: version_mismatch** [MUST]
-- Steps: write(key, v1), update(key, v2), read(expected_version=1)
-- Expected: MemoryError::Stale
-
-**T-M-017: gc_removes_weak** [SHOULD]
-- Steps: write(level=L5, ref_count=0), gc()
-- Expected: Entry removed
-
-**T-M-018: gc_preserves_authoritative** [MUST]
-- Steps: write(level=L0, ref_count=0), gc()
-- Expected: Entry preserved
-
-**T-M-019: cache_hit** [SHOULD]
-- Steps: write(key), read(key) twice
-- Expected: Second read is faster (cache hit)
-
-**T-M-020: cache_miss_to_sqlite** [SHOULD]
-- Steps: Evict from cache, read(key)
-- Expected: Entry loaded from SQLite
-
-**T-M-021: write_updates_both** [MUST]
-- Steps: write(key), verify in cache and SQLite
-- Expected: Present in both
-
-**T-M-022: cache_eviction** [SHOULD]
-- Steps: Fill cache beyond capacity, check oldest entry
-- Expected: Oldest entry evicted from cache (still in SQLite)
-
-**T-M-023: promote_l2_to_l1** [MUST]
-- Steps: write(level=L2), promote(target=L1)
-- Expected: level changed to L1
-
-**T-M-024: promote_requires_verification** [SHOULD]
-- Steps: promote to L3 without verification flag
-- Expected: MemoryError::PromotionBlocked
-
-**T-M-025: promote_l6_requires_review** [MUST]
-- Steps: promote(level=L6, reviewed=false)
-- Expected: MemoryError::PromotionBlocked
-
-### 3.6 terra-core Tests (12 tests)
-
-**T-IC-001: load_universal** [MUST]
-- Steps: IntelligenceCore::new()
-- Expected: universal framework has rules
-
-**T-IC-002: register_module** [MUST]
-- Steps: core.register(coding_module)
-- Expected: module listed in core.modules
-
-**T-IC-003: all_perspectives** [MUST]
-- Steps: Register 2 modules, core.all_perspectives()
-- Expected: Perspectives from both modules
-
-**T-IC-004: all_rules** [MUST]
-- Steps: Register module, core.all_rules()
-- Expected: Universal rules + module rules
-
-**T-IC-005: coding_perspectives** [MUST]
-- Steps: coding_module.perspectives()
-- Expected: At least 1 perspective
-
-**T-IC-006: coding_rules** [MUST]
-- Steps: coding_module.rules()
-- Expected: At least 1 rule
-
-**T-IC-007: algorithm_perspectives** [SHOULD]
-- Steps: algorithm_module.perspectives()
-- Expected: At least 1 perspective
-
-**T-IC-008: modules_composable** [MUST]
-- Steps: Register coding + algorithm, query perspectives
-- Expected: Both modules' perspectives present
-
-**T-IC-009: universal_readonly** [MUST]
-- Steps: Attempt to modify universal rules at runtime
-- Expected: Compilation error or runtime error
-
-**T-IC-010: detect_goal_drift** [SHOULD]
-- Steps: Simulate goal drift scenario
-- Expected: Diagnostic signal produced
-
-**T-IC-011: detect_shallow_reasoning** [SHOULD]
-- Steps: Simulate shallow reasoning scenario
-- Expected: Diagnostic signal produced
-
-**T-IC-012: detect_shortcut** [SHOULD]
-- Steps: Simulate shortcut scenario
-- Expected: Diagnostic signal produced
-
-### 3.7 terra-caging Tests (18 tests)
-
-**T-CG-001: cage_pass** [MUST]
-- Expected: CageCheckResult::Pass allows action
-
-**T-CG-002: cage_warn** [MUST]
-- Expected: CageCheckResult::Warn logs but allows
-
-**T-CG-003: cage_block** [MUST]
-- Expected: CageCheckResult::Block prevents action
-
-**T-CG-004: spec_cage_pass** [MUST]
-- Pre: Complete SpecIR
-- Expected: Pass
-
-**T-CG-005: spec_cage_block** [MUST]
-- Pre: Incomplete SpecIR
-- Expected: Block
-
-**T-CG-006: memory_cage_owner_write** [MUST]
-- Expected: Owner write allowed
-
-**T-CG-007: memory_cage_non_owner_block** [MUST]
-- Expected: Non-owner write blocked
-
-**T-CG-008: memory_cage_any_read** [MUST]
-- Expected: Any agent can read
-
-**T-CG-009: sandbox_write_inside** [MUST]
-- Pre: Path inside project root
-- Expected: check_write → Ok
-
-**T-CG-010: sandbox_write_outside** [MUST]
-- Pre: Path outside project root
-- Expected: check_write → SandboxViolation::OutsideSandbox
-
-**T-CG-011: sandbox_read_outside** [MUST]
-- Pre: Path outside project root
-- Expected: check_read → Ok
-
-**T-CG-012: sandbox_write_protected** [MUST]
-- Pre: Path to .terra/constitution.toml
-- Expected: check_write → SandboxViolation::ProtectedPath
-
-**T-CG-013: sandbox_read_protected** [MUST]
-- Pre: Path to .terra/constitution.toml
-- Expected: check_read → Ok
-
-**T-CG-014: sandbox_delete_outside** [MUST]
-- Pre: Path outside project root
-- Expected: check_delete → SandboxViolation::OutsideSandbox
-
-**T-CG-015: verify_cage_no_verification** [MUST]
-- Pre: No external verifier passed
-- Expected: Block
-
-**T-CG-016: verify_cage_after_verification** [MUST]
-- Pre: External verifier passed
-- Expected: Pass
-
-**T-CG-017: meta_cage_constitution** [MUST]
-- Pre: Attempt to modify constitution
-- Expected: Block + logged
-
-**T-CG-018: meta_cage_rule_change** [MUST]
-- Pre: Attempt to modify cage rule
-- Expected: Block + logged
-
-### 3.8 terra-agents Tests (12 tests)
-
-**T-A-001: end_to_end_dry_run** [MUST]
-- Steps: orchestrator.run("fix auth bug")
-- Expected: RunResult with all fields populated
-
-**T-A-002: spec_ir_from_task** [MUST]
-- Expected: result.spec.intent == task description
-
-**T-A-003: provider_called** [MUST]
-- Expected: result.worker_response contains DRY_RUN output
-
-**T-A-004: audit_recorded** [MUST]
-- Expected: audit_log.len() >= 3
-
-**T-A-005: result_has_response** [MUST]
-- Expected: result.worker_response is non-empty
-
-**T-A-006: result_has_tokens** [MUST]
-- Expected: prompt_tokens and completion_tokens present
-
-**T-A-007: result_has_spec_id** [MUST]
-- Expected: result.spec.spec_id is valid UUID
-
-**T-A-008: empty_task** [MUST]
-- Steps: run("")
-- Expected: Completes without panic
-
-**T-A-009: long_task** [SHOULD]
-- Steps: run(&"x".repeat(10_000))
-- Expected: Completes without panic
-
-**T-A-010: provider_error** [MUST]
-- Pre: Adapter that always returns Err
-- Expected: run() returns Err
-
-**T-A-011: sequential_runs** [MUST]
-- Steps: run() twice
-- Expected: Both complete, independent audit trails
-
-**T-A-012: concurrent_runs** [MAY]
-- Steps: Two concurrent run() calls
-- Expected: Both complete without data corruption
-
-### 3.9 terra-trace Tests (10 tests)
-
-**T-TR-001: record_command** [MUST]
-- Expected: seq=1, entry in log
-
-**T-TR-002: record_result** [MUST]
-- Expected: result attached to entry
-
-**T-TR-003: sequential_numbering** [MUST]
-- Expected: seq 1,2,3...N
-
-**T-TR-004: entries_ordered** [MUST]
-- Expected: entries() returns in seq order
-
-**T-TR-005: render_markdown** [MUST]
-- Expected: Valid markdown with all fields
-
-**T-TR-006: empty_log_renders** [MUST]
-- Expected: Empty log produces valid header-only markdown
-
-**T-TR-007: unknown_seq_ignored** [MUST]
-- Steps: record_result(seq=999)
-- Expected: No panic, no effect
-
-**T-TR-008: concurrent_writes** [MUST]
-- Steps: 10 threads, each recording 100 commands
-- Expected: 1000 entries, no gaps, no duplicates
-
-**T-TR-009: large_log** [SHOULD]
-- Steps: Record 10,000 entries
-- Expected: len()==10000, no performance degradation
-
-**T-TR-010: msgpack_roundtrip** [MUST]
-- Steps: Serialize entries to msgpack, deserialize
-- Expected: All entries preserved
-
-### 3.10 terra-cli Tests (8 tests)
-
-**T-CLI-001: no_args_banner** [MUST]
-- Steps: Run `terra`
-- Expected: Version and "Agent OS" in output
-
-**T-CLI-002: doctor_status** [MUST]
-- Steps: Run `terra doctor`
-- Expected: "OK" in output
-
-**T-CLI-003: doctor_json** [MUST]
-- Steps: Run `terra doctor --as-json`
-- Expected: Valid JSON output
-
-**T-CLI-004: run_task** [MUST]
-- Steps: Run `terra run --task "test"`
-- Expected: Exit code 0, output contains "complete"
-
-**T-CLI-005: run_json** [MUST]
-- Steps: Run `terra run --task "test" --as-json`
-- Expected: Valid JSON with spec_id, intent, response fields
-
-**T-CLI-006: run_json_fields** [MUST]
-- Expected: JSON has required keys: spec_id, intent, worker_response
-
-**T-CLI-007: help_flag** [MUST]
-- Steps: Run `terra --help`
-- Expected: Lists all subcommands
-
-**T-CLI-008: unknown_command** [MUST]
-- Steps: Run `terra nonexistent`
-- Expected: Non-zero exit code, error message
-
-### 3.11 Config Tests (6 tests)
-
-**T-CF-001: default_config** [MUST]
-- Steps: Run without config file
-- Expected: Default settings applied
-
-**T-CF-002: project_overrides_global** [MUST]
-- Pre: Global config has key=A, project config has key=B
-- Expected: key resolves to B
-
-**T-CF-003: env_overrides_config** [MUST]
-- Pre: Config has api_key=X, env has TERRA_PROVIDER_API_KEY=Y
-- Expected: api_key resolves to Y
-
-**T-CF-004: config_show** [SHOULD]
-- Steps: `terra config show`
-- Expected: All settings listed
-
-**T-CF-005: config_set** [SHOULD]
-- Steps: `terra config set provider.model gpt-4o`
-- Expected: Setting persisted to file
-
-**T-CF-006: invalid_config** [MUST]
-- Pre: Malformed config.toml
-- Expected: Warning message, fallback to defaults, no crash
-
-### 3.12 Integration Tests (6 tests)
-
-**T-INT-001: run_with_memory** [MUST]
-- Steps: Run task → result stored in memory → read back
-- Expected: Result retrievable
-
-**T-INT-002: run_with_sandbox** [MUST]
-- Steps: Run task that attempts file write inside/outside sandbox
-- Expected: Inside succeeds, outside blocked
-
-**T-INT-003: run_with_caging** [SHOULD]
-- Steps: Run task → all 8 cages checked
-- Expected: Pass for valid task
-
-**T-INT-004: audit_replay** [SHOULD]
-- Steps: Run task → get audit log → replay
-- Expected: Same final state
-
-**T-INT-005: live_provider** [MAY]
-- Pre: TERRA_PROVIDER_API_KEY set
-- Steps: Run with live provider
-- Expected: Real LLM response
-
-**T-INT-006: project_isolation** [MUST]
-- Steps: Write to project A memory, read from project B
-- Expected: Not found in project B
+**Philosophy:** Every test verifies BEHAVIOR under realistic conditions, not just field existence. Tests are organized by the problem they catch.
+
+### 3.1 Pipeline Integrity Tests (17 tests)
+
+Tests that verify the canonical pipeline is followed.
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-PI-001 | `pipeline_all_stages_invoked` | Task traverses: Compilation → IC → Caging → Executor → Provider → Audit. Each stage produces a trace event. |
+| T-PI-002 | `pipeline_ic_rules_in_prompt` | System prompt sent to provider CONTAINS rules from Intelligence Core. |
+| T-PI-003 | `pipeline_cage_blocks_incomplete` | Incomplete spec → CagingEngine invoked → Block → task NOT executed → audit log has block entry. |
+| T-PI-004 | `pipeline_cage_blocks_unverified` | Agent claims complete without verification → Block. |
+| T-PI-005 | `pipeline_audit_records_every_step` | After task run, audit log has entries for: task_start, ic_query, cage_check, worker_dispatch, provider_call, task_complete. |
+| T-PI-006 | `pipeline_no_direct_provider_call` | Orchestrator calls executor.execute(ProviderCall), NOT provider.complete() directly. |
+| T-PI-007 | `pipeline_no_direct_memory_access` | Orchestrator calls executor.execute(MemWrite), NOT memory.write() directly. |
+| T-PI-008 | `executor_audit_before_execute` | Audit entry timestamp is BEFORE execution timestamp. |
+| T-PI-009 | `executor_cage_check_before_execute` | Caging check happens BEFORE backend operation. |
+| T-PI-010 | `executor_cage_block_prevents_write` | Cage blocks MemWrite → memory entry does NOT exist. |
+| T-PI-011 | `executor_routes_mem_to_memory` | MemWrite command → MemoryDatabase.write() called. |
+| T-PI-012 | `executor_routes_artifact_to_store` | ArtifactSave → ArtifactStore.save() called. |
+| T-PI-013 | `executor_routes_trace_to_audit` | TraceCheckpoint → AuditLog.record() called. |
+| T-PI-014 | `executor_routes_session_to_manager` | SessionStart → SessionManager.start() called. |
+| T-PI-015 | `executor_returns_duration` | CommandResult has non-zero duration_us. |
+| T-PI-016 | `executor_permission_denied_on_block` | Cage Block → CommandResult.status == PermissionDenied. |
+| T-PI-017 | `executor_sandbox_in_production_path` | File write command goes through SandboxGuard in executor, not just unit test. |
+
+### 3.2 Intelligence Core Behavior Tests (15 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-IC-001 | `universal_rules_loaded` | 13 rules across 3 categories at startup. |
+| T-IC-002 | `universal_readonly` | Attempt to modify rules → rejected (type system or runtime error). |
+| T-IC-003 | `module_registration` | coding/ module registered → appears in module list. |
+| T-IC-004 | `modules_composable` | coding/ + algorithm/ both active → perspectives from both returned. |
+| T-IC-005 | `perspectives_for_multihead` | coding/ module provides 3 perspectives with query_templates. |
+| T-IC-006 | `rules_filtered_by_task` | Bug fix task → applicable rules include B-002 (minimal change). |
+| T-IC-007 | `rules_injected_into_prompt` | Build prompt with IC → output string contains rule descriptions. |
+| T-IC-008 | `goal_drift_detection` | Simulated drift: action embedding far from spec embedding → D-001 score < 0.6. |
+| T-IC-009 | `shallow_reasoning_detection` | 5 claims, 1 evidence → D-002 ratio = 0.2 < 0.3 → signal fired. |
+| T-IC-010 | `shortcut_detection` | Plan has 3 verification steps, execution skips 2 → D-003 signal fired. |
+| T-IC-011 | `coding_module_has_rules` | CodingModule.rules() returns at least 3 rules. |
+| T-IC-012 | `algorithm_module_has_perspectives` | AlgorithmModule.perspectives() returns at least 2. |
+| T-IC-013 | `perspective_generates_query` | Perspective.query_template with context → produces non-empty query string. |
+| T-IC-014 | `all_rules_includes_universal_and_modules` | core.all_rules().len() > universal_only.len(). |
+| T-IC-015 | `diagnostic_rules_have_thresholds` | D-001/D-002/D-003 each have defined threshold values. |
+
+### 3.3 Language Compilation Tests (18 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-LC-001 | `from_description_produces_spec` | "fix login bug" → SpecIR with non-empty intent. |
+| T-LC-002 | `incomplete_spec_has_questions` | Basic compilation → open_questions non-empty. |
+| T-LC-003 | `complete_spec_no_questions` | Manually built spec → is_complete() == true. |
+| T-LC-004 | `json_roundtrip` | SpecIR survives JSON serialize → deserialize. |
+| T-LC-005 | `msgpack_roundtrip` | SpecIR survives MessagePack roundtrip. |
+| T-LC-006 | `target_file_line` | Target with file + line preserves both. |
+| T-LC-007 | `target_component` | Target with component preserves it. |
+| T-LC-008 | `constraints_preserved` | 3 constraints → all preserved. |
+| T-LC-009 | `success_predicate_preserved` | 2 predicates → all preserved. |
+| T-LC-010 | `term_mapping_roundtrip` | TermMapping survives serialization. |
+| T-LC-011 | `empty_description_safe` | "" → no panic, empty intent. |
+| T-LC-012 | `unicode_description` | "修复登录问题 🐛" → preserved. |
+| T-LC-013 | `long_description` | 10K chars → no panic. |
+| T-LC-014 | `spec_id_is_uuid` | spec_id has UUID v4 format (36 chars, 4 dashes). |
+| T-LC-015 | `multiple_open_questions` | 3 questions → is_complete() false. |
+| T-LC-016 | `lexical_pass_extracts_entities` | "fix auth.py line 42" → target.file="auth.py", target.line=42. |
+| T-LC-017 | `terminology_normalization` | "login bug" mapped to "authentication_failure". |
+| T-LC-018 | `completeness_blocks_execution` | Spec with open_questions → SpecificationCage blocks. |
+
+### 3.4 Multi-Agent Tests (16 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-AG-001 | `main_agent_queries_ic` | Main Agent calls core.applicable_rules() before dispatch. |
+| T-AG-002 | `main_agent_dispatches_worker` | Worker receives MessagePack TaskPayload. |
+| T-AG-003 | `main_agent_audits_result` | Main Agent inspects Worker result before returning. |
+| T-AG-004 | `worker_has_own_context` | Worker system prompt differs from Main's. |
+| T-AG-005 | `worker_has_filtered_rules` | Worker gets coding/ rules for code task, not all rules. |
+| T-AG-006 | `explorer_searches_memory` | Explorer issues MemSearch via executor. |
+| T-AG-007 | `explorer_returns_findings` | Explorer returns structured ResultPayload with findings. |
+| T-AG-008 | `cage_agent_monitors_drift` | Cage agent receives state → computes D-001 score → reports if low. |
+| T-AG-009 | `cage_agent_no_business_logic` | Cage agent does not modify any memory or file. |
+| T-AG-010 | `model_dispatch_multi_model` | 3 models available → Main gets strongest, Worker balanced, Explorer fast. |
+| T-AG-011 | `model_dispatch_single_model` | 1 model → all agents same model, different params. |
+| T-AG-012 | `worker_timeout_handled` | Worker exceeds timeout → error result returned (no hang). |
+| T-AG-013 | `concurrent_workers_safe` | 2 workers running in parallel → no data corruption. |
+| T-AG-014 | `end_to_end_dry_run` | Full pipeline with DryRunAdapter completes. |
+| T-AG-015 | `end_to_end_live` | Full pipeline with real provider (skip if no key). |
+| T-AG-016 | `empty_task_handled` | Empty string task → no panic. |
+
+### 3.5 Memory Database Tests (30 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-MD-001 | `create_and_tables_exist` | Database init creates all tables. |
+| T-MD-002 | `write_and_read` | Write entry → read returns matching content. |
+| T-MD-003 | `duplicate_key_rejected` | Second write same key → DuplicateKey error. |
+| T-MD-004 | `read_missing_returns_none` | Read nonexistent → Ok(None). |
+| T-MD-005 | `update_increments_version` | Update → version N+1. |
+| T-MD-006 | `delete_is_soft` | Delete → alive=false, not physically removed. |
+| T-MD-007 | `content_is_msgpack` | Stored content deserializable from MessagePack. |
+| T-MD-008 | `scope_constraint_enforced` | Invalid scope string → SQL error. |
+| T-MD-009 | `level_constraint_enforced` | Invalid level → SQL error. |
+| T-MD-010 | `owner_set_on_creation` | Write → owner field matches creator. |
+| T-MD-011 | `non_owner_write_rejected` | Non-owner update → PermissionDenied. |
+| T-MD-012 | `non_owner_read_allowed` | Non-owner read → Ok. |
+| T-MD-013 | `ownership_transfer` | Explicit transfer → new owner can write. |
+| T-MD-014 | `dangling_read_error` | Read deleted entry → Dangling error. |
+| T-MD-015 | `version_mismatch_error` | Update with wrong version → Stale error. |
+| T-MD-016 | `gc_removes_dead_weak` | Dead L5 ref_count=0 → removed by GC. |
+| T-MD-017 | `gc_preserves_authoritative` | Dead L0 → NOT removed by GC. |
+| T-MD-018 | `cache_hit_on_second_read` | Write → read → read again → second is cache hit (stats prove). |
+| T-MD-019 | `cache_miss_falls_to_sqlite` | Invalidate cache → read → data from SQLite (miss stat increases). |
+| T-MD-020 | `write_updates_cache_and_sqlite` | Write → both cache and SQLite have entry. |
+| T-MD-021 | `update_invalidates_cache` | Update → cache invalidated → next read from SQLite. |
+| T-MD-022 | `cache_eviction_on_capacity` | Insert beyond capacity → entries evicted. |
+| T-MD-023 | `promote_l2_to_l1` | L2 → L1 → level changed. |
+| T-MD-024 | `promote_l6_blocked_without_review` | L6 → L1 no review → PromotionBlocked. |
+| T-MD-025 | `promote_l6_allowed_with_review` | L6 → L1 with review → allowed. |
+| T-MD-026 | `promote_backwards_blocked` | L1 → L2 → PromotionBlocked. |
+| T-MD-027 | `vector_search_returns_relevant` | 10 entries with embeddings. Query → top result semantically closest. |
+| T-MD-028 | `multihead_search_merges` | 2 perspectives → results from both queries merged. |
+| T-MD-029 | `concurrent_writes_safe` | 10 threads writing different keys → all succeed, no corruption. |
+| T-MD-030 | `project_isolation` | Write to project A → not visible in project B. |
+
+### 3.6 Caging Engine Tests (20 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-CG-001 | `pass_allows_action` | Pass → action proceeds. |
+| T-CG-002 | `warn_logs_allows` | Warn → logged + action proceeds. |
+| T-CG-003 | `block_prevents_action` | Block → action prevented. |
+| T-CG-004 | `first_block_short_circuits` | Third cage blocks → fourth never checked. |
+| T-CG-005 | `spec_complete_passes` | Complete spec → Pass. |
+| T-CG-006 | `spec_incomplete_blocks` | Incomplete spec → Block. |
+| T-CG-007 | `memory_owner_write_passes` | Owner MemWrite → Pass. |
+| T-CG-008 | `memory_non_owner_blocks` | Non-owner MemWrite → Block. |
+| T-CG-009 | `sandbox_write_inside_passes` | Write inside root → Pass. |
+| T-CG-010 | `sandbox_write_outside_blocks` | Write outside root → Block. |
+| T-CG-011 | `sandbox_read_outside_passes` | Read outside root → Pass. |
+| T-CG-012 | `sandbox_write_protected_blocks` | Write constitution → Block. |
+| T-CG-013 | `sandbox_read_protected_passes` | Read constitution → Pass. |
+| T-CG-014 | `sandbox_delete_outside_blocks` | Delete outside → Block. |
+| T-CG-015 | `sandbox_symlink_escape_blocks` | Symlink inside pointing outside → write blocked. |
+| T-CG-016 | `verify_unverified_blocks` | Claim complete without verification → Block. |
+| T-CG-017 | `verify_verified_passes` | Claim after verification → Pass. |
+| T-CG-018 | `meta_constitution_change_blocks` | Modify constitution → Block + logged. |
+| T-CG-019 | `meta_cage_rule_change_blocks` | Modify cage rule → Block. |
+| T-CG-020 | `convergence_stops_after_accepted` | Accepted path → further exploration warned/blocked. |
+
+### 3.7 Provider Tests (20 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-PV-001 | `dry_run_deterministic` | Same input → same output pattern. |
+| T-PV-002 | `dry_run_zero_tokens` | Usage 0/0. |
+| T-PV-003 | `dry_run_capabilities` | provider_id="dry_run", structured_output=true. |
+| T-PV-004 | `dry_run_no_network` | Works offline. |
+| T-PV-005 | `dry_run_model_field` | model="dry_run". |
+| T-PV-006 | `openai_creation_from_env` | Reads API key from env. |
+| T-PV-007 | `openai_capabilities` | Reports all capability fields. |
+| T-PV-008 | `openai_missing_key_error` | No key → clear error. |
+| T-PV-009 | `openai_live_completion` | Real API call succeeds (skip if no key). |
+| T-PV-010 | `openai_retry_on_429` | Mock returns 429 twice → 200 → succeeds. |
+| T-PV-011 | `openai_timeout` | Mock delays → timeout error. |
+| T-PV-012 | `openai_streaming_flag` | supports_streaming=true in capabilities. |
+| T-PV-013 | `dispatch_dry_run_mode` | Dispatch with DryRun → mode in result. |
+| T-PV-014 | `dispatch_live_mode` | Dispatch with Live → mode in result. |
+| T-PV-015 | `dispatch_has_response` | Result has non-empty content. |
+| T-PV-016 | `dispatch_has_usage` | Result has token counts. |
+| T-PV-017 | `dispatch_propagates_error` | Failing adapter → error propagated. |
+| T-PV-018 | `dispatch_mode_matches` | DryRun → DryRun, Live → Live. |
+| T-PV-019 | `openai_retry_exhausted` | Mock always 429 → error after 3 retries. |
+| T-PV-020 | `openai_non_retryable_error` | Mock 400 → immediate error, no retry. |
+
+### 3.8 Audit Trail Tests (12 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-AT-001 | `record_command_returns_seq` | First command → seq=1. |
+| T-AT-002 | `record_result_attaches` | Result attached to correct seq. |
+| T-AT-003 | `sequential_no_gaps` | 100 commands → seqs 1..100. |
+| T-AT-004 | `entries_ordered` | Entries returned in seq order. |
+| T-AT-005 | `render_markdown` | Markdown contains all entry fields. |
+| T-AT-006 | `empty_log_renders` | Empty log → valid markdown header. |
+| T-AT-007 | `unknown_seq_ignored` | Result for seq=999 → no panic. |
+| T-AT-008 | `concurrent_10_threads` | 10×100 commands → 1000, no gaps. |
+| T-AT-009 | `large_log_10k` | 10K entries < 2 seconds. |
+| T-AT-010 | `msgpack_roundtrip` | Entries survive MessagePack serialization. |
+| T-AT-011 | `persistent_survives_reopen` | Write → close → reopen → entries present. |
+| T-AT-012 | `replay_reproduces_state` | Record commands → replay → same final state. |
+
+### 3.9 Session Lifecycle Tests (10 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-SL-001 | `session_start_creates_s2` | After start, S2 scope writable. |
+| T-SL-002 | `session_goal_recorded` | Goal retrievable after start. |
+| T-SL-003 | `session_switch_flushes` | Switch → old cache flushed. |
+| T-SL-004 | `session_switch_loads_new` | Switch → new project data loaded. |
+| T-SL-005 | `session_end_cleans_s3` | End → S3 entries removed. |
+| T-SL-006 | `session_end_triggers_sleep` | End → SleepConsolidationReport generated. |
+| T-SL-007 | `sleep_abstracts_actions` | Concrete action → general principle. |
+| T-SL-008 | `sleep_generates_candidates` | 5 tasks → N promotion candidates. |
+| T-SL-009 | `sleep_user_accept_promotes` | User accepts → entry promoted to S1. |
+| T-SL-010 | `sleep_user_reject_discards` | User rejects → entry not promoted. |
+
+### 3.10 Artifact Store Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-AS-001 | `save_creates_version` | Save plan → version 1 created. |
+| T-AS-002 | `save_increments_version` | Save twice → version 1 and 2. |
+| T-AS-003 | `load_latest` | Two versions → load without version → latest. |
+| T-AS-004 | `load_specific_version` | Load version 1 → returns v1 content. |
+| T-AS-005 | `list_artifacts` | Save 3 → list returns 3. |
+| T-AS-006 | `content_is_msgpack` | Stored content is valid MessagePack. |
+| T-AS-007 | `memory_stores_pointer` | After save, memory has pointer to artifact. |
+| T-AS-008 | `artifact_types` | Plan, spec, test, review all supported. |
+
+### 3.11 Protocol Tests (22 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-PT-001 to T-PT-006 | Message creation | Fields, uniqueness, timestamp, role serialization. |
+| T-PT-007 to T-PT-012 | Codec | Roundtrips (task/result/command), size comparison, optionals, invalid bytes. |
+| T-PT-013 to T-PT-019 | Commands | All CommandOp variants, result ok/err. |
+| T-PT-020 to T-PT-022 | Render | Message op, command agent, result status in markdown. |
+
+### 3.12 Config Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-CF-001 | `default_values` | Default model, no key, cache=1000. |
+| T-CF-002 | `project_overrides_global` | Same key in both → project wins. |
+| T-CF-003 | `env_overrides_all` | Env var takes highest precedence. |
+| T-CF-004 | `show_redacts_keys` | API key shown as ***REDACTED***. |
+| T-CF-005 | `set_persists` | Set value → read file → value present. |
+| T-CF-006 | `invalid_config_handled` | Malformed TOML → fallback to defaults, no crash. |
+| T-CF-007 | `set_integer` | Set numeric value → stored as integer. |
+| T-CF-008 | `set_creates_file` | Config file doesn't exist → created. |
+
+### 3.13 CLI Binary Tests (10 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-CLI-001 | `no_args_banner` | Shows "Terra" and "Agent OS". |
+| T-CLI-002 | `doctor_ok` | Shows "OK". |
+| T-CLI-003 | `doctor_json` | Valid JSON with os, version fields. |
+| T-CLI-004 | `run_completes` | Exit 0, output contains "complete". |
+| T-CLI-005 | `run_json` | Valid JSON output. |
+| T-CLI-006 | `run_json_fields` | spec_id, intent, worker_response, tokens present. |
+| T-CLI-007 | `help_lists_commands` | Lists doctor, run, config. |
+| T-CLI-008 | `unknown_command_fails` | Non-zero exit. |
+| T-CLI-009 | `config_show` | Displays config. |
+| T-CLI-010 | `config_set_and_show` | Set → show → value visible. |
+
+### 3.14 Integration Tests (8 tests)
+
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-INT-001 | `run_result_stored_in_memory` | Task → result in memory → retrievable. |
+| T-INT-002 | `sandbox_enforced_in_executor` | File command → executor checks sandbox. |
+| T-INT-003 | `full_caging_chain` | All 8 cages checked for valid task. |
+| T-INT-004 | `audit_replay_state` | Run → audit → replay → same state. |
+| T-INT-005 | `live_provider_e2e` | Real API through full pipeline (skip if no key). |
+| T-INT-006 | `project_isolation` | Two projects completely separate. |
+| T-INT-007 | `session_lifecycle_e2e` | Start → work → end → sleep → promotions. |
+| T-INT-008 | `compression_protection` | 70% trigger → data externalized → survives compression. |
 
 ---
 
-**Total: 152 test cases.**
+## Test Summary
 
-| Category | Count | MUST | SHOULD | MAY |
-|----------|-------|------|--------|-----|
-| terra-protocol | 22 | 22 | 0 | 0 |
-| terra-compile | 15 | 11 | 4 | 0 |
-| terra-providers | 18 | 13 | 3 | 2 |
-| terra-memory | 25 | 18 | 7 | 0 |
-| terra-core | 12 | 7 | 5 | 0 |
-| terra-caging | 18 | 16 | 0 | 2 |
-| terra-agents | 12 | 10 | 1 | 1 |
-| terra-trace | 10 | 8 | 1 | 1 |
-| terra-cli | 8 | 8 | 0 | 0 |
-| config | 6 | 4 | 2 | 0 |
-| integration | 6 | 3 | 2 | 1 |
-| **Total** | **152** | **120** | **25** | **7** |
+| Category | Count | Behavior Tests |
+|----------|-------|----------------|
+| Pipeline Integrity | 17 | 17 (all verify execution flow) |
+| Intelligence Core | 15 | 15 (rules active, diagnostics measured) |
+| Language Compilation | 18 | 18 |
+| Multi-Agent | 16 | 16 (real agents, not wrappers) |
+| Memory Database | 30 | 30 (including vector search, concurrency) |
+| Caging Engine | 20 | 20 (including symlink, convergence) |
+| Provider | 20 | 20 (including retry, timeout, exhaustion) |
+| Audit Trail | 12 | 12 (including replay, persistence) |
+| Session Lifecycle | 10 | 10 (including sleep consolidation) |
+| Artifact Store | 8 | 8 |
+| Protocol | 22 | 22 |
+| Config | 8 | 8 |
+| CLI | 10 | 10 |
+| Integration | 8 | 8 |
+| Resilience | 3 | 3 (crash recovery, lazy load, model migration) |
+| **Total** | **217** | **217 (100% behavioral)** |
 
 ---
 
-## 4. Data Schemas
+### 3.15 Resilience Tests (3 tests)
 
-See Section 2.4.4 for SQLite schema.
-See Section 2.1.2 for MessagePack message schema.
-See Section 2.2.2 for Spec IR schema.
+| ID | Test | Behavior Verified |
+|----|------|-------------------|
+| T-RS-001 | `vector_index_rebuild_from_sqlite` | Delete FAISS index file → restart → index rebuilt from SQLite embedding column → search works. |
+| T-RS-002 | `lazy_load_pointer_metadata_only` | Read 1000 entries → only metadata in memory → content loaded only on explicit deref → memory usage stays low. |
+| T-RS-003 | `embedding_model_migration` | Change embedding model config → re-index triggered → all entries get new embeddings → search quality maintained. |
 
-## 5. Error Taxonomy
+---
 
-All errors derive from `thiserror`. Domain errors are specific
-and matchable. Unexpected errors use `anyhow`.
+## 4. Error Taxonomy
 
 ```rust
-// terra-memory
-#[derive(thiserror::Error, Debug)]
-pub enum MemoryError {
-    #[error("key not found: {0}")]
-    NotFound(String),
-    #[error("duplicate key: {0}")]
-    DuplicateKey(String),
-    #[error("permission denied: {agent} is not owner of {key}")]
-    PermissionDenied { agent: String, key: String },
-    #[error("dangling pointer: {0} is deleted")]
-    Dangling(String),
-    #[error("stale version: expected {expected}, found {found}")]
-    Stale { expected: u64, found: u64 },
-    #[error("promotion blocked: {reason}")]
-    PromotionBlocked { reason: String },
-    #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
-}
+// Memory
+MemoryError { NotFound, DuplicateKey, PermissionDenied, Dangling, Stale, PromotionBlocked, InvalidScope, InvalidLevel, Database }
 
-// terra-providers
-#[derive(thiserror::Error, Debug)]
-pub enum ProviderError {
-    #[error("TERRA_PROVIDER_API_KEY not set")]
-    MissingApiKey,
-    #[error("network error: {0}")]
-    Network(String),
-    #[error("rate limited after retries")]
-    RateLimit,
-    #[error("request timeout")]
-    Timeout,
-    #[error("invalid response: {0}")]
-    InvalidResponse(String),
-}
+// Provider
+ProviderError { MissingApiKey, Network, RateLimit, Timeout, InvalidResponse }
 
-// terra-caging
-#[derive(thiserror::Error, Debug)]
-pub enum SandboxViolation {
-    #[error("write outside sandbox: {0}")]
-    OutsideSandbox(PathBuf),
-    #[error("write to protected path: {0}")]
-    ProtectedPath(PathBuf),
-}
+// Caging
+SandboxViolation { OutsideSandbox, ProtectedPath, SymlinkEscape }
+CageViolation { IncompleteSpec, NoVerification, ConstitutionModified, UnauthorizedWrite, BackwardsPromotion }
+
+// Executor
+ExecutorError { CageBlocked, BackendError, CommandNotRouted }
 ```
 
-## 6. Performance Contracts
+## 5. Performance Contracts
 
-| Operation | Target | Measurement |
-|-----------|--------|-------------|
-| moka cache read | < 1ms p99 | `std::time::Instant` in test |
-| SQLite read | < 5ms p99 | `std::time::Instant` in test |
-| MessagePack encode (1KB payload) | < 100μs p99 | Benchmark |
-| Vector search (1K entries, 384-dim) | < 10ms p99 | Benchmark |
-| CLI startup (no embedding) | < 500ms | Wall clock |
-| Embedding model load | < 3s | Wall clock |
-| Audit log write | < 50μs p99 | `std::time::Instant` in test |
+| Operation | Target |
+|-----------|--------|
+| Bloom filter check | < 100ns |
+| moka cache read | < 1ms p99 |
+| SQLite read | < 5ms p99 |
+| MessagePack encode 1KB | < 100μs p99 |
+| Vector search 1K entries | < 10ms p99 |
+| CLI startup (no embedding) | < 500ms |
+| Embedding model load | < 3s |
+| Audit log write | < 50μs p99 |
 
-## 7. Migration and Versioning
+## 6. Migration
 
-- SQLite schema version tracked via `PRAGMA user_version`.
-- Schema changes: forward-only migrations, auto-applied on startup.
-- Embedding model change: full re-index from `memories.content` column.
-- Config format change: auto-migrate with `.bak` backup of old file.
-- Skill manifest version: `manifest_version` field, validated on load.
+- Schema version: `PRAGMA user_version`
+- Embedding model change: full re-index
+- Config format: auto-migrate with .bak backup
+- Skill manifest: `manifest_version` field validated
