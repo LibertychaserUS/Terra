@@ -630,3 +630,255 @@ Iteration 6 (layer fix)
 
 Iterations 9/10 and 11 can run in parallel after 8.
 Iteration 12 waits for all others.
+
+---
+
+## Kernel V2 — Iteration 13-17
+
+> Appended: 2026-05-06
+> Scope: Close P0 capability gaps. Make Terra actually do things.
+> Principle: syscall first, agent identity second, compilation third.
+
+---
+
+### Iteration 13: FileOps Syscall + Sandbox Integration
+
+**Goal:** Agent can read, write, and delete files. Can execute shell commands.
+All operations go through the full audit→cage→route→record pipeline.
+Sandbox enforced on every mutation.
+
+```
+Step 13.1: Add FileOps to CommandOp enum (terra-types)
+  - FileRead { path: String }
+  - FileWrite { path: String, content: String }
+  - FileDelete { path: String }
+  - ShellExec { command: String, workdir: Option<String>, timeout_ms: Option<u64> }
+  - No changes to existing variants
+
+Step 13.2: Route FileOps in Executor (terra-executor/router.rs)
+  - FileRead → std::fs::read_to_string, return content in data
+  - FileWrite → std::fs::write, return bytes_written in data
+  - FileDelete → std::fs::remove_file, return deleted path
+  - ShellExec → tokio::process::Command, capture stdout/stderr, enforce timeout
+  - All mutations go through SandboxGuard (Action Cage)
+
+Step 13.3: Executor cage mapping
+  - FileRead → CageAction::FileRead (already exists)
+  - FileWrite → CageAction::FileWrite (already exists)
+  - FileDelete → CageAction::FileDelete (already exists)
+  - ShellExec → new CageAction::ShellExec { command, workdir }
+  - Sandbox checks path for file ops, allows/blocks shell by config
+
+Step 13.4: Tests
+  - FileRead inside sandbox → Ok, content returned
+  - FileWrite inside sandbox → Ok, file created
+  - FileWrite outside sandbox → PermissionDenied
+  - FileDelete outside sandbox → PermissionDenied
+  - ShellExec with timeout → result or timeout error
+  - All operations in audit log
+```
+
+**Quality Gate:**
+- Agent can read/write real files through Executor
+- Sandbox blocks /etc/passwd write
+- ShellExec returns stdout/stderr
+- Every file op has audit entry
+
+---
+
+### Iteration 14: SubAgent Identity + Memory Borrowing
+
+**Goal:** SubAgents have real identity (soul), strict memory access control
+(read-only borrow of authorized levels), and communicate via MessagePack.
+
+```
+Step 14.1: SoulTemplate in IC (terra-core)
+  - SoulTemplate enum: Worker, Explorer, CageMonitor
+  - Each template defines: system_prompt_prefix, behavioral_constraints, allowed_ops
+  - Stored in L0 (read-only, part of IC)
+
+Step 14.2: AgentProfile (terra-agents)
+  - AgentProfile struct: id, soul, memory_access (Vec<Level>), allowed_ops, budget
+  - Created by Main Agent, validated by Cage
+  - SubAgent cannot modify its own profile (immutable after creation)
+
+Step 14.3: Memory borrowing enforcement
+  - SubAgent receives &MemoryView (read-only subset)
+  - MemoryView wraps MemoryDatabase with level filter
+  - Only authorized levels visible
+  - Write attempts → compile error (no write methods on MemoryView)
+
+Step 14.4: TaskPayload → ResultPayload communication
+  - Main encodes TaskPayload (MessagePack) with AgentProfile embedded
+  - Worker/Explorer decode, execute, encode ResultPayload
+  - ResultPayload: status + summary + artifacts (concise report, not full output)
+  - Main audits ResultPayload before proceeding
+
+Step 14.5: Tests
+  - Worker soul → system prompt contains "execute precisely, do not decide"
+  - Explorer soul → system prompt contains "search thoroughly, report neutrally"
+  - SubAgent cannot read L0/L1 unless authorized
+  - SubAgent MemWrite → blocked (no method available)
+  - TaskPayload → execute → ResultPayload roundtrip
+  - ResultPayload is concise (not full LLM output, just summary)
+```
+
+**Quality Gate:**
+- Each SubAgent has distinct soul in prompt
+- Memory borrow is compile-time enforced (type system)
+- MessagePack TaskPayload/ResultPayload full roundtrip
+- SubAgent report is structured and concise
+
+---
+
+### Iteration 15: Output Contract + Binary Pipeline
+
+**Goal:** LLM output is structured and parseable. The entire internal
+pipeline flows as MessagePack binary. Human-readable rendering only at exits.
+
+```
+Step 15.1: OutputContract definitions (terra-types)
+  - OutputContract trait: expected_schema(), parse(text) -> Result<Value>
+  - Per-CommandOp contracts:
+    FileWriteContract: { action, path, content }
+    TaskResultContract: { status, summary, files_modified, tests_passed }
+    AnalysisContract: { findings, recommendations }
+  - Contract violations → parse error → retry or report (never guess)
+
+Step 15.2: ProviderCall with contract enforcement
+  - ProviderCall gains output_contract: Option<String> field
+  - Contract name injected into system prompt as output format spec
+  - Response parsed against contract before returning
+  - Parse failure → CommandResult::Error with "output contract violation"
+
+Step 15.3: Internal binary pipeline
+  - CommandResult.data changes from serde_json::Value to MessagePack bytes
+    (or keep JSON internally, serialize to msgpack for inter-agent transport)
+  - Rendering pipeline: binary → Markdown only at terminal output
+  - Audit stores binary, renders on demand
+
+Step 15.4: Tests
+  - Valid JSON matching contract → parsed successfully
+  - Invalid JSON → contract violation error
+  - Contract injected into system prompt
+  - Binary roundtrip: struct → msgpack → struct → display
+```
+
+**Quality Gate:**
+- LLM output parsed against contract
+- Invalid output → error, not silent corruption
+- Internal flow is structured data, not free text
+
+---
+
+### Iteration 16: Compilation Pass 3 + Embedding
+
+**Goal:** Language Compilation can use LLM for semantic resolution.
+Vector search has real semantic capability.
+
+```
+Step 16.1: Compilation Pass 3 — Semantic Resolution
+  - When Provider available: send extracted entities to LLM
+  - LLM maps user terms to project-specific objects
+  - "the auth module" → "crates/terra-caging/src/engine.rs"
+  - Falls back to Pass 1-2 (keyword only) when no Provider
+
+Step 16.2: Compilation Pass 4-5
+  - Pass 4: Completeness Check — LLM identifies missing info, generates questions
+  - Pass 5: Ambiguity Detection — LLM flags ambiguous terms, suggests clarification
+  - Both optional (degrade gracefully without LLM)
+
+Step 16.3: ONNX Embedding integration
+  - Add ort crate to workspace
+  - OnnxBackend implements EmbeddingBackend trait
+  - Load sentence-transformers model (all-MiniLM-L6-v2 or multilingual)
+  - VectorIndex auto-selects: OnnxBackend if model available, TfIdf fallback
+  - Chinese text retrieval verified
+
+Step 16.4: Tests
+  - Pass 3 with DryRun → falls back gracefully
+  - Pass 4 generates open_questions for incomplete input
+  - Pass 5 flags "it" / "that thing" as ambiguous
+  - Embedding search: Chinese query → relevant Chinese results
+  - Backend swap: TfIdf → Onnx → search quality improves
+```
+
+**Quality Gate:**
+- 5-pass compilation complete (graceful degradation without LLM)
+- Chinese semantic search works with Onnx
+- Embedding model swappable at config level
+
+---
+
+### Iteration 17: Skill System + Skill Registry
+
+**Goal:** Skills are composable sequences of syscalls. Registered, versioned,
+permission-gated. First built-in Skills: CodeEditor, TestRunner.
+
+```
+Step 17.1: Skill trait and registry (terra-agents or new terra-skill crate)
+  - Skill trait: name(), version(), required_ops(), execute(context)
+  - SkillRegistry: register(), lookup(), list()
+  - Skill manifest: TOML with name, version, trust_level, required_ops
+
+Step 17.2: Skill permission gating
+  - Skill declares required CommandOps
+  - Registry validates: does agent's allowed_ops cover required_ops?
+  - Trust levels: System (built-in) > Official > Community > User
+  - Higher trust = more ops allowed
+
+Step 17.3: Built-in Skills
+  - CodeEditor: FileRead → ProviderCall (with FileWriteContract) → FileWrite
+  - TestRunner: ShellExec("cargo test") → parse output → TraceEvent
+  - MemoryInspector: MemSearch → MemRead → render
+
+Step 17.4: Skill ↔ SubAgent integration
+  - Worker executes Skills (not raw CommandOps)
+  - Skill provides the OutputContract for its ProviderCall
+  - Worker's allowed_ops must be superset of Skill's required_ops
+
+Step 17.5: Tests
+  - CodeEditor skill: read file → modify via LLM → write back
+  - TestRunner skill: run tests → report pass/fail
+  - Skill requires FileWrite but agent only has FileRead → blocked
+  - Trust level System > User verified
+```
+
+**Quality Gate:**
+- First real work done: read file, modify, write back, run test
+- Skill permission enforced by registry
+- Trust levels ordered correctly
+
+---
+
+## 13. Kernel V2 Dependency Graph
+
+```
+Iteration 13 (FileOps syscall)
+    │
+    ├── Iteration 14 (SubAgent identity + memory borrow)
+    │       │
+    │       ├── Iteration 15 (Output Contract + binary pipeline)
+    │       │
+    │       └── Iteration 17 (Skill system)
+    │
+    └── Iteration 16 (Compilation + Embedding)
+            │
+            └── (can run parallel with 14/15)
+
+After 17: Terra can do real work.
+```
+
+## 14. Definition of "Terra Can Do Real Work"
+
+All of the following must be true:
+1. User gives task description → compiled to SpecIR (5-pass)
+2. Main Agent creates Worker with soul + memory borrow + budget
+3. Worker reads target file (FileRead via Executor + Sandbox)
+4. Worker calls LLM with OutputContract (structured response)
+5. Worker writes modified file (FileWrite via Executor + Sandbox)
+6. Worker runs tests (ShellExec via Executor)
+7. Worker returns ResultPayload (concise summary via MessagePack)
+8. Main audits result → records to memory → reports to user
+9. All steps in audit log, all cages checked, all binary internally
+10. User sees Markdown-rendered result in terminal
