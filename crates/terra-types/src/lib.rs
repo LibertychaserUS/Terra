@@ -5,5 +5,7 @@
 //! It has no dependencies on other Terra crates.
 
 pub mod command;
+pub mod contract;
 
 pub use command::{Command, CommandOp, CommandResult, CommandStatus};
+pub use contract::{OutputContract, ContractParseResult};

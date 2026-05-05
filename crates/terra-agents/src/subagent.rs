@@ -112,6 +112,7 @@ impl SubAgentRunner {
                 user_prompt,
                 max_tokens: task.budget_max_tokens,
                 temperature: Some(0.0),
+                output_contract: None,
             },
         );
 

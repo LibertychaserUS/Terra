@@ -153,7 +153,7 @@ pub async fn route(
             })))
         }
 
-        CommandOp::ProviderCall { system_prompt, user_prompt, max_tokens, temperature } => {
+        CommandOp::ProviderCall { system_prompt, user_prompt, max_tokens, temperature, .. } => {
             let request = CompletionRequest {
                 system_prompt: system_prompt.clone(),
                 user_prompt: user_prompt.clone(),
@@ -364,6 +364,7 @@ mod tests {
                 system_prompt: "You are helpful.".into(),
                 user_prompt: "What is 2+2?".into(),
                 max_tokens: Some(50), temperature: None,
+                output_contract: None,
             },
             "main", &mem, &art, &search, &prov,
         ).await;

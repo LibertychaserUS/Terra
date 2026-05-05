@@ -82,7 +82,7 @@ pub fn render_command(cmd: &Command) -> String {
             lines.push(format!("- **Title**: {}", title));
             lines.push(format!("- **Summary**: {}", summary));
         }
-        CommandOp::ProviderCall { system_prompt: _, user_prompt, max_tokens, temperature } => {
+        CommandOp::ProviderCall { system_prompt: _, user_prompt, max_tokens, temperature, output_contract } => {
             lines.push(format!("- **Op**: provider_call"));
             lines.push(format!("- **Prompt**: {}", &user_prompt[..user_prompt.len().min(100)]));
             if let Some(mt) = max_tokens {
@@ -90,6 +90,9 @@ pub fn render_command(cmd: &Command) -> String {
             }
             if let Some(t) = temperature {
                 lines.push(format!("- **Temperature**: {}", t));
+            }
+            if let Some(c) = output_contract {
+                lines.push(format!("- **Contract**: {}", c));
             }
         }
         CommandOp::FileRead { path } => {

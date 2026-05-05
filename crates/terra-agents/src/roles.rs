@@ -102,6 +102,7 @@ impl WorkerAgent {
                 user_prompt,
                 max_tokens: Some(self.config.max_tokens),
                 temperature: Some(self.config.temperature),
+                output_contract: None,
             },
         );
 

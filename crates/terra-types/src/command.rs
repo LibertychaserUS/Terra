@@ -52,6 +52,11 @@ pub enum CommandOp {
         user_prompt: String,
         max_tokens: Option<u32>,
         temperature: Option<f32>,
+        /// Optional output contract name. When set, the contract's format
+        /// instruction is appended to system_prompt, and the response is
+        /// parsed against the contract. Violations → Error.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_contract: Option<String>,
     },
     /// Read a file from the filesystem.
     FileRead {

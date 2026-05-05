@@ -141,6 +141,7 @@ impl Orchestrator {
                 user_prompt,
                 max_tokens: Some(2000),
                 temperature: Some(0.0),
+                output_contract: None,
             },
         );
         let provider_result = self.executor.execute(provider_cmd).await;

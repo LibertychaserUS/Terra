@@ -376,6 +376,7 @@ mod tests {
                 user_prompt: "What is 2+2?".into(),
                 max_tokens: Some(50),
                 temperature: None,
+                output_contract: None,
             },
         );
         let result = exec.execute(cmd).await;
