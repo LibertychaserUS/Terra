@@ -88,8 +88,22 @@ fn bootstrap() -> Orchestrator {
         tracing::info!("Constitution loaded from {}", constitution_path.display());
     }
 
-    // L2: Memory Database
-    let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+    // L2: Memory Database (per-project persistent storage)
+    let memory = if terra_dir.exists() {
+        let db_path = terra_dir.join("memory.db");
+        match MemoryDatabase::open(&db_path) {
+            Ok(db) => {
+                tracing::info!("Memory database: {}", db_path.display());
+                Arc::new(db)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open {}: {}, falling back to in-memory", db_path.display(), e);
+                Arc::new(MemoryDatabase::open_in_memory().unwrap())
+            }
+        }
+    } else {
+        Arc::new(MemoryDatabase::open_in_memory().unwrap())
+    };
 
     // L2: Audit Trail (with persistence if .terra dir exists)
     let audit = if terra_dir.exists() {
@@ -234,6 +248,7 @@ max_candidates = 10
             println!("    \x1b[2m{}\x1b[0m", terra_dir.display());
             println!("    ├── constitution.toml  (safety rules)");
             println!("    ├── config.toml        (provider + sleep)");
+            println!("    ├── memory.db          (created on first run)");
             println!("    └── audit.db           (created on first run)");
             println!();
             println!("  Next steps:");
@@ -265,7 +280,13 @@ max_candidates = 10
             let constitution_path = terra_dir.join("constitution.toml");
             let constitution = terra_caging::Constitution::load(&constitution_path).ok();
 
-            let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+            let memory = if terra_dir.exists() {
+                MemoryDatabase::open(&terra_dir.join("memory.db"))
+                    .map(Arc::new)
+                    .unwrap_or_else(|_| Arc::new(MemoryDatabase::open_in_memory().unwrap()))
+            } else {
+                Arc::new(MemoryDatabase::open_in_memory().unwrap())
+            };
             let artifacts = Arc::new(ArtifactStore::new(terra_dir.clone()));
             let audit = if terra_dir.exists() {
                 AuditLog::with_persistence(&terra_dir.join("audit.db"))
