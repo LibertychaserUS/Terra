@@ -150,6 +150,132 @@ impl SpecIR {
     pub fn is_complete(&self) -> bool {
         self.open_questions.is_empty()
     }
+
+    /// Full 5-pass compilation.
+    ///
+    /// Passes 1-2: program-driven (lexical + terminology). Zero token cost.
+    /// Passes 3-5: LLM-assisted when `llm_callback` is Some. Graceful fallback otherwise.
+    ///
+    /// `llm_callback`: takes a prompt string, returns LLM response string.
+    /// Pass None to skip LLM passes (degrade to Pass 1-2 only).
+    pub fn compile_full(
+        description: &str,
+        term_table: &TermTable,
+        llm_callback: Option<&dyn Fn(&str) -> Option<String>>,
+    ) -> Self {
+        // Pass 1: Lexical — extract file paths and line numbers
+        let (file, line) = lexical_extract(description);
+
+        // Pass 2: Terminology normalization
+        let resolved_terms = terminology_pass(description, term_table);
+
+        let mut open_questions = Vec::new();
+        let mut target = Target {
+            file: file.clone(),
+            line,
+            function: None,
+            component: None,
+            scope: if line.is_some() { "line".into() } else { "unknown".into() },
+        };
+
+        if file.is_none() {
+            open_questions.push("Target file not specified".into());
+        }
+
+        // Pass 3: Semantic Resolution (LLM-assisted)
+        if let Some(callback) = llm_callback {
+            let prompt = format!(
+                "Given this task description, identify the specific project files, \
+                 functions, or components being referenced. Return JSON: \
+                 {{\"file\": \"...\", \"function\": \"...\", \"component\": \"...\", \"scope\": \"...\"}}\n\
+                 Description: {}",
+                description
+            );
+            if let Some(response) = callback(&prompt) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
+                    if let Some(f) = parsed.get("file").and_then(|v| v.as_str()) {
+                        if !f.is_empty() {
+                            target.file = Some(f.to_string());
+                            // Remove the "not specified" question if we resolved it
+                            open_questions.retain(|q: &String| !q.contains("Target file"));
+                        }
+                    }
+                    if let Some(func) = parsed.get("function").and_then(|v| v.as_str()) {
+                        if !func.is_empty() {
+                            target.function = Some(func.to_string());
+                        }
+                    }
+                    if let Some(comp) = parsed.get("component").and_then(|v| v.as_str()) {
+                        if !comp.is_empty() {
+                            target.component = Some(comp.to_string());
+                        }
+                    }
+                    if let Some(scope) = parsed.get("scope").and_then(|v| v.as_str()) {
+                        if !scope.is_empty() {
+                            target.scope = scope.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 4: Completeness Check (LLM-assisted)
+        if let Some(callback) = llm_callback {
+            let prompt = format!(
+                "Analyze this task for missing information. Return JSON: \
+                 {{\"missing\": [\"question 1\", \"question 2\"]}}\n\
+                 Task: {}\nTarget: {:?}\nTerms: {:?}",
+                description, target.file, resolved_terms
+            );
+            if let Some(response) = callback(&prompt) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
+                    if let Some(missing) = parsed.get("missing").and_then(|v| v.as_array()) {
+                        for q in missing {
+                            if let Some(s) = q.as_str() {
+                                if !s.is_empty() {
+                                    open_questions.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 5: Ambiguity Detection (LLM-assisted)
+        if let Some(callback) = llm_callback {
+            let prompt = format!(
+                "Check for ambiguous references in this task. Flag words like \
+                 'it', 'that', 'the thing', 'this'. Return JSON: \
+                 {{\"ambiguous\": [\"term1\", \"term2\"]}}\n\
+                 Task: {}",
+                description
+            );
+            if let Some(response) = callback(&prompt) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
+                    if let Some(ambiguous) = parsed.get("ambiguous").and_then(|v| v.as_array()) {
+                        for term in ambiguous {
+                            if let Some(s) = term.as_str() {
+                                if !s.is_empty() {
+                                    open_questions.push(format!("Ambiguous reference: '{}'", s));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            spec_id: Uuid::new_v4().to_string(),
+            intent: description.to_string(),
+            target,
+            constraints: Vec::new(),
+            success_predicate: Vec::new(),
+            open_questions,
+            resolved_terms,
+        }
+    }
 }
 
 /// Lexical pass: extract file paths and line numbers from description.
@@ -479,5 +605,147 @@ mod tests {
         let table = TermTable::empty();
         let spec = SpecIR::compile("fix auth.py line 10", &table);
         assert!(spec.is_complete(), "spec with file target should be complete");
+    }
+
+    // --- 5-pass compilation tests ---
+
+    // Pass 3: Semantic resolution with LLM callback
+    #[test]
+    fn pass3_semantic_resolution_with_llm() {
+        let table = TermTable::default_coding();
+        let mock_llm = |prompt: &str| -> Option<String> {
+            if prompt.contains("identify the specific") {
+                Some(r#"{"file": "src/auth.rs", "function": "validate_password", "component": "", "scope": "auth_module"}"#.into())
+            } else {
+                None
+            }
+        };
+
+        let spec = SpecIR::compile_full(
+            "fix the auth module validation",
+            &table,
+            Some(&mock_llm),
+        );
+
+        assert_eq!(spec.target.file.as_deref(), Some("src/auth.rs"));
+        assert_eq!(spec.target.function.as_deref(), Some("validate_password"));
+        assert_eq!(spec.target.scope, "auth_module");
+    }
+
+    // Pass 3: Falls back without LLM
+    #[test]
+    fn pass3_fallback_without_llm() {
+        let table = TermTable::empty();
+        let spec = SpecIR::compile_full("fix the auth module", &table, None);
+        // No LLM → no semantic resolution → file still unknown
+        assert!(spec.target.file.is_none());
+        assert!(!spec.is_complete());
+    }
+
+    // Pass 4: Completeness check generates questions
+    #[test]
+    fn pass4_completeness_generates_questions() {
+        let table = TermTable::empty();
+        let mock_llm = |prompt: &str| -> Option<String> {
+            if prompt.contains("missing information") {
+                Some(r#"{"missing": ["Which branch should this fix target?", "Should tests be updated?"]}"#.into())
+            } else if prompt.contains("identify the specific") {
+                Some(r#"{"file": "src/main.rs", "function": "", "component": "", "scope": ""}"#.into())
+            } else {
+                None
+            }
+        };
+
+        let spec = SpecIR::compile_full("fix the bug", &table, Some(&mock_llm));
+        assert!(
+            spec.open_questions.iter().any(|q| q.contains("branch")),
+            "should have completeness question, got: {:?}", spec.open_questions
+        );
+    }
+
+    // Pass 5: Ambiguity detection flags vague terms
+    #[test]
+    fn pass5_ambiguity_detection() {
+        let table = TermTable::empty();
+        let mock_llm = |prompt: &str| -> Option<String> {
+            if prompt.contains("ambiguous") {
+                Some(r#"{"ambiguous": ["it", "that thing"]}"#.into())
+            } else if prompt.contains("identify") {
+                Some(r#"{"file": "", "function": "", "component": "", "scope": ""}"#.into())
+            } else if prompt.contains("missing") {
+                Some(r#"{"missing": []}"#.into())
+            } else {
+                None
+            }
+        };
+
+        let spec = SpecIR::compile_full(
+            "fix it because that thing is broken",
+            &table,
+            Some(&mock_llm),
+        );
+        assert!(
+            spec.open_questions.iter().any(|q| q.contains("Ambiguous")),
+            "should flag ambiguous terms, got: {:?}", spec.open_questions
+        );
+    }
+
+    // Full 5-pass: all passes together
+    #[test]
+    fn full_5pass_compilation() {
+        let table = TermTable::default_coding();
+        let call_count = std::cell::Cell::new(0u32);
+
+        let mock_llm = |prompt: &str| -> Option<String> {
+            call_count.set(call_count.get() + 1);
+            if prompt.contains("identify") {
+                Some(r#"{"file": "src/auth.rs", "function": "login", "component": "", "scope": "auth"}"#.into())
+            } else if prompt.contains("missing") {
+                Some(r#"{"missing": []}"#.into())
+            } else if prompt.contains("ambiguous") {
+                Some(r#"{"ambiguous": []}"#.into())
+            } else {
+                None
+            }
+        };
+
+        let spec = SpecIR::compile_full(
+            "fix the login bug in auth module",
+            &table,
+            Some(&mock_llm),
+        );
+
+        // All 3 LLM passes called
+        assert_eq!(call_count.get(), 3, "should call LLM for passes 3, 4, 5");
+        // Pass 1+2 (program): term resolved
+        assert!(!spec.resolved_terms.is_empty() || spec.target.file.is_some());
+        // Pass 3 (LLM): file resolved
+        assert_eq!(spec.target.file.as_deref(), Some("src/auth.rs"));
+        // Pass 4+5: no issues found → complete
+        assert!(spec.is_complete() || spec.open_questions.is_empty());
+    }
+
+    // Graceful degradation: LLM callback returns None
+    #[test]
+    fn llm_returns_none_graceful() {
+        let table = TermTable::empty();
+        let broken_llm = |_prompt: &str| -> Option<String> { None };
+
+        let spec = SpecIR::compile_full("fix bug", &table, Some(&broken_llm));
+        // Should not panic, falls back to Pass 1-2 results
+        assert_eq!(spec.intent, "fix bug");
+    }
+
+    // LLM returns invalid JSON — no crash
+    #[test]
+    fn llm_returns_invalid_json() {
+        let table = TermTable::empty();
+        let bad_llm = |_prompt: &str| -> Option<String> {
+            Some("this is not json".into())
+        };
+
+        let spec = SpecIR::compile_full("fix bug", &table, Some(&bad_llm));
+        // Invalid JSON silently ignored, falls back
+        assert_eq!(spec.intent, "fix bug");
     }
 }

@@ -4,9 +4,11 @@
 //! standardized Spec IR with terminology normalization.
 //!
 //! Passes:
-//! 1. Lexical — extract file paths, line numbers, entities
-//! 2. Terminology — normalize informal terms to canonical forms
-//! 3-5. (Future: Semantic, Completeness, Ambiguity — require LLM)
+//! 1. Lexical — extract file paths, line numbers, entities (program)
+//! 2. Terminology — normalize informal terms to canonical forms (program)
+//! 3. Semantic Resolution — map entities to project objects (LLM-assisted, optional)
+//! 4. Completeness Check — identify missing info (LLM-assisted, optional)
+//! 5. Ambiguity Detection — flag vague references (LLM-assisted, optional)
 
 pub mod spec_ir;
 
