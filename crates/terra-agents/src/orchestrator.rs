@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::info;
 
-use terra_compile::SpecIR;
+use terra_compile::{SpecIR, ExecutionPlan, PlanStep, StepStatus};
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_protocol::command::{Command, CommandOp};
@@ -151,6 +151,83 @@ impl Orchestrator {
             prompt_tokens,
             completion_tokens,
         })
+    }
+
+    /// Propose an ExecutionPlan for a goal by asking LLM.
+    ///
+    /// Returns a plan with steps the LLM suggests. User should confirm/modify
+    /// before execution. Falls back to a default plan if LLM output can't be parsed.
+    pub async fn propose_plan(&self, goal: &str) -> Result<ExecutionPlan> {
+        let spec = SpecIR::from_task_description(goal);
+
+        let prompt = format!(
+            "Given this coding task, propose an execution plan as JSON.\n\
+             Task: {}\n\n\
+             Return ONLY a JSON array of steps:\n\
+             [{{\"name\": \"step_name\", \"description\": \"what to do\", \"ops\": [\"FileRead\", \"ProviderCall\"]}}]\n\n\
+             Keep it concise. 2-5 steps max.",
+            goal
+        );
+
+        let cmd = Command::new("main", CommandOp::ProviderCall {
+            system_prompt: "You are a planning assistant. Output ONLY valid JSON.".into(),
+            user_prompt: prompt,
+            max_tokens: Some(500),
+            temperature: Some(0.0),
+            output_contract: None,
+        });
+
+        let result = self.executor.execute(cmd).await;
+        let content = result.data.as_ref()
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("[]");
+
+        let mut plan = ExecutionPlan::from_spec(spec);
+
+        // Try to parse LLM steps
+        if let Ok(steps) = serde_json::from_str::<Vec<serde_json::Value>>(
+            &extract_json_array(content)
+        ) {
+            let mut prev_name: Option<String> = None;
+            for step_val in &steps {
+                let name = step_val.get("name").and_then(|n| n.as_str()).unwrap_or("step").to_string();
+                let desc = step_val.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                let ops: Vec<String> = step_val.get("ops")
+                    .and_then(|o| o.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                let depends = prev_name.clone().map(|n| vec![n]).unwrap_or_default();
+
+                plan.add_step(PlanStep {
+                    name: name.clone(),
+                    description: desc,
+                    required_ops: ops,
+                    input_ref: None,
+                    depends_on: depends,
+                    status: StepStatus::Pending,
+                    output: None,
+                });
+                prev_name = Some(name);
+            }
+        }
+
+        // Fallback: if no steps parsed, add a generic single step
+        if plan.steps.is_empty() {
+            plan.add_step(PlanStep {
+                name: "execute".into(),
+                description: format!("Execute: {}", goal),
+                required_ops: vec!["ProviderCall".into()],
+                input_ref: None,
+                depends_on: vec![],
+                status: StepStatus::Pending,
+                output: None,
+            });
+        }
+
+        info!(steps = plan.steps.len(), version = plan.version, "plan proposed");
+        Ok(plan)
     }
 
     /// Run a task through the complete canonical pipeline (single-shot).
@@ -311,6 +388,26 @@ impl Orchestrator {
     }
 }
 
+/// Extract a JSON array from LLM response (handles code blocks).
+fn extract_json_array(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with('[') {
+        return trimmed.to_string();
+    }
+    if let Some(start) = trimmed.find("```json") {
+        let after = &trimmed[start + 7..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
+        if start < end {
+            return trimmed[start..=end].to_string();
+        }
+    }
+    "[]".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +510,69 @@ mod tests {
         // terra-agents depends only on terra-core, terra-protocol,
         // terra-compile, terra-executor — NOT terra-memory or terra-providers
         assert!(true);
+    }
+
+    // T-DP-001: goal generates plan
+    #[tokio::test]
+    async fn goal_generates_plan() {
+        let (orch, _dir) = test_orchestrator();
+        let plan = orch.propose_plan("add logging to auth.rs").await.unwrap();
+        assert!(!plan.steps.is_empty(), "plan should have steps");
+        assert_eq!(plan.spec.intent, "add logging to auth.rs");
+        // DryRun won't produce real JSON, so fallback step expected
+        assert!(plan.steps.len() >= 1);
+    }
+
+    // T-DP-005: plan versions trackable
+    #[tokio::test]
+    async fn plan_versions_trackable() {
+        let (orch, _dir) = test_orchestrator();
+        let mut plan = orch.propose_plan("fix bug").await.unwrap();
+        let v1 = plan.version;
+
+        plan.add_step(PlanStep {
+            name: "extra".into(),
+            description: "extra step".into(),
+            required_ops: vec![],
+            input_ref: None,
+            depends_on: vec![],
+            status: StepStatus::Pending,
+            output: None,
+        });
+        assert!(plan.version > v1, "version should increment");
+    }
+
+    // T-DP-006: spec mutable after compile
+    #[tokio::test]
+    async fn spec_mutable_after_compile() {
+        let (orch, _dir) = test_orchestrator();
+        let mut plan = orch.propose_plan("fix bug").await.unwrap();
+        let v1 = plan.version;
+
+        let mut new_spec = plan.spec.clone();
+        new_spec.constraints.push("minimal_change".into());
+        plan.update_spec(new_spec);
+
+        assert!(plan.version > v1);
+        assert!(plan.spec.constraints.contains(&"minimal_change".into()));
+    }
+
+    // Test extract_json_array
+    #[test]
+    fn extract_json_array_bare() {
+        let result = extract_json_array(r#"[{"name": "test"}]"#);
+        assert!(result.starts_with('['));
+    }
+
+    #[test]
+    fn extract_json_array_code_block() {
+        let result = extract_json_array("Here's the plan:\n```json\n[{\"name\": \"step1\"}]\n```");
+        assert!(result.starts_with('['));
+    }
+
+    #[test]
+    fn extract_json_array_fallback() {
+        let result = extract_json_array("no json here");
+        assert_eq!(result, "[]");
     }
 }

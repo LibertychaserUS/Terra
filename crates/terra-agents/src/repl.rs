@@ -255,12 +255,34 @@ impl Repl {
                 }
             }
             "/trace" => {
-                // Executor holds the audit log — we can't directly access it here.
-                // In a full implementation, we'd have a reference to AuditLog.
                 vec![
                     ReplOutput::Text("Trace: use `terra trace` for full audit log".into()),
                     self.prompt(),
                 ]
+            }
+            "/plan" => {
+                // Show current plan if in Goal Mode
+                if !self.session.mode().is_goal() {
+                    return vec![
+                        ReplOutput::Text("No active plan. Use /goal first.".into()),
+                        self.prompt(),
+                    ];
+                }
+                // Try to propose a plan for the current goal
+                let goal = match self.session.mode() {
+                    crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
+                    _ => String::new(),
+                };
+                match self.orchestrator.propose_plan(&goal).await {
+                    Ok(plan) => {
+                        let display = plan.display();
+                        vec![ReplOutput::Text(display), self.prompt()]
+                    }
+                    Err(e) => vec![
+                        ReplOutput::Text(format!("Plan error: {}", e)),
+                        self.prompt(),
+                    ],
+                }
             }
             "/clear" => {
                 self.context.clear();
@@ -279,6 +301,7 @@ impl Repl {
                     ReplOutput::Text("  /remember \"x\" — Save to L1 memory".into()),
                     ReplOutput::Text("  /sleep         — Manual sleep consolidation".into()),
                     ReplOutput::Text("  /trace         — View audit trail".into()),
+                    ReplOutput::Text("  /plan          — Show/propose execution plan".into()),
                     ReplOutput::Text("  /clear         — Clear screen and context".into()),
                     ReplOutput::Text("  /help          — This message".into()),
                     ReplOutput::Text("  /quit          — Exit Terra".into()),

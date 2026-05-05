@@ -267,3 +267,43 @@ async fn full_pipeline_live() {
     let entries = audit.entries();
     assert!(entries.len() >= 5, "pipeline should record audit entries");
 }
+
+/// T-FULL-001: User intent → plan proposed → file could be modified
+#[tokio::test]
+async fn full_pipeline_plan_proposal() {
+    if !has_api_key() {
+        eprintln!("skipping full_pipeline_plan_proposal (no API key)");
+        return;
+    }
+    let provider = match live_provider() {
+        Some(p) => p,
+        None => { eprintln!("skipping"); return; }
+    };
+
+    let (exec, audit, dir) = live_executor(provider);
+    let mut core = IntelligenceCore::new();
+    core.register(Box::new(CodingModule));
+    core.register(Box::new(AlgorithmModule));
+    let orch = terra_agents::Orchestrator::new(exec, Arc::new(core));
+
+    // Step 1: Propose plan
+    let plan = orch.propose_plan("add a hello world function to main.rs").await.unwrap();
+    eprintln!("Proposed plan:\n{}", plan.display());
+    assert!(!plan.steps.is_empty(), "plan should have steps");
+
+    // Step 2: Goal turn with the plan context
+    let result = orch.run_goal_turn(
+        "Write a simple hello world Rust function",
+        "add hello world to main.rs",
+        "",
+    ).await.unwrap();
+
+    eprintln!("Goal turn response: {}", safe_truncate(&result.response, 200));
+    assert!(!result.response.is_empty());
+    assert!(result.ic_rules_applied >= 13);
+
+    // Step 3: Verify audit trail has IC + provider entries
+    let entries = audit.entries();
+    eprintln!("Audit entries: {}", entries.len());
+    assert!(entries.len() >= 3, "should have audit entries for goal turn");
+}
