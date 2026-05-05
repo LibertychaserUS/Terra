@@ -11,6 +11,7 @@ use terra_core::domain::{AlgorithmModule, CodingModule};
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_memory::MemoryDatabase;
+use terra_memory::ArtifactStore;
 use terra_providers::adapter::{DryRunAdapter, ProviderAdapter};
 use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
@@ -85,14 +86,18 @@ fn bootstrap() -> Orchestrator {
         Box::new(MetaCage),
     ]));
 
-    // L1: Provider (auto-detect: live if key available, dry_run otherwise)
+    // L2: Artifact Store
+    let artifacts_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".terra");
+    let artifacts = Arc::new(ArtifactStore::new(artifacts_root));
+
+    // L1: Provider
     let provider: Arc<dyn ProviderAdapter> = match OpenAICompatibleAdapter::from_env() {
         Ok(adapter) => Arc::new(adapter),
         Err(_) => Arc::new(DryRunAdapter::new()),
     };
 
     // L3+: Command Executor (the single gateway, includes provider)
-    let executor = Arc::new(CommandExecutor::new(memory, audit, caging, provider));
+    let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
 
     // L4: Intelligence Core with domain modules
     let mut core = IntelligenceCore::new();

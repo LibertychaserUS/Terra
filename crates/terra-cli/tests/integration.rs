@@ -16,10 +16,13 @@ use terra_memory::MemoryDatabase;
 use terra_memory::types::{Level, Scope};
 use terra_trace::AuditLog;
 
+use terra_memory::ArtifactStore;
 use terra_providers::adapter::{DryRunAdapter, ProviderAdapter};
 
-fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>) {
+fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+    let artifacts = Arc::new(ArtifactStore::new(dir.path().to_path_buf()));
     let audit = Arc::new(AuditLog::new());
     let provider: Arc<dyn ProviderAdapter> = Arc::new(DryRunAdapter::new());
     let sandbox = SandboxGuard::new(PathBuf::from("/projects/test"), vec![]);
@@ -30,20 +33,20 @@ fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>) {
         Box::new(VerificationCage),
         Box::new(MetaCage),
     ]));
-    let executor = Arc::new(CommandExecutor::new(memory, audit.clone(), caging, provider));
+    let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit.clone(), caging, provider));
 
     let mut core = IntelligenceCore::new();
     core.register(Box::new(CodingModule));
     core.register(Box::new(AlgorithmModule));
     let core = Arc::new(core);
 
-    (Orchestrator::new(executor, core), audit)
+    (Orchestrator::new(executor, core), audit, dir)
 }
 
 /// T-INT-001: Run task → result available.
 #[tokio::test]
 async fn run_produces_result() {
-    let (orch, _audit) = test_orchestrator();
+    let (orch, _audit, _dir) = test_orchestrator();
     let result = orch.run("fix the auth bug").await.unwrap();
     assert!(!result.worker_response.is_empty());
     assert!(result.ic_rules_applied > 0);
@@ -90,7 +93,7 @@ fn full_caging_chain() {
 /// T-INT-004: Audit trail records pipeline steps.
 #[tokio::test]
 async fn audit_trail_pipeline() {
-    let (orch, audit) = test_orchestrator();
+    let (orch, audit, _dir) = test_orchestrator();
     orch.run("test task").await.unwrap();
 
     let entries = audit.entries();
@@ -121,7 +124,7 @@ fn project_isolation() {
 /// T-PI-001: Pipeline IC rules applied.
 #[tokio::test]
 async fn pipeline_ic_rules_applied() {
-    let (orch, _) = test_orchestrator();
+    let (orch, _, _dir) = test_orchestrator();
     let result = orch.run("refactor module").await.unwrap();
     // Universal (13) + CodingModule (3) + AlgorithmModule (2) = 18
     assert!(result.ic_rules_applied >= 15, "should have 15+ rules, got {}", result.ic_rules_applied);

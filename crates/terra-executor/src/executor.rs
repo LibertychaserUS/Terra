@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use terra_caging::cage::{CageAction, CageContext};
 use terra_caging::engine::CagingEngine;
 use terra_memory::MemoryDatabase;
+use terra_memory::ArtifactStore;
 use terra_protocol::command::{Command, CommandOp, CommandResult, CommandStatus};
 use terra_trace::AuditLog;
 
@@ -22,6 +23,7 @@ use crate::router;
 /// If cage blocks: return PermissionDenied without executing.
 pub struct CommandExecutor {
     memory: Arc<MemoryDatabase>,
+    artifacts: Arc<ArtifactStore>,
     audit: Arc<AuditLog>,
     caging: Arc<CagingEngine>,
     provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
@@ -30,11 +32,12 @@ pub struct CommandExecutor {
 impl CommandExecutor {
     pub fn new(
         memory: Arc<MemoryDatabase>,
+        artifacts: Arc<ArtifactStore>,
         audit: Arc<AuditLog>,
         caging: Arc<CagingEngine>,
         provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
     ) -> Self {
-        Self { memory, audit, caging, provider }
+        Self { memory, artifacts, audit, caging, provider }
     }
 
     /// Execute a command through the full pipeline.
@@ -77,7 +80,7 @@ impl CommandExecutor {
         }
 
         // 3. Execute via router
-        let mut result = router::route(&cmd.op, &agent, &self.memory, &self.provider).await;
+        let mut result = router::route(&cmd.op, &agent, &self.memory, &self.artifacts, &self.provider).await;
         result.command_id = cmd_id;
 
         // 4. Audit: record result with duration
@@ -156,8 +159,10 @@ mod tests {
     use terra_caging::sandbox::SandboxGuard;
     use terra_providers::adapter::DryRunAdapter;
 
-    fn test_executor() -> CommandExecutor {
+    fn test_executor() -> (CommandExecutor, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+        let artifacts = Arc::new(ArtifactStore::new(dir.path().to_path_buf()));
         let audit = Arc::new(AuditLog::new());
         let provider: Arc<dyn terra_providers::adapter::ProviderAdapter> =
             Arc::new(DryRunAdapter::new());
@@ -175,7 +180,8 @@ mod tests {
             Box::new(MetaCage),
         ]));
 
-        CommandExecutor::new(memory, audit, caging, provider)
+        let exec = CommandExecutor::new(memory, artifacts, audit, caging, provider);
+        (exec, dir)
     }
 
     fn write_cmd(key: &str, agent: &str) -> Command {
@@ -196,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_before_execute() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("key1", "main")).await;
 
         let entries = exec.audit.entries();
@@ -206,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn cage_check_before_execute() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("owned_key", "main")).await;
         let result = exec.execute(write_cmd("owned_key", "attacker")).await;
         assert_eq!(result.status, CommandStatus::PermissionDenied);
@@ -214,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn cage_block_prevents_write() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("protected", "main")).await;
         let result = exec.execute(write_cmd("protected", "hacker")).await;
         assert_eq!(result.status, CommandStatus::PermissionDenied);
@@ -226,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_mem_to_memory() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         let result = exec.execute(write_cmd("routed", "main")).await;
         assert_eq!(result.status, CommandStatus::Ok);
 
@@ -237,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_trace_to_audit() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         let cmd = Command::new(
             "main",
             CommandOp::TraceCheckpoint {
@@ -252,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn result_has_duration() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("timed", "main")).await;
 
         let entries = exec.audit.entries();
@@ -261,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_denied_on_block() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("owned", "alice")).await;
 
         let result = exec.execute(write_cmd("owned", "bob")).await;
@@ -270,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_records_command_and_result() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("audited", "main")).await;
 
         let entries = exec.audit.entries();
@@ -281,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_commands_sequential() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("a", "main")).await;
         exec.execute(write_cmd("b", "main")).await;
         exec.execute(write_cmd("c", "main")).await;
@@ -292,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_command_audited() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         exec.execute(write_cmd("x", "owner")).await;
         exec.execute(write_cmd("x", "attacker")).await;
 
@@ -307,7 +313,7 @@ mod tests {
     // NEW: ProviderCall through executor
     #[tokio::test]
     async fn provider_call_through_executor() {
-        let exec = test_executor();
+        let (exec, _dir) = test_executor();
         let cmd = Command::new(
             "main",
             CommandOp::ProviderCall {

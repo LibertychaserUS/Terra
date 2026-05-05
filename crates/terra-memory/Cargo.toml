@@ -16,3 +16,6 @@ tokio.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 moka.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

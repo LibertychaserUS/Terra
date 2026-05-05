@@ -208,12 +208,14 @@ mod tests {
     use terra_caging::engine::*;
     use terra_caging::sandbox::SandboxGuard;
     use terra_core::domain::{AlgorithmModule, CodingModule};
-    use terra_memory::MemoryDatabase;
+    use terra_memory::{MemoryDatabase, ArtifactStore};
     use terra_providers::adapter::DryRunAdapter;
     use terra_trace::AuditLog;
 
-    fn test_orchestrator() -> Orchestrator {
+    fn test_orchestrator() -> (Orchestrator, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+        let artifacts = Arc::new(ArtifactStore::new(dir.path().to_path_buf()));
         let audit = Arc::new(AuditLog::new());
         let provider: Arc<dyn terra_providers::adapter::ProviderAdapter> =
             Arc::new(DryRunAdapter::new());
@@ -225,19 +227,19 @@ mod tests {
             Box::new(VerificationCage),
             Box::new(MetaCage),
         ]));
-        let executor = Arc::new(CommandExecutor::new(memory, audit, caging, provider));
+        let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
 
         let mut core = IntelligenceCore::new();
         core.register(Box::new(CodingModule));
         core.register(Box::new(AlgorithmModule));
         let core = Arc::new(core);
 
-        Orchestrator::new(executor, core)
+        (Orchestrator::new(executor, core), dir)
     }
 
     #[tokio::test]
     async fn pipeline_all_stages_invoked() {
-        let orch = test_orchestrator();
+        let (orch, _dir) = test_orchestrator();
         let result = orch.run("fix the auth bug").await.unwrap();
 
         assert_eq!(result.spec.intent, "fix the auth bug");
@@ -249,14 +251,14 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_ic_rules_applied() {
-        let orch = test_orchestrator();
+        let (orch, _dir) = test_orchestrator();
         let result = orch.run("fix bug").await.unwrap();
         assert!(result.ic_rules_applied >= 13);
     }
 
     #[tokio::test]
     async fn pipeline_provider_through_executor() {
-        let orch = test_orchestrator();
+        let (orch, _dir) = test_orchestrator();
         let result = orch.run("test").await.unwrap();
         // Response came from DryRunAdapter via Executor (not direct call)
         assert!(result.worker_response.contains("DRY_RUN"));
@@ -265,14 +267,14 @@ mod tests {
 
     #[tokio::test]
     async fn main_agent_queries_ic() {
-        let orch = test_orchestrator();
+        let (orch, _dir) = test_orchestrator();
         let result = orch.run("refactor the module").await.unwrap();
         assert!(result.ic_rules_applied > 0);
     }
 
     #[tokio::test]
     async fn end_to_end_pipeline() {
-        let orch = test_orchestrator();
+        let (orch, _dir) = test_orchestrator();
         let result = orch.run("fix the empty password bug in auth.py line 42").await.unwrap();
         assert_eq!(result.spec.intent, "fix the empty password bug in auth.py line 42");
         assert!(result.ic_rules_applied >= 13);
@@ -281,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_task_handled() {
-        let orch = test_orchestrator();
+        let (orch, _dir) = test_orchestrator();
         let result = orch.run("").await.unwrap();
         assert_eq!(result.spec.intent, "");
     }

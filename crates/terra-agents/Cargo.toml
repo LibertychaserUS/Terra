@@ -17,6 +17,7 @@ tokio.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 terra-memory = { path = "../terra-memory" }
 terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }

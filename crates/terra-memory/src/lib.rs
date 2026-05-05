@@ -16,8 +16,10 @@ pub mod error;
 pub mod store;
 pub mod safety;
 pub mod cache;
+pub mod artifact;
 pub mod db;
 
 pub use db::MemoryDatabase;
 pub use error::MemoryError;
 pub use types::{Level, MemoryEntry, Scope};
+pub use artifact::{ArtifactStore, ArtifactType, ArtifactMeta};
