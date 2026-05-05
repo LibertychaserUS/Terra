@@ -423,8 +423,14 @@ impl Repl {
         // Auto-save session to disk
         self.auto_save();
 
-        // Check if compaction needed
-        let mut out = vec![ReplOutput::Text(response)];
+        // Output: response + turn summary + compaction check
+        out.push(ReplOutput::Text(response));
+
+        let mode_label = if self.session.mode().is_goal() { "goal" } else { "conversation" };
+        out.push(ReplOutput::Notification(
+            crate::status::turn_summary(mode_label, prompt_tokens, completion_tokens)
+        ));
+
         if let Some(compaction_msg) = self.check_compaction().await {
             out.push(ReplOutput::Notification(compaction_msg));
         }

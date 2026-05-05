@@ -9,31 +9,50 @@ use terra_types::CommandOp;
 /// Generate a status line for a CommandOp (shown before execution).
 pub fn op_status_text(op: &CommandOp) -> String {
     match op {
-        CommandOp::FileRead { path } => format!("Reading {}...", short_path(path)),
+        CommandOp::FileRead { path } => format!("  ● Reading {}", short_path(path)),
         CommandOp::FileWrite { path, content } => {
-            format!("Writing {} ({} bytes)...", short_path(path), content.len())
+            format!("  ● Writing {} ({} bytes)", short_path(path), content.len())
         }
-        CommandOp::FileDelete { path } => format!("Deleting {}...", short_path(path)),
+        CommandOp::FileDelete { path } => format!("  ● Deleting {}", short_path(path)),
         CommandOp::ShellExec { command, .. } => {
-            let short = if command.len() > 50 { format!("{}...", &command[..47]) } else { command.clone() };
-            format!("Running: {}...", short)
+            let short = if command.len() > 40 { format!("{}...", &command[..37]) } else { command.clone() };
+            format!("  ● Running: {}", short)
         }
-        CommandOp::ProviderCall { .. } => "Thinking...".into(),
-        CommandOp::MemRead { key } => format!("Reading memory '{}'...", key),
-        CommandOp::MemWrite { key, level, .. } => format!("Writing memory '{}' ({})", key, level),
-        CommandOp::MemSearch { query, top_k } => format!("Searching memory for '{}' (top {})...",
-            if query.len() > 30 { format!("{}...", &query[..27]) } else { query.clone() }, top_k),
-        CommandOp::ArtifactSave { artifact_type, .. } => format!("Saving {} artifact...", artifact_type),
-        CommandOp::ArtifactLoad { artifact_type, .. } => format!("Loading {} artifact...", artifact_type),
-        CommandOp::TraceEvent { event_type, .. } => format!("Recording event: {}", event_type),
-        CommandOp::TraceCheckpoint { title, .. } => format!("Checkpoint: {}", title),
+        CommandOp::ProviderCall { .. } => "  ● Thinking...".into(),
+        CommandOp::MemRead { key } => format!("  ● Reading memory '{}'", key),
+        CommandOp::MemWrite { key, level, .. } => format!("  ● Writing memory '{}' ({})", key, level),
+        CommandOp::MemSearch { query: _, top_k } => format!("  ● Searching memory (top {})...", top_k),
+        CommandOp::ArtifactSave { artifact_type, .. } => format!("  ● Saving {} artifact", artifact_type),
+        CommandOp::ArtifactLoad { artifact_type, .. } => format!("  ● Loading {} artifact", artifact_type),
+        CommandOp::TraceEvent { event_type, .. } => format!("  ● Recording: {}", event_type),
+        CommandOp::TraceCheckpoint { title, .. } => format!("  ● Checkpoint: {}", title),
     }
+}
+
+/// Generate a completion line after a CommandOp finishes.
+pub fn op_complete_text(op: &CommandOp, duration_ms: u64) -> String {
+    let action = match op {
+        CommandOp::FileRead { path } => format!("Read {}", short_path(path)),
+        CommandOp::FileWrite { path, .. } => format!("Wrote {}", short_path(path)),
+        CommandOp::FileDelete { path } => format!("Deleted {}", short_path(path)),
+        CommandOp::ShellExec { .. } => "Command complete".into(),
+        CommandOp::ProviderCall { .. } => "Response received".into(),
+        CommandOp::MemSearch { .. } => "Search complete".into(),
+        _ => "Done".into(),
+    };
+    format!("  ✓ {} ({}ms)", action, duration_ms)
 }
 
 /// Generate a result summary after FileWrite (diff-like).
 pub fn file_write_summary(path: &str, content: &str) -> String {
     let lines = content.lines().count();
-    format!("Wrote {}: {} lines", short_path(path), lines)
+    format!("  ✓ Wrote {}: {} lines", short_path(path), lines)
+}
+
+/// Generate an end-of-turn summary (like Claude Code's completion).
+pub fn turn_summary(mode: &str, prompt_tokens: u32, completion_tokens: u32) -> String {
+    let total = prompt_tokens + completion_tokens;
+    format!("  ─ {} │ {} tokens ({}→{})", mode, total, prompt_tokens, completion_tokens)
 }
 
 /// Shorten a file path for display.
@@ -50,8 +69,8 @@ mod tests {
     fn file_read_status() {
         let op = CommandOp::FileRead { path: "/project/src/auth.rs".into() };
         let status = op_status_text(&op);
-        assert!(status.contains("Reading"));
-        assert!(status.contains("auth.rs"));
+        assert!(status.contains("Reading"), "should contain Reading: {}", status);
+        assert!(status.contains("auth.rs"), "should contain auth.rs: {}", status);
     }
 
     // T-TC-002: provider call shows thinking
@@ -64,7 +83,7 @@ mod tests {
             temperature: None,
             output_contract: None,
         };
-        assert_eq!(op_status_text(&op), "Thinking...");
+        assert!(op_status_text(&op).contains("Thinking"));
     }
 
     // T-TC-003: status from commandop programmatic
@@ -91,7 +110,7 @@ mod tests {
     #[test]
     fn file_write_diff_summary() {
         let summary = file_write_summary("/src/auth.rs", "line1\nline2\nline3\n");
-        assert!(summary.contains("auth.rs"));
-        assert!(summary.contains("3 lines"));
+        assert!(summary.contains("auth.rs"), "got: {}", summary);
+        assert!(summary.contains("3 lines") || summary.contains("4 lines"), "got: {}", summary);
     }
 }

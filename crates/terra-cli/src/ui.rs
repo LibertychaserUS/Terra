@@ -76,9 +76,11 @@ impl OutputRenderer for TermRenderer {
                 }
             }
             ReplOutput::Notification(msg) => {
-                if msg.contains("Thinking") {
-                    // Thinking chain: dim, no [Terra] prefix
-                    println!("{DIM}  {}{RESET}", msg);
+                if msg.starts_with("  ●") || msg.starts_with("  ✓") || msg.starts_with("  ─") {
+                    // Operation chain: dim status lines
+                    println!("{DIM}{}{RESET}", msg);
+                } else if msg.contains("Thinking") {
+                    println!("{DIM}  ● {}{RESET}", msg.trim());
                 } else {
                     println!("{YELLOW}[Terra]{RESET} {}", msg);
                 }
