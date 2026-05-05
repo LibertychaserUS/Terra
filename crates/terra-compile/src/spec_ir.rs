@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -38,6 +40,53 @@ pub struct TermMapping {
     pub normalized: String,
 }
 
+/// Terminology normalization table.
+///
+/// Maps informal user terms to canonical forms used in Spec IR.
+/// This ensures all downstream systems use consistent vocabulary.
+pub struct TermTable {
+    mappings: HashMap<String, String>,
+}
+
+impl TermTable {
+    /// Create a new term table with default coding-domain mappings.
+    pub fn default_coding() -> Self {
+        let mut mappings = HashMap::new();
+        mappings.insert("login bug".into(), "authentication_failure".into());
+        mappings.insert("login error".into(), "authentication_failure".into());
+        mappings.insert("auth bug".into(), "authentication_failure".into());
+        mappings.insert("crash".into(), "unhandled_exception".into());
+        mappings.insert("slow".into(), "performance_degradation".into());
+        mappings.insert("performance issue".into(), "performance_degradation".into());
+        mappings.insert("broken".into(), "functional_regression".into());
+        mappings.insert("doesn't work".into(), "functional_regression".into());
+        mappings.insert("memory leak".into(), "resource_leak_memory".into());
+        mappings.insert("race condition".into(), "concurrency_violation".into());
+        mappings.insert("deadlock".into(), "concurrency_deadlock".into());
+        mappings.insert("security hole".into(), "security_vulnerability".into());
+        mappings.insert("xss".into(), "security_xss".into());
+        mappings.insert("sql injection".into(), "security_sqli".into());
+        Self { mappings }
+    }
+
+    /// Create an empty term table.
+    pub fn empty() -> Self {
+        Self { mappings: HashMap::new() }
+    }
+
+    /// Normalize a term. Returns the canonical form if found,
+    /// otherwise returns the original term lowercase.
+    pub fn normalize(&self, term: &str) -> String {
+        let lower = term.to_lowercase();
+        self.mappings.get(&lower).cloned().unwrap_or(lower)
+    }
+
+    /// Add a custom mapping.
+    pub fn insert(&mut self, user_term: &str, normalized: &str) {
+        self.mappings.insert(user_term.to_lowercase(), normalized.into());
+    }
+}
+
 impl SpecIR {
     /// Create a SpecIR from a simple task description.
     ///
@@ -61,10 +110,120 @@ impl SpecIR {
         }
     }
 
+    /// Compile a task description through the lexical pass.
+    ///
+    /// This runs entity extraction (files, line numbers) and
+    /// terminology normalization against the provided term table.
+    pub fn compile(description: &str, term_table: &TermTable) -> Self {
+        let spec_id = Uuid::new_v4().to_string();
+
+        // Pass 1: Lexical — extract file paths and line numbers
+        let (file, line) = lexical_extract(description);
+
+        // Pass 2: Terminology normalization — map informal terms
+        let resolved_terms = terminology_pass(description, term_table);
+
+        // Build open questions based on what's missing
+        let mut open_questions = Vec::new();
+        if file.is_none() {
+            open_questions.push("Target file not specified".into());
+        }
+
+        Self {
+            spec_id,
+            intent: description.to_string(),
+            target: Target {
+                file,
+                line,
+                function: None,
+                component: None,
+                scope: if line.is_some() { "line".into() } else { "unknown".into() },
+            },
+            constraints: Vec::new(),
+            success_predicate: Vec::new(),
+            open_questions,
+            resolved_terms,
+        }
+    }
+
     /// Check if the spec has unresolved questions.
     pub fn is_complete(&self) -> bool {
         self.open_questions.is_empty()
     }
+}
+
+/// Lexical pass: extract file paths and line numbers from description.
+///
+/// Recognizes patterns like:
+/// - "auth.py" (file with extension)
+/// - "line 42" or "line:42" (line number)
+/// - "src/auth.py:42" (file:line)
+fn lexical_extract(description: &str) -> (Option<String>, Option<u32>) {
+    let mut file = None;
+    let mut line = None;
+
+    let words: Vec<&str> = description.split_whitespace().collect();
+
+    for (i, word) in words.iter().enumerate() {
+        // Check for file:line pattern (e.g., "src/auth.py:42")
+        if let Some(colon_pos) = word.rfind(':') {
+            let (path_part, num_part) = word.split_at(colon_pos);
+            let num_part = &num_part[1..]; // skip ':'
+            if looks_like_file(path_part) {
+                file = Some(path_part.to_string());
+                if let Ok(n) = num_part.parse::<u32>() {
+                    line = Some(n);
+                }
+                continue;
+            }
+        }
+
+        // Check for standalone file patterns
+        if file.is_none() && looks_like_file(word) {
+            file = Some(word.to_string());
+        }
+
+        // Check for "line N" pattern
+        if word.eq_ignore_ascii_case("line") {
+            if let Some(next) = words.get(i + 1) {
+                if let Ok(n) = next.parse::<u32>() {
+                    line = Some(n);
+                }
+            }
+        }
+    }
+
+    (file, line)
+}
+
+/// Check if a word looks like a file path (has a common extension).
+fn looks_like_file(word: &str) -> bool {
+    let extensions = [
+        ".rs", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java",
+        ".c", ".cpp", ".h", ".hpp", ".rb", ".ex", ".erl", ".zig",
+        ".toml", ".yaml", ".yml", ".json", ".md", ".txt", ".sql",
+        ".html", ".css", ".sh", ".bash", ".swift", ".kt",
+    ];
+    let lower = word.to_lowercase();
+    extensions.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Terminology pass: find informal terms in description and normalize them.
+fn terminology_pass(description: &str, table: &TermTable) -> Vec<TermMapping> {
+    let lower = description.to_lowercase();
+    let mut found = Vec::new();
+
+    // Check each known term against the description
+    for (user_term, normalized) in &table.mappings {
+        if lower.contains(user_term.as_str()) {
+            found.push(TermMapping {
+                user_term: user_term.clone(),
+                normalized: normalized.clone(),
+            });
+        }
+    }
+
+    found
 }
 
 #[cfg(test)]
@@ -247,5 +406,78 @@ mod tests {
         };
         assert_eq!(spec.open_questions.len(), 3);
         assert!(!spec.is_complete());
+    }
+
+    // T-LC-016: lexical_pass_extracts_entities
+    #[test]
+    fn lexical_pass_extracts_entities() {
+        let table = TermTable::empty();
+        let spec = SpecIR::compile("fix auth.py line 42", &table);
+        assert_eq!(spec.target.file.as_deref(), Some("auth.py"));
+        assert_eq!(spec.target.line, Some(42));
+    }
+
+    #[test]
+    fn lexical_pass_file_colon_line() {
+        let table = TermTable::empty();
+        let spec = SpecIR::compile("fix src/auth.py:42 immediately", &table);
+        assert_eq!(spec.target.file.as_deref(), Some("src/auth.py"));
+        assert_eq!(spec.target.line, Some(42));
+    }
+
+    #[test]
+    fn lexical_pass_no_file() {
+        let table = TermTable::empty();
+        let spec = SpecIR::compile("fix the login system", &table);
+        assert!(spec.target.file.is_none());
+        assert!(!spec.is_complete()); // open question about target
+    }
+
+    // T-LC-017: terminology_normalization
+    #[test]
+    fn terminology_normalization() {
+        let table = TermTable::default_coding();
+        let spec = SpecIR::compile("there is a login bug in auth.py", &table);
+        assert!(
+            spec.resolved_terms.iter().any(|t| t.normalized == "authentication_failure"),
+            "should normalize 'login bug' to 'authentication_failure', got: {:?}",
+            spec.resolved_terms
+        );
+    }
+
+    #[test]
+    fn terminology_custom_mapping() {
+        let mut table = TermTable::empty();
+        table.insert("flaky test", "test_nondeterminism");
+        assert_eq!(table.normalize("flaky test"), "test_nondeterminism");
+        assert_eq!(table.normalize("unknown term"), "unknown term");
+    }
+
+    // T-LC-018: completeness_blocks_execution
+    #[test]
+    fn completeness_blocks_execution() {
+        // A spec with open questions should not be complete
+        let spec = SpecIR::compile("fix the bug", &TermTable::empty());
+        assert!(!spec.is_complete(), "spec without file target should be incomplete");
+
+        // Verify this would trigger SpecificationCage block
+        // (Integration: incomplete spec → CageAction::ExecuteTask{spec_complete: false} → Block)
+        use terra_protocol::command::{Command, CommandOp};
+        let _ = Command::new(
+            "main",
+            CommandOp::TraceEvent {
+                event_type: "spec_check".into(),
+                data: serde_json::json!({"complete": spec.is_complete()}),
+            },
+        );
+        // The actual cage enforcement is in terra-executor;
+        // here we verify the spec correctly reports incompleteness.
+    }
+
+    #[test]
+    fn compile_with_file_is_complete() {
+        let table = TermTable::empty();
+        let spec = SpecIR::compile("fix auth.py line 10", &table);
+        assert!(spec.is_complete(), "spec with file target should be complete");
     }
 }

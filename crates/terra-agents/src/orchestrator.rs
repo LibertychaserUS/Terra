@@ -237,61 +237,71 @@ mod tests {
         (Orchestrator::new(executor, core), dir)
     }
 
-    #[tokio::test]
-    async fn pipeline_all_stages_invoked() {
-        let (orch, _dir) = test_orchestrator();
-        let result = orch.run("fix the auth bug").await.unwrap();
-
-        assert_eq!(result.spec.intent, "fix the auth bug");
-        assert!(result.ic_rules_applied > 10);
-        assert!(result.audit_entry_count >= 5);
-        // Provider was called through executor (DryRun)
-        assert!(result.worker_response.contains("DRY_RUN"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_ic_rules_applied() {
-        let (orch, _dir) = test_orchestrator();
-        let result = orch.run("fix bug").await.unwrap();
-        assert!(result.ic_rules_applied >= 13);
-    }
-
-    #[tokio::test]
-    async fn pipeline_provider_through_executor() {
-        let (orch, _dir) = test_orchestrator();
-        let result = orch.run("test").await.unwrap();
-        // Response came from DryRunAdapter via Executor (not direct call)
-        assert!(result.worker_response.contains("DRY_RUN"));
-        assert_eq!(result.provider_id, "dry_run");
-    }
-
+    // T-AG-001: main_agent_queries_ic
     #[tokio::test]
     async fn main_agent_queries_ic() {
         let (orch, _dir) = test_orchestrator();
         let result = orch.run("refactor the module").await.unwrap();
-        assert!(result.ic_rules_applied > 0);
+        assert!(result.ic_rules_applied >= 13, "IC rules should be consulted");
     }
 
+    // T-AG-003: main_agent_audits_result
     #[tokio::test]
-    async fn end_to_end_pipeline() {
+    async fn main_agent_audits_result() {
+        let (orch, _dir) = test_orchestrator();
+        let result = orch.run("fix the auth bug").await.unwrap();
+        // Orchestrator records audit entries at each step
+        assert!(result.audit_entry_count >= 5, "audit entries should be recorded");
+        // Worker response is inspected (not just passed through)
+        assert!(!result.worker_response.is_empty(), "response should be present");
+    }
+
+    // T-AG-014: end_to_end_dry_run
+    #[tokio::test]
+    async fn end_to_end_dry_run() {
         let (orch, _dir) = test_orchestrator();
         let result = orch.run("fix the empty password bug in auth.py line 42").await.unwrap();
+
         assert_eq!(result.spec.intent, "fix the empty password bug in auth.py line 42");
         assert!(result.ic_rules_applied >= 13);
         assert!(result.worker_response.contains("DRY_RUN"));
+        assert_eq!(result.provider_id, "dry_run");
+        assert!(result.audit_entry_count >= 5);
     }
 
+    // T-AG-016: empty_task_handled
     #[tokio::test]
     async fn empty_task_handled() {
         let (orch, _dir) = test_orchestrator();
         let result = orch.run("").await.unwrap();
         assert_eq!(result.spec.intent, "");
+        // Should not panic
     }
 
+    // Pipeline integrity: all stages invoked
+    #[tokio::test]
+    async fn pipeline_all_stages_invoked() {
+        let (orch, _dir) = test_orchestrator();
+        let result = orch.run("fix the auth bug").await.unwrap();
+        assert!(result.ic_rules_applied > 10);
+        assert!(result.audit_entry_count >= 5);
+        assert!(result.worker_response.contains("DRY_RUN"));
+    }
+
+    // Pipeline: provider called through executor
+    #[tokio::test]
+    async fn pipeline_provider_through_executor() {
+        let (orch, _dir) = test_orchestrator();
+        let result = orch.run("test").await.unwrap();
+        assert!(result.worker_response.contains("DRY_RUN"));
+        assert_eq!(result.provider_id, "dry_run");
+    }
+
+    // FR-002: no direct subsystem imports
     #[test]
     fn no_direct_subsystem_imports() {
-        // Compile-time guarantee: terra-agents depends only on
-        // terra-core, terra-protocol, terra-compile, terra-executor
+        // terra-agents depends only on terra-core, terra-protocol,
+        // terra-compile, terra-executor — NOT terra-memory or terra-providers
         assert!(true);
     }
 }

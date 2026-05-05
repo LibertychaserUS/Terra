@@ -3,7 +3,19 @@
 //! Orchestrator that follows the canonical pipeline:
 //! User Input → Compilation → SpecIR → IC consultation
 //! → Caging gate → Command Executor → Result
+//!
+//! Agent roles:
+//! - Main (Orchestrator): full pipeline, strongest model
+//! - Worker: coding tasks, filtered rules, balanced model
+//! - Explorer: search/research, fast model
+//! - CageMonitor: diagnostic checks only, no mutations
 
 pub mod orchestrator;
+pub mod roles;
+pub mod dispatch;
+pub mod session;
 
 pub use orchestrator::Orchestrator;
+pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
+pub use dispatch::{ModelDispatcher, ModelCapability, DispatchParams};
+pub use session::SessionManager;
