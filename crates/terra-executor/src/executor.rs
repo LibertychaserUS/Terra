@@ -71,6 +71,7 @@ impl CommandExecutor {
                 status: CommandStatus::PermissionDenied,
                 data: None,
                 error: Some(format!("cage '{}' blocked: {}", cage_name, reason)),
+                notification: None,
             };
 
             let elapsed = start.elapsed().as_micros() as u64;
@@ -108,7 +109,7 @@ impl CommandExecutor {
     /// Map a CommandOp to a CageContext for cage checking.
     fn command_to_cage_context(&self, op: &CommandOp, agent: &str) -> CageContext {
         let action = match op {
-            CommandOp::MemWrite { key, .. } => {
+            CommandOp::MemWrite { key, level, .. } => {
                 // Check if agent is owner of existing key
                 let owner = self.memory.read(key)
                     .ok()
@@ -119,6 +120,8 @@ impl CommandExecutor {
                 CageAction::MemoryWrite {
                     key: key.clone(),
                     owner,
+                    level: level.clone(),
+                    is_user_command: agent == "user",
                 }
             }
             CommandOp::MemRead { .. } => {
@@ -199,7 +202,7 @@ mod tests {
                 key: key.into(),
                 content: "test data".into(),
                 scope: "project".into(),
-                level: "L1".into(),
+                level: "L2".into(),
             },
         )
     }

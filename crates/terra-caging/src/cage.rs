@@ -61,8 +61,15 @@ pub enum CageAction {
     FileRead { path: std::path::PathBuf },
     /// Agent wants to delete a file at this path.
     FileDelete { path: std::path::PathBuf },
-    /// Agent wants to write memory owned by another agent.
-    MemoryWrite { key: String, owner: String },
+    /// Agent wants to write memory.
+    MemoryWrite {
+        key: String,
+        owner: String,
+        /// Target memory level (L0-L6)
+        level: String,
+        /// Whether this write originates from a user command (/remember)
+        is_user_command: bool,
+    },
     /// Agent claims task is complete.
     ClaimComplete { verified: bool },
     /// Agent attempts to modify a protected rule.

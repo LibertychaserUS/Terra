@@ -25,7 +25,16 @@ impl Cage for SpecificationCage {
     }
 }
 
-/// Memory Cage — enforces ownership rules on memory writes.
+/// Memory Cage — enforces ownership + level-based write permissions.
+///
+/// Permission matrix:
+/// - L0: blocked always (read-only, constitution)
+/// - L1: blocked for agent (only user /remember or promotion chain)
+/// - L2: allowed both modes (task scope)
+/// - L3: allowed Goal Mode + Verification pass only
+/// - L4: allowed both modes (failure records)
+/// - L5: allowed both modes (buffer layer)
+/// - L6: allowed both modes (agent nominations)
 pub struct MemoryCage;
 
 impl Cage for MemoryCage {
@@ -34,12 +43,41 @@ impl Cage for MemoryCage {
     }
 
     fn check(&self, context: &CageContext) -> CageCheckResult {
-        if let CageAction::MemoryWrite { owner, .. } = &context.action {
-            if *owner != context.agent {
+        if let CageAction::MemoryWrite { owner, level, is_user_command, .. } = &context.action {
+            // Ownership check (existing)
+            if *owner != context.agent && !is_user_command {
                 return CageCheckResult::Block(format!(
                     "{} is not the owner (owner: {})",
                     context.agent, owner
                 ));
+            }
+
+            // Level-based permission matrix
+            match level.as_str() {
+                "L0" => {
+                    return CageCheckResult::Block(
+                        "L0 (authoritative) is read-only".into(),
+                    );
+                }
+                "L1" => {
+                    if !is_user_command {
+                        return CageCheckResult::Block(
+                            "L1 (project) requires user /remember or promotion chain".into(),
+                        );
+                    }
+                    // User /remember bypasses — allowed
+                }
+                "L3" => {
+                    if !context.goal_mode {
+                        return CageCheckResult::Block(
+                            "L3 (accepted paths) only writable in Goal Mode".into(),
+                        );
+                    }
+                    // In Goal Mode, L3 write requires Verification pass
+                    // (enforced by VerificationCage in the pipeline, not here)
+                }
+                // L2, L4, L5, L6: allowed in both modes
+                _ => {}
             }
         }
         CageCheckResult::Pass
@@ -306,6 +344,8 @@ mod tests {
             action: CageAction::MemoryWrite {
                 key: "key1".into(),
                 owner: "main".into(),
+                level: "L2".into(),
+                is_user_command: false,
             },
             goal_mode: true,
         };
@@ -321,6 +361,8 @@ mod tests {
             action: CageAction::MemoryWrite {
                 key: "key1".into(),
                 owner: "main".into(),
+                level: "L2".into(),
+                is_user_command: false,
             },
             goal_mode: true,
         };
@@ -587,7 +629,6 @@ mod tests {
     #[test]
     fn conversation_no_spec_required() {
         let engine = test_engine();
-        // VerificationCage also skipped in Conversation Mode
         let ctx = CageContext {
             agent: "main".into(),
             action: CageAction::ClaimComplete { verified: false },
@@ -596,7 +637,6 @@ mod tests {
         let result = engine.check(&ctx);
         assert!(result.allowed, "verification cage should be skipped in conversation mode");
 
-        // But always-on cages still work
         let ctx_meta = CageContext {
             agent: "main".into(),
             action: CageAction::ModifyRule { rule_name: "test".into() },
@@ -604,5 +644,109 @@ mod tests {
         };
         let result_meta = engine.check(&ctx_meta);
         assert!(!result_meta.allowed, "meta cage should still block in conversation mode");
+    }
+
+    // --- Memory Write Permission Tests (T-MW) ---
+
+    // T-MW-001: L0 write blocked always
+    #[test]
+    fn l0_write_blocked_always() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "main".into(),
+            action: CageAction::MemoryWrite {
+                key: "const".into(), owner: "main".into(),
+                level: "L0".into(), is_user_command: false,
+            },
+            goal_mode: true,
+        };
+        assert!(!engine.check(&ctx).allowed);
+
+        // Even user command cannot write L0
+        let ctx_user = CageContext {
+            agent: "user".into(),
+            action: CageAction::MemoryWrite {
+                key: "const".into(), owner: "user".into(),
+                level: "L0".into(), is_user_command: true,
+            },
+            goal_mode: true,
+        };
+        assert!(!engine.check(&ctx_user).allowed);
+    }
+
+    // T-MW-002: L1 direct write blocked for agent
+    #[test]
+    fn l1_direct_write_blocked() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "worker".into(),
+            action: CageAction::MemoryWrite {
+                key: "knowledge".into(), owner: "worker".into(),
+                level: "L1".into(), is_user_command: false,
+            },
+            goal_mode: true,
+        };
+        let result = engine.check(&ctx);
+        assert!(!result.allowed);
+        assert!(result.block.unwrap().1.contains("L1"));
+    }
+
+    // T-MW-003: L1 user /remember allowed
+    #[test]
+    fn l1_user_remember_allowed() {
+        let engine = test_engine();
+        let ctx = CageContext {
+            agent: "user".into(),
+            action: CageAction::MemoryWrite {
+                key: "knowledge".into(), owner: "user".into(),
+                level: "L1".into(), is_user_command: true,
+            },
+            goal_mode: false,
+        };
+        assert!(engine.check(&ctx).allowed);
+    }
+
+    // T-MW-004: L2 write allowed both modes
+    #[test]
+    fn l2_write_allowed_both_modes() {
+        let engine = test_engine();
+        for goal_mode in [true, false] {
+            let ctx = CageContext {
+                agent: "main".into(),
+                action: CageAction::MemoryWrite {
+                    key: "task_data".into(), owner: "main".into(),
+                    level: "L2".into(), is_user_command: false,
+                },
+                goal_mode,
+            };
+            assert!(engine.check(&ctx).allowed, "L2 should be writable in goal_mode={}", goal_mode);
+        }
+    }
+
+    // T-MW-005: L3 write goal only
+    #[test]
+    fn l3_write_goal_only() {
+        let engine = test_engine();
+        // Conversation mode → blocked
+        let ctx_conv = CageContext {
+            agent: "main".into(),
+            action: CageAction::MemoryWrite {
+                key: "path".into(), owner: "main".into(),
+                level: "L3".into(), is_user_command: false,
+            },
+            goal_mode: false,
+        };
+        assert!(!engine.check(&ctx_conv).allowed);
+
+        // Goal mode → allowed
+        let ctx_goal = CageContext {
+            agent: "main".into(),
+            action: CageAction::MemoryWrite {
+                key: "path".into(), owner: "main".into(),
+                level: "L3".into(), is_user_command: false,
+            },
+            goal_mode: true,
+        };
+        assert!(engine.check(&ctx_goal).allowed);
     }
 }

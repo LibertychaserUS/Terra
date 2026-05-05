@@ -62,6 +62,10 @@ pub struct CommandResult {
     pub status: CommandStatus,
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// Program-generated notification for user display (e.g., auto-record alerts).
+    /// Not LLM-generated. Format: `[Terra] Recorded → L{n}: "{summary}"`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +95,7 @@ impl CommandResult {
             status: CommandStatus::Ok,
             data,
             error: None,
+            notification: None,
         }
     }
 
@@ -100,6 +105,7 @@ impl CommandResult {
             status: CommandStatus::Error,
             data: None,
             error: Some(error.into()),
+            notification: None,
         }
     }
 }

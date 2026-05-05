@@ -21,6 +21,7 @@ pub async fn route(
 ) -> CommandResult {
     match op {
         CommandOp::MemWrite { key, content, scope, level } => {
+            let level_str = level.clone();
             let scope = match Scope::from_str(scope) {
                 Some(s) => s,
                 None => return CommandResult::err("", format!("invalid scope: {}", scope)),
@@ -29,14 +30,28 @@ pub async fn route(
                 Some(l) => l,
                 None => return CommandResult::err("", format!("invalid level: {}", level)),
             };
-
             match memory.write(key.clone(), scope, level, agent, content.as_bytes().to_vec()) {
                 Ok(()) => {
                     // Also index for vector search
                     if let Ok(mut idx) = search_index.lock() {
                         idx.upsert(key, content);
                     }
-                    CommandResult::ok("", Some(serde_json::json!({"written": key})))
+
+                    // Auto-record notification for L5/L6 writes
+                    let notification = if level_str == "L5" || level_str == "L6" {
+                        let summary = if content.len() > 60 {
+                            format!("{}...", &content[..57])
+                        } else {
+                            content.clone()
+                        };
+                        Some(format!("[Terra] Recorded → {}: \"{}\"", level_str, summary))
+                    } else {
+                        None
+                    };
+
+                    let mut result = CommandResult::ok("", Some(serde_json::json!({"written": key})));
+                    result.notification = notification;
+                    result
                 }
                 Err(e) => CommandResult::err("", e.to_string()),
             }
@@ -60,6 +75,7 @@ pub async fn route(
                     status: CommandStatus::NotFound,
                     data: None,
                     error: Some(format!("key not found: {}", key)),
+                    notification: None,
                 },
                 Err(e) => CommandResult::err("", e.to_string()),
             }
@@ -296,5 +312,69 @@ mod tests {
         ).await;
         assert_eq!(load_result.status, CommandStatus::Ok);
         assert_eq!(load_result.data.as_ref().unwrap()["version"], 1);
+    }
+
+    // T-MW-006: L5 write emits notification
+    #[tokio::test]
+    async fn l5_write_emits_notification() {
+        let mem = test_memory();
+        let (art, _d) = test_artifacts();
+        let search = test_search();
+        let prov = test_provider();
+        let result = route(
+            &CommandOp::MemWrite {
+                key: "observation".into(),
+                content: "SQLite WAL mode is important".into(),
+                scope: "project".into(),
+                level: "L5".into(),
+            },
+            "main", &mem, &art, &search, &prov,
+        ).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert!(result.notification.is_some());
+        let notif = result.notification.unwrap();
+        assert!(notif.starts_with("[Terra] Recorded"));
+        assert!(notif.contains("L5"));
+    }
+
+    // T-MW-007: L6 agent nominate emits notification
+    #[tokio::test]
+    async fn l6_agent_nominate_notification() {
+        let mem = test_memory();
+        let (art, _d) = test_artifacts();
+        let search = test_search();
+        let prov = test_provider();
+        let result = route(
+            &CommandOp::MemWrite {
+                key: "candidate".into(),
+                content: "This pattern is worth promoting".into(),
+                scope: "project".into(),
+                level: "L6".into(),
+            },
+            "main", &mem, &art, &search, &prov,
+        ).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert!(result.notification.is_some());
+        assert!(result.notification.unwrap().contains("L6"));
+    }
+
+    // T-MW-008: L2 write has no notification
+    #[tokio::test]
+    async fn l2_write_no_notification() {
+        let mem = test_memory();
+        let (art, _d) = test_artifacts();
+        let search = test_search();
+        let prov = test_provider();
+        let result = route(
+            &CommandOp::MemWrite {
+                key: "task_data".into(),
+                content: "temporary".into(),
+                scope: "task".into(),
+                level: "L2".into(),
+            },
+            "main", &mem, &art, &search, &prov,
+        ).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        assert!(result.notification.is_none(), "L2 writes should not produce notifications");
     }
 }
