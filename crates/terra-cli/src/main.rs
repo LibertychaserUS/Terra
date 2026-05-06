@@ -258,12 +258,46 @@ max_candidates = 10
             println!();
         }
 
-        Some(Commands::Chat) => {
+        Some(Commands::Chat) | None => {
             use terra_agents::repl::{Repl, ReplOutput};
+            use terra_agents::codebase::{ProjectContext, detect_git};
+            use terra_agents::session_store::SessionStore;
             #[allow(unused_imports)]
             use ui::{auto_renderer, OutputRenderer};
             use rustyline::error::ReadlineError;
             use rustyline::{CompletionType, Config, EditMode, Editor};
+
+            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let terra_dir = project_root.join(".terra");
+
+            // Auto-init if needed
+            if !terra_dir.exists() {
+                std::fs::create_dir_all(&terra_dir).ok();
+                std::fs::write(terra_dir.join("constitution.toml"),
+                    "[meta]\nversion = 1\ndescription = \"Terra auto-initialized\"\n\n[[protected_paths]]\npath = \".terra/constitution.toml\"\n\n[sandbox]\nroot = \".\"\n\n[rules]\nallow_external_writes = false\nrequire_spec_complete = true\nrequire_verification = true\n"
+                ).ok();
+                std::fs::write(terra_dir.join("config.toml"),
+                    "[provider]\nbase_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\nmodel = \"qwen-plus\"\n\n[memory]\ncache_capacity = 1000\n\n[sleep]\ntrigger = \"session_end\"\ninterval_hours = 24\nmax_candidates = 10\n"
+                ).ok();
+            }
+
+            // First launch declaration
+            let ack_path = terra_dir.join(".acknowledged");
+            if !ack_path.exists() {
+                println!();
+                println!("\x1b[1m  Terra Agent OS — First Launch\x1b[0m");
+                println!();
+                println!("  Terra can:");
+                println!("    \x1b[36m◆\x1b[0m Read and modify files in this directory");
+                println!("    \x1b[36m◆\x1b[0m Execute shell commands");
+                println!("    \x1b[36m◆\x1b[0m Call LLM APIs (token costs apply)");
+                println!("    \x1b[36m◆\x1b[0m Store conversation history and project memory");
+                println!();
+                println!("  All operations are sandboxed to this directory.");
+                println!("  Destructive operations require your confirmation.");
+                println!();
+                std::fs::write(&ack_path, "acknowledged").ok();
+            }
 
             // Detect provider
             let (provider, provider_name): (Arc<dyn ProviderAdapter>, String) =
@@ -272,14 +306,31 @@ max_candidates = 10
                         let name = adapter.capabilities().model_id.clone();
                         (Arc::new(adapter), name)
                     }
-                    Err(_) => (Arc::new(terra_providers::adapter::DryRunAdapter::new()), "dry_run".into()),
+                    Err(_) => {
+                        println!("  \x1b[33m⚠\x1b[0m No API key — dry_run mode");
+                        (Arc::new(terra_providers::adapter::DryRunAdapter::new()), "dry_run".into())
+                    }
                 };
 
-            // Build runtime (constitution-driven)
-            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let terra_dir = project_root.join(".terra");
-            let constitution_path = terra_dir.join("constitution.toml");
-            let constitution = terra_caging::Constitution::load(&constitution_path).ok();
+            // Project awareness
+            let project_ctx = ProjectContext::scan(&project_root);
+            let git_info = detect_git(&project_root);
+
+            // Display project info (oh-my-zsh style)
+            println!("  \x1b[2m📂 {}\x1b[0m", project_root.display());
+            println!("  \x1b[2m🔧 {} │ {} files │ {}\x1b[0m",
+                project_ctx.project_type.as_str(),
+                project_ctx.total_files,
+                provider_name,
+            );
+            if git_info.is_repo {
+                let changes = if git_info.has_changes { format!(" │ {} changed", git_info.changed_files) } else { String::new() };
+                println!("  \x1b[2m🌿 {}{}\x1b[0m", git_info.branch, changes);
+            }
+            println!();
+
+            // Build runtime
+            let constitution = terra_caging::Constitution::load(&terra_dir.join("constitution.toml")).ok();
 
             let memory = if terra_dir.exists() {
                 MemoryDatabase::open(&terra_dir.join("memory.db"))
@@ -314,7 +365,8 @@ max_candidates = 10
             core.register(Box::new(AlgorithmModule));
             let core = Arc::new(core);
 
-            let mut repl = Repl::new(executor, core);
+            let mut repl = Repl::new(executor, core)
+                .with_store(SessionStore::new(&terra_dir));
             let renderer = auto_renderer(&provider_name);
 
             // Rustyline config
@@ -324,12 +376,15 @@ max_candidates = 10
                 .build();
             let mut rl: Editor<(), _> = Editor::with_config(rl_config)?;
 
-            // Load history
             let history_path = terra_dir.join("history.txt");
             let _ = rl.load_history(&history_path);
 
             // Banner
             renderer.render_banner();
+
+            // Startup examples (oh-my-zsh style hints)
+            println!("  \x1b[2mTry: \"explain this codebase\" │ \"fix the bug in main.rs\" │ /help\x1b[0m");
+            println!();
 
             loop {
                 let prompt = if repl.session.mode().is_goal() { "goal > " } else { "terra > " };
@@ -357,7 +412,15 @@ max_candidates = 10
                         }
 
                         if Repl::should_quit(&outputs) {
-                            for o in &outputs { renderer.render(o); }
+                            // Exit summary
+                            let tokens = repl.tokens();
+                            println!();
+                            println!("  \x1b[2m─────────────────────────────────\x1b[0m");
+                            println!("  \x1b[2mSession: {} tokens ({} prompt, {} completion)\x1b[0m",
+                                tokens.total_tokens(), tokens.prompt_tokens, tokens.completion_tokens);
+                            println!("  \x1b[2mSession ID: {}\x1b[0m", repl.session_id());
+                            println!();
+                            println!("  Goodbye. 👋");
                             break;
                         }
 
@@ -376,8 +439,9 @@ max_candidates = 10
                         continue;
                     }
                     Err(ReadlineError::Eof) => {
-                        // Ctrl+D: exit
-                        println!("Goodbye.");
+                        let tokens = repl.tokens();
+                        println!("\n  \x1b[2mSession: {} tokens\x1b[0m", tokens.total_tokens());
+                        println!("  Goodbye. 👋");
                         break;
                     }
                     Err(err) => {
@@ -452,149 +516,6 @@ max_candidates = 10
                 println!("Set {} = {} in {}", key, value, config_path.display());
             }
         },
-
-        None => {
-            // Default: enter interactive chat (zero-config)
-            // Auto-init if .terra/ doesn't exist
-            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let terra_dir = project_root.join(".terra");
-
-            if !terra_dir.exists() {
-                // Auto-init silently
-                std::fs::create_dir_all(&terra_dir).ok();
-                let constitution = format!(
-                    "[meta]\nversion = 1\ndescription = \"Terra auto-initialized\"\n\n\
-                     [[protected_paths]]\npath = \".terra/constitution.toml\"\n\n\
-                     [sandbox]\nroot = \".\"\n\n\
-                     [rules]\nallow_external_writes = false\nrequire_spec_complete = true\nrequire_verification = true\n"
-                );
-                std::fs::write(terra_dir.join("constitution.toml"), &constitution).ok();
-                let config = "[provider]\nbase_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\nmodel = \"qwen-plus\"\n\n[memory]\ncache_capacity = 1000\n\n[sleep]\ntrigger = \"session_end\"\ninterval_hours = 24\nmax_candidates = 10\n";
-                std::fs::write(terra_dir.join("config.toml"), config).ok();
-            }
-
-            // Check first launch (usage declaration)
-            let ack_path = terra_dir.join(".acknowledged");
-            if !ack_path.exists() {
-                println!();
-                println!("\x1b[1m  Terra Agent OS — First Launch\x1b[0m");
-                println!();
-                println!("  Terra can:");
-                println!("    \x1b[36m•\x1b[0m Read and modify files in this directory");
-                println!("    \x1b[36m•\x1b[0m Execute shell commands");
-                println!("    \x1b[36m•\x1b[0m Call LLM APIs (token costs apply)");
-                println!("    \x1b[36m•\x1b[0m Store conversation history and project memory");
-                println!();
-                println!("  All operations are sandboxed to this directory.");
-                println!("  Destructive operations require your confirmation.");
-                println!();
-                std::fs::write(&ack_path, "acknowledged").ok();
-            }
-
-            // Display sandbox boundary every startup
-            println!("  \x1b[2mWorking in: {}\x1b[0m", project_root.display());
-
-            // Now enter chat mode (reuse the Chat handler logic)
-            use terra_agents::repl::{Repl, ReplOutput};
-            #[allow(unused_imports)]
-            use ui::{auto_renderer, OutputRenderer};
-            use rustyline::error::ReadlineError;
-            use rustyline::{CompletionType, Config, EditMode, Editor};
-
-            let (provider, provider_name): (Arc<dyn ProviderAdapter>, String) =
-                match OpenAICompatibleAdapter::from_env() {
-                    Ok(adapter) => {
-                        let name = adapter.capabilities().model_id.clone();
-                        (Arc::new(adapter), name)
-                    }
-                    Err(_) => {
-                        println!("  \x1b[33mNo API key — dry_run mode\x1b[0m");
-                        (Arc::new(terra_providers::adapter::DryRunAdapter::new()), "dry_run".into())
-                    }
-                };
-
-            let constitution_path = terra_dir.join("constitution.toml");
-            let constitution = terra_caging::Constitution::load(&constitution_path).ok();
-            let memory = if terra_dir.exists() {
-                MemoryDatabase::open(&terra_dir.join("memory.db"))
-                    .map(Arc::new)
-                    .unwrap_or_else(|_| Arc::new(MemoryDatabase::open_in_memory().unwrap()))
-            } else {
-                Arc::new(MemoryDatabase::open_in_memory().unwrap())
-            };
-            let artifacts = Arc::new(ArtifactStore::new(terra_dir.clone()));
-            let audit = if terra_dir.exists() {
-                AuditLog::with_persistence(&terra_dir.join("audit.db"))
-                    .map(Arc::new)
-                    .unwrap_or_else(|_| Arc::new(AuditLog::new()))
-            } else {
-                Arc::new(AuditLog::new())
-            };
-            let sandbox = match &constitution {
-                Some(c) => c.to_sandbox_guard(&project_root),
-                None => SandboxGuard::new(project_root.clone(), vec![]),
-            };
-            let caging = Arc::new(CagingEngine::new(vec![
-                Box::new(SpecificationCage),
-                Box::new(MemoryCage),
-                Box::new(ActionCage::new(sandbox)),
-                Box::new(VerificationCage),
-                Box::new(MetaCage),
-            ]));
-            let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
-
-            let mut core = IntelligenceCore::new();
-            core.register(Box::new(CodingModule));
-            core.register(Box::new(AlgorithmModule));
-            let core = Arc::new(core);
-
-            let mut repl = Repl::new(executor, core);
-            let renderer = auto_renderer(&provider_name);
-
-            let rl_config = Config::builder()
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Emacs)
-                .build();
-            let mut rl: Editor<(), _> = Editor::with_config(rl_config)?;
-            let history_path = terra_dir.join("history.txt");
-            let _ = rl.load_history(&history_path);
-
-            renderer.render_banner();
-
-            loop {
-                let prompt = if repl.session.mode().is_goal() { "goal > " } else { "terra > " };
-                match rl.readline(prompt) {
-                    Ok(line) => {
-                        let _ = rl.add_history_entry(&line);
-                        let outputs = repl.process_input(&line).await;
-                        if Repl::should_quit(&outputs) {
-                            for o in &outputs { renderer.render(o); }
-                            break;
-                        }
-                        for output in &outputs {
-                            match output {
-                                ReplOutput::Prompt(_) => {}
-                                other => renderer.render(other),
-                            }
-                        }
-                    }
-                    Err(ReadlineError::Interrupted) => {
-                        println!("\n\x1b[33m[interrupted]\x1b[0m");
-                        continue;
-                    }
-                    Err(ReadlineError::Eof) => {
-                        println!("Goodbye.");
-                        break;
-                    }
-                    Err(err) => {
-                        eprintln!("Error: {:?}", err);
-                        break;
-                    }
-                }
-            }
-            let _ = std::fs::create_dir_all(&terra_dir);
-            let _ = rl.save_history(&history_path);
-        }
     }
 
     Ok(())
