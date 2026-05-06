@@ -139,8 +139,20 @@ impl Repl {
     /// Handle a /command.
     async fn handle_command(&mut self, input: &str) -> Vec<ReplOutput> {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
-        let cmd = parts[0];
+        let raw_cmd = parts[0];
         let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+        // Command aliases
+        let cmd = match raw_cmd {
+            "/q" => "/quit",
+            "/s" => "/status",
+            "/h" => "/help",
+            "/g" => "/goal",
+            "/d" => "/done",
+            "/p" => "/plan",
+            "/c" => "/commit",
+            other => other,
+        };
 
         match cmd {
             "/goal" => {
@@ -371,23 +383,47 @@ impl Repl {
             "/help" => {
                 vec![
                     ReplOutput::Text("Commands:".into()),
-                    ReplOutput::Text("  /goal \"desc\"  — Enter Goal Mode".into()),
-                    ReplOutput::Text("  /done          — Exit Goal Mode, trigger sleep".into()),
-                    ReplOutput::Text("  /status        — Show mode, drift, tokens".into()),
-                    ReplOutput::Text("  /remember \"x\" — Save to L1 memory".into()),
-                    ReplOutput::Text("  /sleep         — Manual sleep consolidation".into()),
-                    ReplOutput::Text("  /trace         — View audit trail".into()),
-                    ReplOutput::Text("  /commit        — Stage + commit with LLM message".into()),
-                    ReplOutput::Text("  /plan          — Show/propose execution plan".into()),
-                    ReplOutput::Text("  /compact       — Compact context (free memory)".into()),
-                    ReplOutput::Text("  /clear         — Clear screen and context".into()),
-                    ReplOutput::Text("  /help          — This message".into()),
-                    ReplOutput::Text("  /quit          — Exit Terra".into()),
+                    ReplOutput::Text("  /goal \"desc\"   — Enter Goal Mode (/g)".into()),
+                    ReplOutput::Text("  /done           — Exit Goal Mode, trigger sleep (/d)".into()),
+                    ReplOutput::Text("  /status         — Show mode, drift, tokens (/s)".into()),
+                    ReplOutput::Text("  /plan           — Show/propose execution plan (/p)".into()),
+                    ReplOutput::Text("  /commit         — Stage + commit with LLM message (/c)".into()),
+                    ReplOutput::Text("  /undo           — Revert all uncommitted changes".into()),
+                    ReplOutput::Text("  /remember \"x\"  — Save to L1 memory".into()),
+                    ReplOutput::Text("  /sessions       — List past sessions".into()),
+                    ReplOutput::Text("  /compact        — Compact context (free memory)".into()),
+                    ReplOutput::Text("  /sleep          — Manual sleep consolidation".into()),
+                    ReplOutput::Text("  /clear          — Clear screen and context".into()),
+                    ReplOutput::Text("  /help           — This message (/h)".into()),
+                    ReplOutput::Text("  /quit           — Exit Terra (/q)".into()),
+                    ReplOutput::Text("".into()),
+                    ReplOutput::Text("  Ctrl+C interrupt │ Ctrl+D exit │ ↑↓ history".into()),
                     self.prompt(),
                 ]
             }
             "/quit" | "/exit" => {
                 vec![ReplOutput::Text("Goodbye.".into())]
+            }
+            "/undo" => {
+                let project_root = std::env::current_dir().unwrap_or_default();
+                let output = std::process::Command::new("git")
+                    .args(["checkout", "."])
+                    .current_dir(&project_root)
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => vec![
+                        ReplOutput::Notification("  ✓ Reverted all uncommitted changes".into()),
+                        self.prompt(),
+                    ],
+                    Ok(o) => vec![
+                        ReplOutput::Text(format!("Undo failed: {}", String::from_utf8_lossy(&o.stderr))),
+                        self.prompt(),
+                    ],
+                    Err(e) => vec![
+                        ReplOutput::Text(format!("Undo failed: {}", e)),
+                        self.prompt(),
+                    ],
+                }
             }
             _ => {
                 vec![
@@ -455,7 +491,7 @@ impl Repl {
             let response = result.data.as_ref()
                 .and_then(|d| d.get("content"))
                 .and_then(|c| c.as_str())
-                .unwrap_or("(no response)")
+                .unwrap_or("I couldn't generate a response. Try rephrasing or check your API key with /status.")
                 .to_string();
             let pt = result.data.as_ref()
                 .and_then(|d| d.get("prompt_tokens"))
