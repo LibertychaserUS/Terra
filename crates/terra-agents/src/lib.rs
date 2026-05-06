@@ -22,6 +22,7 @@ pub mod repl;
 pub mod session_store;
 pub mod status;
 pub mod codebase;
+pub mod greeter;
 
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};

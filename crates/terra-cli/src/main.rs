@@ -382,9 +382,22 @@ max_candidates = 10
             // Banner
             renderer.render_banner();
 
-            // Startup examples (oh-my-zsh style hints)
-            println!("  \x1b[2mTry: \"explain this codebase\" │ \"fix the bug in main.rs\" │ /help\x1b[0m");
-            println!();
+            // Smart Greeter
+            {
+                use terra_agents::greeter::*;
+                let session_greeter = SessionGreeter::from_session_dir(&terra_dir);
+                let git_greeter = GitGreeter::from_git_info(&git_info);
+                let default_greeter = DefaultGreeter;
+                let suggestions = collect_suggestions(
+                    &[&session_greeter, &git_greeter, &default_greeter],
+                    4,
+                );
+                let greeter_output = render_greeter(&suggestions);
+                if !greeter_output.is_empty() {
+                    println!("{}", greeter_output);
+                    println!();
+                }
+            }
 
             loop {
                 let prompt = if repl.session.mode().is_goal() { "goal > " } else { "terra > " };
