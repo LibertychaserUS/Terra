@@ -108,6 +108,47 @@ impl TokenTracker {
     }
 }
 
+/// Event Bus — channel for streaming events from Executor to UI.
+///
+/// Implementations:
+/// - ChannelBus: async mpsc channel (for TUI)
+/// - CollectorBus: collects events in Vec (for testing)
+/// - NullBus: discards events (for batch mode)
+pub trait EventBus: Send + Sync {
+    fn emit(&self, event: StreamEvent);
+}
+
+/// Null bus — discards all events. Default when no UI attached.
+pub struct NullBus;
+impl EventBus for NullBus {
+    fn emit(&self, _event: StreamEvent) {}
+}
+
+/// Collector bus — stores events for testing/inspection.
+pub struct CollectorBus {
+    events: std::sync::Mutex<Vec<StreamEvent>>,
+}
+
+impl CollectorBus {
+    pub fn new() -> Self {
+        Self { events: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    pub fn events(&self) -> Vec<StreamEvent> {
+        self.events.lock().unwrap().clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.lock().unwrap().len()
+    }
+}
+
+impl EventBus for CollectorBus {
+    fn emit(&self, event: StreamEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

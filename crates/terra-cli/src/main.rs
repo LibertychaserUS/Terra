@@ -1,5 +1,6 @@
 mod config;
 mod ui;
+mod tui;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -11,6 +11,26 @@ use terra_trace::AuditLog;
 
 use crate::router;
 
+/// Generate a short status text for a CommandOp (for Event Bus).
+fn status_text(op: &CommandOp) -> String {
+    match op {
+        CommandOp::FileRead { path } => format!("Reading {}", path.rsplit('/').next().unwrap_or(path)),
+        CommandOp::FileWrite { path, .. } => format!("Writing {}", path.rsplit('/').next().unwrap_or(path)),
+        CommandOp::FileDelete { path } => format!("Deleting {}", path.rsplit('/').next().unwrap_or(path)),
+        CommandOp::ShellExec { command, .. } => {
+            if command.len() > 30 { format!("Running: {}...", &command[..27]) } else { format!("Running: {}", command) }
+        }
+        CommandOp::ProviderCall { .. } => "Thinking...".into(),
+        CommandOp::MemRead { key } => format!("Reading memory '{}'", key),
+        CommandOp::MemWrite { key, .. } => format!("Writing memory '{}'", key),
+        CommandOp::MemSearch { .. } => "Searching memory...".into(),
+        CommandOp::ArtifactSave { artifact_type, .. } => format!("Saving {}", artifact_type),
+        CommandOp::ArtifactLoad { artifact_type, .. } => format!("Loading {}", artifact_type),
+        CommandOp::TraceEvent { event_type, .. } => format!("Event: {}", event_type),
+        CommandOp::TraceCheckpoint { title, .. } => format!("Checkpoint: {}", title),
+    }
+}
+
 /// The Command Executor — single gateway for all agent-system interactions.
 ///
 /// Pipeline for every command:
@@ -27,6 +47,7 @@ pub struct CommandExecutor {
     audit: Arc<AuditLog>,
     caging: Arc<CagingEngine>,
     provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
+    event_bus: Arc<dyn terra_types::EventBus>,
 }
 
 impl CommandExecutor {
@@ -41,7 +62,14 @@ impl CommandExecutor {
             memory, artifacts,
             search_index: std::sync::Mutex::new(VectorIndex::new()),
             audit, caging, provider,
+            event_bus: Arc::new(terra_types::NullBus),
         }
+    }
+
+    /// Attach an event bus for operation visibility.
+    pub fn with_event_bus(mut self, bus: Arc<dyn terra_types::EventBus>) -> Self {
+        self.event_bus = bus;
+        self
     }
 
     /// Execute a command through the full pipeline.
@@ -84,7 +112,13 @@ impl CommandExecutor {
             warn!(cage = %cage_name, warning = %warning, "cage warning");
         }
 
-        // 3. Execute via router
+        // 3. Emit start event
+        self.event_bus.emit(terra_types::StreamEvent::step_start(
+            &format!("{:?}", std::mem::discriminant(&cmd.op)),
+            &status_text(&cmd.op),
+        ));
+
+        // 4. Execute via router
         let mut result = router::route(
             &cmd.op, &agent, &self.memory, &self.artifacts,
             &self.search_index, &self.provider,
@@ -115,9 +149,14 @@ impl CommandExecutor {
             }
         }
 
-        // 4. Audit: record result with duration
+        // 5. Audit: record result with duration
         let elapsed = start.elapsed().as_micros() as u64;
         self.audit.record_result(seq, result.clone(), elapsed);
+
+        // 6. Emit complete event
+        self.event_bus.emit(terra_types::StreamEvent::step_complete(
+            &format!("{:?}", std::mem::discriminant(&cmd.op)),
+        ));
 
         info!(
             agent = %agent,

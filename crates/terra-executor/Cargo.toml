@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+terra-types = { path = "../terra-types" }
 terra-protocol = { path = "../terra-protocol" }
 terra-memory = { path = "../terra-memory" }
 terra-trace = { path = "../terra-trace" }
