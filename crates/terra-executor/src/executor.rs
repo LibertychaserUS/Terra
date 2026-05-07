@@ -72,6 +72,16 @@ impl CommandExecutor {
         self
     }
 
+    /// Expose the provider adapter for direct calls (used by REPL agent loop).
+    ///
+    /// The REPL needs direct provider access for the tool-call loop because
+    /// `CompletionRequest` carries tools/tool_results fields that `CommandOp::ProviderCall`
+    /// does not support. Individual tool executions still go through `execute()` with
+    /// full cage checking and audit.
+    pub fn provider(&self) -> &Arc<dyn terra_providers::adapter::ProviderAdapter> {
+        &self.provider
+    }
+
     /// Execute a command through the full pipeline.
     pub async fn execute(&self, cmd: Command) -> CommandResult {
         let start = Instant::now();

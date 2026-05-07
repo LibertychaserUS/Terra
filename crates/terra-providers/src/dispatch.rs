@@ -53,6 +53,9 @@ mod tests {
             user_prompt: "Fix the bug in auth.py line 42".into(),
             max_tokens: Some(2000),
             temperature: None,
+            tools: None,
+            tool_results: None,
+            pending_tool_calls: None,
         }
     }
 
@@ -165,6 +168,9 @@ mod tests {
             user_prompt: "hello world test".into(),
             max_tokens: None,
             temperature: None,
+            tools: None,
+            tool_results: None,
+            pending_tool_calls: None,
         };
         let chunks = adapter.complete_stream(request).await.unwrap();
 

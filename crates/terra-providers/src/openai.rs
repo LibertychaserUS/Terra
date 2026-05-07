@@ -44,12 +44,49 @@ struct ChatRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ChatTool>>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ChatMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+/// OpenAI tool definition format.
+#[derive(Serialize)]
+struct ChatTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: ChatFunction,
 }
 
 #[derive(Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
+struct ChatFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// OpenAI tool call in response.
+#[derive(Serialize, Deserialize, Clone)]
+struct ChatToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: ChatFunctionCall,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ChatFunctionCall {
+    name: String,
+    arguments: String, // JSON string
 }
 
 /// OpenAI chat completions response body.
@@ -68,6 +105,8 @@ struct ChatChoice {
 #[derive(Deserialize)]
 struct ChatChoiceMessage {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ChatToolCall>>,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +164,7 @@ impl OpenAICompatibleAdapter {
             model_id: model.clone(),
             supports_structured_output: true,
             supports_streaming: true,
+            supports_function_calling: true,
             max_context_tokens: 128_000,
             latency_class: LatencyClass::Medium,
         };
@@ -147,20 +187,69 @@ impl OpenAICompatibleAdapter {
 
     /// Execute a request with retry and exponential backoff.
     async fn complete_with_retry(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
+        // Build messages
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some(request.system_prompt.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some(request.user_prompt.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        // Append tool call results if present (multi-turn tool conversation)
+        if let (Some(pending_calls), Some(results)) = (&request.pending_tool_calls, &request.tool_results) {
+            // Add the assistant message with tool_calls
+            let chat_tool_calls: Vec<ChatToolCall> = pending_calls.iter().map(|tc| ChatToolCall {
+                id: tc.id.clone(),
+                call_type: "function".into(),
+                function: ChatFunctionCall {
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.to_string(),
+                },
+            }).collect();
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(chat_tool_calls),
+                tool_call_id: None,
+            });
+
+            // Add tool results
+            for result in results {
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: Some(result.content.clone()),
+                    tool_calls: None,
+                    tool_call_id: Some(result.tool_call_id.clone()),
+                });
+            }
+        }
+
+        // Convert ToolDef to ChatTool format
+        let tools: Option<Vec<ChatTool>> = request.tools.as_ref().map(|defs| {
+            defs.iter().map(|d| ChatTool {
+                tool_type: "function".into(),
+                function: ChatFunction {
+                    name: d.name.clone(),
+                    description: d.description.clone(),
+                    parameters: d.parameters.clone(),
+                },
+            }).collect()
+        });
+
         let chat_request = ChatRequest {
             model: self.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: request.system_prompt.clone(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: request.user_prompt.clone(),
-                },
-            ],
+            messages,
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            tools,
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -197,10 +286,27 @@ impl OpenAICompatibleAdapter {
                             .and_then(|c| c.message.content.clone())
                             .unwrap_or_default();
 
+                        // Extract tool calls if present
+                        let tool_calls: Vec<crate::adapter::ToolCall> = body
+                            .choices
+                            .first()
+                            .and_then(|c| c.message.tool_calls.as_ref())
+                            .map(|tcs| tcs.iter().map(|tc| {
+                                let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                crate::adapter::ToolCall {
+                                    id: tc.id.clone(),
+                                    name: tc.function.name.clone(),
+                                    arguments: args,
+                                }
+                            }).collect())
+                            .unwrap_or_default();
+
                         info!(
                             model = %body.model,
                             prompt_tokens = body.usage.prompt_tokens,
                             completion_tokens = body.usage.completion_tokens,
+                            tool_calls = tool_calls.len(),
                             "provider response received"
                         );
 
@@ -209,6 +315,7 @@ impl OpenAICompatibleAdapter {
                             usage_prompt_tokens: body.usage.prompt_tokens,
                             usage_completion_tokens: body.usage.completion_tokens,
                             model: body.model,
+                            tool_calls,
                         });
                     }
 
@@ -339,6 +446,9 @@ mod tests {
             user_prompt: "What is 2 + 2?".into(),
             max_tokens: Some(50),
             temperature: Some(0.0),
+            tools: None,
+            tool_results: None,
+            pending_tool_calls: None,
         };
 
         let response = adapter.complete(request).await.unwrap();

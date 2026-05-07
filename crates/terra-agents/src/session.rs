@@ -15,9 +15,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use terra_compile::SpecIR;
+use terra_compile::{SpecIR, TermTable};
 use terra_executor::CommandExecutor;
 use terra_protocol::command::{Command, CommandOp, CommandStatus};
+
+use crate::drift::{DriftCheckResult, DriftDetector};
 
 /// Runtime mode — determines which cages and checks are active.
 ///
@@ -61,6 +63,7 @@ pub struct SessionManager {
     session_actions: Vec<SessionAction>,
     goal_key: Option<String>,
     sleep_settings: SleepSettings,
+    drift_detector: Option<DriftDetector>,
 }
 
 /// A recorded action during a session (for sleep consolidation).
@@ -80,6 +83,7 @@ impl SessionManager {
             session_actions: Vec::new(),
             goal_key: None,
             sleep_settings: SleepSettings::default(),
+            drift_detector: None,
         }
     }
 
@@ -92,6 +96,7 @@ impl SessionManager {
             session_actions: Vec::new(),
             goal_key: None,
             sleep_settings: settings,
+            drift_detector: None,
         }
     }
 
@@ -154,7 +159,8 @@ impl SessionManager {
             return Err("already in Goal Mode — use /done first".into());
         }
 
-        let spec = SpecIR::from_task_description(description);
+        let term_table = TermTable::default_coding();
+        let spec = SpecIR::compile_full(description, &term_table, None);
 
         self.audit_event("mode_switch", &serde_json::json!({
             "from": "conversation",
@@ -168,6 +174,7 @@ impl SessionManager {
             drift_score: 1.0,
             command_count: 0,
         };
+        self.drift_detector = Some(DriftDetector::new());
 
         Ok(())
     }
@@ -183,6 +190,7 @@ impl SessionManager {
 
         self.mode = SessionMode::Conversation;
         self.session_actions.clear();
+        self.drift_detector = None;
 
         report
     }
@@ -208,6 +216,27 @@ impl SessionManager {
     /// Record an action during the session.
     pub fn record_action(&mut self, action: SessionAction) {
         self.session_actions.push(action);
+    }
+
+    /// Check drift against the current goal spec.
+    /// Returns None if not in Goal Mode or no detector is active.
+    /// When a check fires, updates the drift_score and command_count in the mode.
+    pub fn check_drift(&mut self, action: &str) -> Option<DriftCheckResult> {
+        let intent = match &self.mode {
+            SessionMode::Goal { spec, .. } => spec.intent.clone(),
+            _ => return None,
+        };
+
+        let detector = self.drift_detector.as_mut()?;
+        let result = detector.on_command(&intent, action);
+
+        // Sync live score and count back into SessionMode
+        if let SessionMode::Goal { drift_score, command_count, .. } = &mut self.mode {
+            *drift_score = detector.last_score();
+            *command_count = detector.command_count();
+        }
+
+        Some(result)
     }
 
     /// Get the current goal (if session is active).

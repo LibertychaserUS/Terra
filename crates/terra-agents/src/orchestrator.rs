@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tracing::info;
@@ -6,6 +6,8 @@ use tracing::info;
 use terra_compile::{SpecIR, ExecutionPlan, PlanStep, StepStatus};
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
+use terra_memory::PointerTable;
+use terra_memory::types::{Level, Scope};
 use terra_protocol::command::{Command, CommandOp};
 
 /// Result of a full orchestration run.
@@ -41,11 +43,16 @@ pub struct GoalTurnResult {
 pub struct Orchestrator {
     executor: Arc<CommandExecutor>,
     core: Arc<IntelligenceCore>,
+    pointer_table: Arc<Mutex<PointerTable>>,
 }
 
 impl Orchestrator {
     pub fn new(executor: Arc<CommandExecutor>, core: Arc<IntelligenceCore>) -> Self {
-        Self { executor, core }
+        Self {
+            executor,
+            core,
+            pointer_table: Arc::new(Mutex::new(PointerTable::new())),
+        }
     }
 
     /// Get a reference to the executor (for REPL to share).
@@ -58,6 +65,20 @@ impl Orchestrator {
         &self.core
     }
 
+    /// Get a reference to the pointer table (for REPL to share).
+    pub fn pointer_table(&self) -> &Arc<Mutex<PointerTable>> {
+        &self.pointer_table
+    }
+
+    /// Register a memory pointer in the pointer table.
+    ///
+    /// Called after successful MemWrite to keep the pointer index in sync.
+    pub fn register_pointer(&self, key: &str, level: Level, scope: Scope, annotation: &str) {
+        if let Ok(mut pt) = self.pointer_table.lock() {
+            pt.register(key.to_string(), level, scope, annotation.to_string());
+        }
+    }
+
     /// Build IC-enriched system prompt for Goal Mode.
     fn build_goal_prompt(&self, goal: &str) -> String {
         let rules = self.core.all_rules();
@@ -67,7 +88,18 @@ impl Orchestrator {
             .collect::<Vec<_>>()
             .join("\n");
 
-        format!(
+        // Pointer memory context
+        let pointer_ctx = {
+            let pt = self.pointer_table.lock().unwrap();
+            let ws = pt.working_set(10);
+            if !ws.is_empty() {
+                pt.serialize_compact()
+            } else {
+                String::new()
+            }
+        };
+
+        let mut prompt = format!(
             "You are a precise coding assistant operating under Terra Agent OS.\n\
              \n\
              ## Active Rules\n\
@@ -78,7 +110,14 @@ impl Orchestrator {
              \n\
              Execute precisely. Report results concisely.",
             rules_text, goal
-        )
+        );
+
+        if !pointer_ctx.is_empty() {
+            prompt.push_str("\n\n## Memory Pointers\n");
+            prompt.push_str(&pointer_ctx);
+        }
+
+        prompt
     }
 
     /// Run a single conversation turn through the full Goal Mode pipeline.

@@ -7,6 +7,7 @@ pub struct ProviderCapability {
     pub model_id: String,
     pub supports_structured_output: bool,
     pub supports_streaming: bool,
+    pub supports_function_calling: bool,
     pub max_context_tokens: u32,
     pub latency_class: LatencyClass,
 }
@@ -26,6 +27,37 @@ pub struct StreamChunk {
     pub text: String,
     /// True if this is the final chunk.
     pub done: bool,
+}
+
+/// A tool definition for function calling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    /// Tool name (e.g., "FileRead", "MemSearch", "PointerQuery").
+    pub name: String,
+    /// Short description for the LLM.
+    pub description: String,
+    /// JSON Schema for the tool's parameters.
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call requested by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Unique ID for this call (provider-assigned).
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// Arguments as JSON.
+    pub arguments: serde_json::Value,
+}
+
+/// A tool result to send back to the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// Matches the tool_call ID.
+    pub tool_call_id: String,
+    /// Result content (stringified).
+    pub content: String,
 }
 
 /// Trait for LLM provider adapters.
@@ -59,6 +91,15 @@ pub struct CompletionRequest {
     pub user_prompt: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// Tool definitions for function calling (optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDef>>,
+    /// Previous tool results to include in the conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_results: Option<Vec<ToolResult>>,
+    /// Previous tool calls (for multi-turn tool conversations).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_tool_calls: Option<Vec<ToolCall>>,
 }
 
 /// A completion response from an LLM.
@@ -68,6 +109,9 @@ pub struct CompletionResponse {
     pub usage_prompt_tokens: u32,
     pub usage_completion_tokens: u32,
     pub model: String,
+    /// Tool calls requested by the LLM (if any).
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// A dry-run adapter that returns deterministic responses without calling any API.
@@ -83,6 +127,7 @@ impl DryRunAdapter {
                 model_id: "dry_run".into(),
                 supports_structured_output: true,
                 supports_streaming: false,
+                supports_function_calling: false,
                 max_context_tokens: 128_000,
                 latency_class: LatencyClass::Fast,
             },
@@ -101,6 +146,7 @@ impl ProviderAdapter for DryRunAdapter {
             usage_prompt_tokens: 0,
             usage_completion_tokens: 0,
             model: "dry_run".into(),
+            tool_calls: vec![],
         })
     }
 

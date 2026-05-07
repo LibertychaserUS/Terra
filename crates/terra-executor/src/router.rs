@@ -82,22 +82,50 @@ pub async fn route(
         }
 
         CommandOp::MemSearch { query, top_k } => {
-            let results = match search_index.lock() {
-                Ok(idx) => idx.search(query, *top_k as usize),
-                Err(_) => vec![],
-            };
+            // Multi-head mode: if query starts with "multi:", split into sub-queries
+            if query.starts_with("multi:") {
+                let raw = &query["multi:".len()..];
+                let sub_queries: Vec<String> = raw.split('|')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
 
-            let entries: Vec<serde_json::Value> = results
-                .iter()
-                .map(|(key, score)| serde_json::json!({"key": key, "score": score}))
-                .collect();
+                let results = match search_index.lock() {
+                    Ok(idx) => idx.multi_head_search(&sub_queries, *top_k as usize),
+                    Err(_) => vec![],
+                };
 
-            CommandResult::ok("", Some(serde_json::json!({
-                "query": query,
-                "top_k": top_k,
-                "results": entries,
-                "count": results.len(),
-            })))
+                let entries: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(key, score)| serde_json::json!({"key": key, "score": score}))
+                    .collect();
+
+                CommandResult::ok("", Some(serde_json::json!({
+                    "query": query,
+                    "mode": "multi_head",
+                    "sub_queries": sub_queries,
+                    "top_k": top_k,
+                    "results": entries,
+                    "count": results.len(),
+                })))
+            } else {
+                let results = match search_index.lock() {
+                    Ok(idx) => idx.search(query, *top_k as usize),
+                    Err(_) => vec![],
+                };
+
+                let entries: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(key, score)| serde_json::json!({"key": key, "score": score}))
+                    .collect();
+
+                CommandResult::ok("", Some(serde_json::json!({
+                    "query": query,
+                    "top_k": top_k,
+                    "results": entries,
+                    "count": results.len(),
+                })))
+            }
         }
 
         CommandOp::ArtifactSave { artifact_type, content: _ } => {
@@ -159,6 +187,9 @@ pub async fn route(
                 user_prompt: user_prompt.clone(),
                 max_tokens: *max_tokens,
                 temperature: *temperature,
+                tools: None,
+                tool_results: None,
+                pending_tool_calls: None,
             };
 
             match provider.complete(request).await {

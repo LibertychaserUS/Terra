@@ -33,7 +33,11 @@ enum Commands {
     Init,
 
     /// Interactive dialogue mode (REPL).
-    Chat,
+    Chat {
+        /// Use ratatui TUI instead of readline
+        #[arg(long, default_value_t = false)]
+        tui: bool,
+    },
 
     /// Check environment readiness.
     Doctor {
@@ -164,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
     // Other commands: keep INFO for diagnostics.
     // User can always override with RUST_LOG=terra=info.
     let default_filter = match &cli.command {
-        Some(Commands::Chat) | None => "terra=warn",
+        Some(Commands::Chat { .. }) | None => "terra=warn",
         _ => "terra=info",
     };
     tracing_subscriber::fmt()
@@ -269,7 +273,8 @@ max_candidates = 10
             println!();
         }
 
-        Some(Commands::Chat) | None => {
+        ref cmd @ (Some(Commands::Chat { .. }) | None) => {
+            let use_tui = matches!(cmd, Some(Commands::Chat { tui: true }));
             use terra_agents::repl::{Repl, ReplOutput};
             use terra_agents::codebase::{ProjectContext, detect_git};
             use terra_agents::session_store::SessionStore;
@@ -369,12 +374,61 @@ max_candidates = 10
                 Box::new(VerificationCage),
                 Box::new(MetaCage),
             ]));
-            let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
+            // EventBus: ChannelBus for operation visibility
+            let (event_bus, mut event_rx) = terra_types::ChannelBus::new();
+            let executor = Arc::new(
+                CommandExecutor::new(memory, artifacts, audit, caging, provider)
+                    .with_event_bus(Arc::new(event_bus))
+            );
+
+            // Spawn event consumer (displays operation chain)
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    use terra_types::EventType;
+                    match event.event_type {
+                        EventType::StepStart => {
+                            if let Some(desc) = event.data.get("description").and_then(|d| d.as_str()) {
+                                if !desc.contains("Thinking") {
+                                    eprint!("\x1b[2m  ● {}\x1b[0m", desc);
+                                }
+                            }
+                        }
+                        EventType::StepComplete => {
+                            if let Some(desc) = event.data.get("op").and_then(|d| d.as_str()) {
+                                if !desc.contains("ProviderCall") {
+                                    eprintln!(" \x1b[2m✓\x1b[0m");
+                                }
+                            }
+                        }
+                        EventType::StepFailed => {
+                            eprintln!(" \x1b[31m✗\x1b[0m");
+                        }
+                        _ => {}
+                    }
+                }
+            });
 
             let mut core = IntelligenceCore::new();
             core.register(Box::new(CodingModule));
             core.register(Box::new(AlgorithmModule));
             let core = Arc::new(core);
+
+            // TUI mode: launch ratatui TUI instead of rustyline
+            if use_tui {
+                use terra_agents::greeter::*;
+                let session_greeter = SessionGreeter::from_session_dir(&terra_dir);
+                let git_greeter = GitGreeter::from_git_info(&git_info);
+                let default_greeter = DefaultGreeter;
+                let suggestions = collect_suggestions(
+                    &[&session_greeter, &git_greeter, &default_greeter],
+                    4,
+                );
+                let greeter_lines: Vec<String> = suggestions.iter()
+                    .map(|s| format!("  {} — {}", s.label, s.hint))
+                    .collect();
+                tui::run_tui_async(executor, core, &provider_name, greeter_lines).await?;
+                return Ok(());
+            }
 
             let mut repl = Repl::new(executor, core)
                 .with_store(SessionStore::new(&terra_dir));

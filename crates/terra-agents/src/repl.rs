@@ -11,14 +11,23 @@
 
 use std::sync::Arc;
 
+use tracing::{info, warn};
+
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
+use terra_providers::adapter::{
+    CompletionRequest, ToolCall, ToolDef as ProviderToolDef, ToolResult,
+};
 use terra_types::command::{Command, CommandOp};
 use terra_types::event::{StreamEvent, TokenTracker};
 
+use terra_compile::ExecutionPlan;
+
 use crate::orchestrator::Orchestrator;
+use crate::skill::{SkillRegistry, SkillContext, code_editor_skill, test_runner_skill, memory_inspector_skill};
 use crate::session::SessionManager;
 use crate::session_store::{SessionRecord, SessionStore};
+use crate::tools::{ToolLevel, ToolRegistry};
 
 /// Output from the REPL — UI-agnostic, renderable by any frontend.
 #[derive(Debug, Clone)]
@@ -48,6 +57,10 @@ pub struct Repl {
     session_store: Option<SessionStore>,
     /// Approximate max context tokens (from provider capability).
     max_context_tokens: u32,
+    /// Most recently proposed plan (set by /plan, consumed by /execute).
+    pending_plan: Option<ExecutionPlan>,
+    /// Skill registry for /skill command.
+    skill_registry: SkillRegistry,
 }
 
 /// Approximate token count from text (chars / 4 is a rough heuristic).
@@ -57,6 +70,9 @@ fn approx_tokens(text: &str) -> u32 {
 
 /// Compaction threshold: 70% of max.
 const COMPACTION_THRESHOLD: f32 = 0.70;
+
+/// Maximum iterations for the tool-call agent loop.
+const MAX_AGENT_LOOP_ITERATIONS: u32 = 20;
 
 /// A single turn in the conversation.
 #[derive(Debug, Clone)]
@@ -68,6 +84,10 @@ struct ConversationTurn {
 impl Repl {
     pub fn new(executor: Arc<CommandExecutor>, core: Arc<IntelligenceCore>) -> Self {
         let orchestrator = Orchestrator::new(executor.clone(), core.clone());
+        let mut skill_registry = SkillRegistry::new();
+        skill_registry.register(code_editor_skill());
+        skill_registry.register(test_runner_skill());
+        skill_registry.register(memory_inspector_skill());
         Self {
             session: SessionManager::new(executor.clone()),
             orchestrator,
@@ -78,6 +98,8 @@ impl Repl {
             session_record: SessionRecord::new(),
             session_store: None,
             max_context_tokens: 128_000, // default, overridden by provider capability
+            pending_plan: None,
+            skill_registry,
         }
     }
 
@@ -175,6 +197,7 @@ impl Repl {
             }
             "/done" => {
                 let report = self.session.exit_goal().await;
+                self.pending_plan = None;
                 let mut out = vec![
                     ReplOutput::Notification("Goal Mode ended. Back to Conversation.".into()),
                 ];
@@ -183,14 +206,19 @@ impl Repl {
                         "Sleep consolidation: {} candidates from {} actions",
                         report.candidates.len(), report.action_count
                     )));
+                    out.push(ReplOutput::Text("─────────────────────────────────".into()));
                     for (i, c) in report.candidates.iter().enumerate() {
                         out.push(ReplOutput::Text(format!(
-                            "  [{}] {} (from {} actions, IC rule: {})",
-                            i, c.principle,
+                            "  [{}] {}", i, c.principle,
+                        )));
+                        out.push(ReplOutput::Text(format!(
+                            "      from {} actions | IC rule: {}",
                             c.derived_from.len(),
                             c.ic_rule_id.as_deref().unwrap_or("none"),
                         )));
                     }
+                    out.push(ReplOutput::Text("─────────────────────────────────".into()));
+                    out.push(ReplOutput::Text("Use /accept N or /reject N to decide.".into()));
                 }
                 out.push(self.prompt());
                 out
@@ -226,14 +254,27 @@ impl Repl {
                         self.prompt(),
                     ];
                 }
+                let mem_key = format!("user:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
                 let cmd = Command::new("user", CommandOp::MemWrite {
-                    key: format!("user:{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                    key: mem_key.clone(),
                     content: arg.to_string(),
                     scope: "project".into(),
                     level: "L1".into(),
                 });
                 let result = self.executor.execute(cmd).await;
                 let msg = if result.status == terra_types::CommandStatus::Ok {
+                    // Register pointer for the newly written memory entry
+                    let annotation = if arg.len() > 60 {
+                        format!("{}...", &arg[..57])
+                    } else {
+                        arg.to_string()
+                    };
+                    self.orchestrator.register_pointer(
+                        &mem_key,
+                        terra_memory::types::Level::L1,
+                        terra_memory::types::Scope::Project,
+                        &annotation,
+                    );
                     format!("Remembered: {}", arg)
                 } else {
                     format!("Failed: {:?}", result.error)
@@ -357,13 +398,157 @@ impl Repl {
                 match self.orchestrator.propose_plan(&goal).await {
                     Ok(plan) => {
                         let display = plan.display();
-                        vec![ReplOutput::Text(display), self.prompt()]
+                        self.pending_plan = Some(plan);
+                        vec![
+                            ReplOutput::Text(display),
+                            ReplOutput::Notification("Plan stored. Use /execute to run it.".into()),
+                            self.prompt(),
+                        ]
                     }
                     Err(e) => vec![
                         ReplOutput::Text(format!("Plan error: {}", e)),
                         self.prompt(),
                     ],
                 }
+            }
+            "/execute" => {
+                let plan = match self.pending_plan.take() {
+                    Some(p) => p,
+                    None => return vec![
+                        ReplOutput::Text("No pending plan. Use /plan first to propose one.".into()),
+                        self.prompt(),
+                    ],
+                };
+                let mut out = vec![
+                    ReplOutput::Notification(format!("Executing plan ({} steps)...", plan.steps.len())),
+                ];
+                let mut current_plan = plan;
+                while let Some(step) = current_plan.next_step().map(|s| s.name.clone()) {
+                    current_plan.start_step(&step);
+                    out.push(ReplOutput::Text(format!("  Running: {}...", step)));
+
+                    // Execute the step via a ProviderCall (generic execution)
+                    let step_desc = current_plan.steps.iter()
+                        .find(|s| s.name == step)
+                        .map(|s| s.description.clone())
+                        .unwrap_or_default();
+                    let cmd = Command::new("main", CommandOp::ProviderCall {
+                        system_prompt: "Execute this plan step precisely. Output only the result.".into(),
+                        user_prompt: format!("Step: {}\nGoal: {}", step_desc, current_plan.spec.intent),
+                        max_tokens: Some(2000),
+                        temperature: Some(0.0),
+                        output_contract: None,
+                    });
+                    let result = self.executor.execute(cmd).await;
+
+                    if result.status == terra_types::CommandStatus::Ok {
+                        let step_output = result.data.as_ref()
+                            .and_then(|d| d.get("content"))
+                            .cloned()
+                            .unwrap_or(serde_json::json!("done"));
+                        current_plan.complete_step(&step, step_output);
+                        out.push(ReplOutput::Text(format!("  Done: {}", step)));
+                    } else {
+                        current_plan.fail_step(&step);
+                        out.push(ReplOutput::Text(format!("  Failed: {} — {:?}", step, result.error)));
+                        break;
+                    }
+                }
+                if current_plan.is_complete() {
+                    out.push(ReplOutput::Notification("Plan completed successfully.".into()));
+                } else if current_plan.has_failure() {
+                    out.push(ReplOutput::Notification("Plan stopped due to failure.".into()));
+                }
+                out.push(self.prompt());
+                out
+            }
+            "/skill" => {
+                if arg.is_empty() {
+                    // List available skills
+                    let names = self.skill_registry.list();
+                    let mut out = vec![ReplOutput::Text("Available skills:".into())];
+                    for name in &names {
+                        out.push(ReplOutput::Text(format!("  - {}", name)));
+                    }
+                    out.push(ReplOutput::Text("Usage: /skill <name> [input JSON]".into()));
+                    out.push(self.prompt());
+                    return out;
+                }
+                let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+                let skill_name = parts[0];
+                let input_str = parts.get(1).unwrap_or(&"{}");
+                let input: serde_json::Value = serde_json::from_str(input_str)
+                    .unwrap_or(serde_json::json!({"instruction": input_str}));
+
+                let skill = match self.skill_registry.lookup(skill_name) {
+                    Some(s) => s,
+                    None => return vec![
+                        ReplOutput::Text(format!("Skill '{}' not found. Use /skill to list.", skill_name)),
+                        self.prompt(),
+                    ],
+                };
+
+                let ctx = SkillContext {
+                    agent_id: "main".into(),
+                    agent_allowed_ops: skill.required_ops.clone(),
+                    input,
+                };
+                let plan = (skill.execute_fn)(&ctx);
+                let result = self.skill_registry.execute_plan(&plan, "main", &self.executor).await;
+
+                let mut out = Vec::new();
+                if result.success {
+                    out.push(ReplOutput::Notification(format!(
+                        "Skill '{}' completed ({}/{} steps)",
+                        skill_name, result.steps_completed, result.steps_total
+                    )));
+                } else {
+                    out.push(ReplOutput::Text(format!(
+                        "Skill '{}' failed at step {}/{}: {}",
+                        skill_name, result.steps_completed, result.steps_total,
+                        result.error.as_deref().unwrap_or("unknown error"),
+                    )));
+                }
+                out.push(self.prompt());
+                out
+            }
+            "/accept" => {
+                let idx: usize = match arg.parse() {
+                    Ok(n) => n,
+                    Err(_) => return vec![
+                        ReplOutput::Text("Usage: /accept N (candidate index)".into()),
+                        self.prompt(),
+                    ],
+                };
+                // Write accepted candidate to L1 memory
+                let key = format!("promoted:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+                let content = format!("Accepted promotion candidate #{}", idx);
+                let cmd = Command::new("user", CommandOp::MemWrite {
+                    key: key.clone(),
+                    content,
+                    scope: "project".into(),
+                    level: "L1".into(),
+                });
+                self.executor.execute(cmd).await;
+                self.session.record_verdict(idx, true).await;
+                vec![
+                    ReplOutput::Notification(format!("Candidate #{} accepted → promoted to L1", idx)),
+                    self.prompt(),
+                ]
+            }
+            "/reject" => {
+                let idx: usize = match arg.parse() {
+                    Ok(n) => n,
+                    Err(_) => return vec![
+                        ReplOutput::Text("Usage: /reject N (candidate index)".into()),
+                        self.prompt(),
+                    ],
+                };
+                self.session.record_verdict(idx, false).await;
+                vec![
+                    ReplOutput::Notification(format!("Candidate #{} rejected → discarded", idx)),
+                    self.prompt(),
+                ]
             }
             "/clear" => {
                 self.context.clear();
@@ -387,6 +572,10 @@ impl Repl {
                     ReplOutput::Text("  /done           — Exit Goal Mode, trigger sleep (/d)".into()),
                     ReplOutput::Text("  /status         — Show mode, drift, tokens (/s)".into()),
                     ReplOutput::Text("  /plan           — Show/propose execution plan (/p)".into()),
+                    ReplOutput::Text("  /execute        — Run the most recently proposed plan".into()),
+                    ReplOutput::Text("  /skill [name]   — List or run a registered Skill".into()),
+                    ReplOutput::Text("  /accept N       — Accept sleep promotion candidate".into()),
+                    ReplOutput::Text("  /reject N       — Reject sleep promotion candidate".into()),
                     ReplOutput::Text("  /commit         — Stage + commit with LLM message (/c)".into()),
                     ReplOutput::Text("  /undo           — Revert all uncommitted changes".into()),
                     ReplOutput::Text("  /remember \"x\"  — Save to L1 memory".into()),
@@ -434,7 +623,15 @@ impl Repl {
         }
     }
 
-    /// Handle a conversation turn (not a command).
+    /// Handle a conversation turn with agent loop (tool calling).
+    ///
+    /// Pipeline:
+    /// 1. Determine tool level based on session mode (Conversation -> L0, Goal -> L1).
+    /// 2. Build tool definitions from ToolRegistry.
+    /// 3. Build system prompt (with IC rules in Goal mode, pointer DSL docs).
+    /// 4. Call the provider WITH tools.
+    /// 5. If response has tool_calls: execute each, collect results, call LLM again.
+    /// 6. Loop until LLM returns text (no tool_calls) or max iterations reached.
     async fn handle_conversation(&mut self, input: &str) -> Vec<ReplOutput> {
         // Add user turn to context
         self.context.push(ConversationTurn {
@@ -445,54 +642,167 @@ impl Repl {
 
         let mut out = Vec::new();
 
-        // Route based on mode
-        let (response, prompt_tokens, completion_tokens) = if self.session.mode().is_goal() {
-            // Goal Mode: through Orchestrator (full pipeline)
+        // --- 1. Determine tool level and build system prompt ---
+        let is_goal = self.session.mode().is_goal();
+        let tool_level = if is_goal {
+            ToolLevel::L1Write
+        } else {
+            ToolLevel::L0ReadOnly
+        };
+
+        let tool_registry = ToolRegistry::with_builtins();
+        let tool_defs: Vec<ProviderToolDef> = tool_registry
+            .tool_defs(tool_level)
+            .into_iter()
+            .map(|d| ProviderToolDef {
+                name: d.name,
+                description: d.description,
+                parameters: d.parameters,
+            })
+            .collect();
+
+        let system_prompt = if is_goal {
+            // Goal Mode: IC-enriched prompt with goal context
             let goal = match self.session.mode() {
                 crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
                 _ => String::new(),
             };
-            let history: String = self.context.iter()
-                .rev().skip(1).take(10).collect::<Vec<_>>().into_iter().rev()
-                .map(|t| format!("{}: {}", t.role, t.content))
+            let rules = self.orchestrator.core().all_rules();
+            let rules_text: String = rules
+                .iter()
+                .map(|r| format!("- [{}] {}: {}", r.severity_str(), r.id, r.description))
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            match self.orchestrator.run_goal_turn(input, &goal, &history).await {
-                Ok(result) => (result.response, result.prompt_tokens, result.completion_tokens),
-                Err(e) => (format!("Error: {}", e), 0, 0),
+            // Pointer memory context
+            let pointer_ctx = {
+                let pt = self.orchestrator.pointer_table().lock().unwrap();
+                pt.serialize_compact()
+            };
+
+            let mut prompt = format!(
+                "You are Terra, an AI Agent OS. Execute tasks using tools when needed.\n\n\
+                 ## Active Rules\n{}\n\n\
+                 ## Current Goal\n{}\n\n\
+                 {}\n\n\
+                 Use tools to gather information and take actions. Be precise and concise.",
+                rules_text, goal, ToolRegistry::pointer_dsl_docs()
+            );
+            if !pointer_ctx.is_empty() {
+                prompt.push_str("\n\n## Memory Pointers\n");
+                prompt.push_str(&pointer_ctx);
             }
+            prompt
         } else {
-            // Conversation Mode: direct ProviderCall (lightweight)
-            let history: String = self.context.iter()
-                .map(|t| format!("{}: {}", t.role, t.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let cmd = Command::new("main", CommandOp::ProviderCall {
-                system_prompt: "You are Terra, an AI Agent OS assistant. Be helpful and concise.".into(),
-                user_prompt: history,
-                max_tokens: Some(2000),
-                temperature: Some(0.3),
-                output_contract: None,
-            });
-            let result = self.executor.execute(cmd).await;
-
-            let response = result.data.as_ref()
-                .and_then(|d| d.get("content"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("I couldn't generate a response. Try rephrasing or check your API key with /status.")
-                .to_string();
-            let pt = result.data.as_ref()
-                .and_then(|d| d.get("prompt_tokens"))
-                .and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-            let ct = result.data.as_ref()
-                .and_then(|d| d.get("completion_tokens"))
-                .and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-            (response, pt, ct)
+            // Conversation Mode: lightweight prompt
+            format!(
+                "You are Terra, an AI Agent OS assistant. Be helpful and concise.\n\n\
+                 You have access to tools for reading files, searching memory, and querying pointers.\n\n\
+                 {}",
+                ToolRegistry::pointer_dsl_docs()
+            )
         };
 
-        // Track tokens
+        // --- 2. Build conversation history for the user_prompt ---
+        let history: String = self.context.iter()
+            .map(|t| format!("{}: {}", t.role, t.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // --- 3. Agent loop ---
+        let mut prompt_tokens: u32 = 0;
+        let mut completion_tokens: u32 = 0;
+        let mut response = String::new();
+
+        let mut pending_tool_calls: Option<Vec<ToolCall>> = None;
+        let mut tool_results: Option<Vec<ToolResult>> = None;
+
+        let provider = self.executor.provider().clone();
+
+        for iteration in 1..=MAX_AGENT_LOOP_ITERATIONS {
+            // Build request: first iteration sends history, subsequent iterations
+            // send empty user_prompt (tool results carry the conversation forward).
+            let request = CompletionRequest {
+                system_prompt: system_prompt.clone(),
+                user_prompt: if iteration == 1 { history.clone() } else { String::new() },
+                max_tokens: Some(2000),
+                temperature: Some(0.3),
+                tools: Some(tool_defs.clone()),
+                pending_tool_calls: pending_tool_calls.take(),
+                tool_results: tool_results.take(),
+            };
+
+            let completion = match provider.complete(request).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!(error = %e, "provider call failed in agent loop");
+                    response = format!("Error calling provider: {}", e);
+                    break;
+                }
+            };
+
+            // Track tokens from this iteration
+            prompt_tokens += completion.usage_prompt_tokens;
+            completion_tokens += completion.usage_completion_tokens;
+
+            info!(
+                iteration,
+                tool_calls = completion.tool_calls.len(),
+                content_len = completion.content.len(),
+                "agent loop iteration"
+            );
+
+            // --- Check for tool calls ---
+            if !completion.tool_calls.is_empty() {
+                let mut results = Vec::new();
+                let calls = completion.tool_calls.clone();
+
+                for call in &calls {
+                    out.push(ReplOutput::Notification(
+                        format!("  >> Tool: {} ...", call.name)
+                    ));
+
+                    // Execute the tool call
+                    let result_content = self.execute_tool_call(
+                        &tool_registry, &call.name, &call.arguments,
+                    ).await;
+
+                    out.push(ReplOutput::Notification(
+                        format!("  << {} complete", call.name)
+                    ));
+
+                    results.push(ToolResult {
+                        tool_call_id: call.id.clone(),
+                        content: result_content,
+                    });
+                }
+
+                // Store for next iteration
+                pending_tool_calls = Some(calls);
+                tool_results = Some(results);
+                continue; // Loop: call LLM again with results
+            }
+
+            // --- No tool calls: final text response ---
+            response = if completion.content.is_empty() {
+                "I couldn't generate a response. Try rephrasing or check your API key with /status.".to_string()
+            } else {
+                completion.content
+            };
+            break;
+        }
+
+        // Safety: if loop exhausted, notify user
+        if response.is_empty() {
+            response = "(Agent loop reached maximum iterations without a final response.)".to_string();
+            out.push(ReplOutput::Notification(
+                format!("Warning: agent loop reached {} iterations limit.", MAX_AGENT_LOOP_ITERATIONS)
+            ));
+        }
+
+        // --- Post-loop: same as before ---
+
+        // Track accumulated tokens
         self.token_tracker.record(prompt_tokens, completion_tokens);
 
         // Add assistant turn to context + session record
@@ -509,10 +819,20 @@ impl Repl {
         // Auto-save session to disk
         self.auto_save();
 
-        // Output: response + turn summary + compaction check
-        out.push(ReplOutput::Text(response));
+        // Output: response + turn summary + drift check + compaction check
+        out.push(ReplOutput::Text(response.clone()));
 
-        let mode_label = if self.session.mode().is_goal() { "goal" } else { "conversation" };
+        // Drift detection: feed response to detector (only fires in Goal Mode)
+        if let Some(drift_result) = self.session.check_drift(&response) {
+            if drift_result.should_pause {
+                out.push(ReplOutput::Notification(format!(
+                    "\u{26a0} Goal drift detected (score: {:.2}). Your conversation may be drifting from the goal.",
+                    drift_result.score
+                )));
+            }
+        }
+
+        let mode_label = if is_goal { "goal" } else { "conversation" };
         out.push(ReplOutput::Notification(
             crate::status::turn_summary(mode_label, prompt_tokens, completion_tokens)
         ));
@@ -522,6 +842,132 @@ impl Repl {
         }
         out.push(self.prompt());
         out
+    }
+
+    /// Execute a single tool call. Returns the result as a string for the LLM.
+    ///
+    /// - PointerQuery: resolved locally via the orchestrator's PointerTable.
+    /// - All other tools: converted to CommandOp and executed through the executor
+    ///   (with full cage checking and audit).
+    async fn execute_tool_call(
+        &self,
+        registry: &ToolRegistry,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> String {
+        // Find the tool in the registry
+        let tool = match registry.find(tool_name) {
+            Some(t) => t,
+            None => {
+                warn!(tool_name, "unknown tool called by LLM");
+                return format!("Error: unknown tool '{}'", tool_name);
+            }
+        };
+
+        // Parse args via the tool provider
+        let (op_name, parsed_args) = match tool.parse_args(arguments) {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(tool_name, error = %e, "tool argument parse error");
+                return format!("Error: invalid arguments for '{}': {}", tool_name, e);
+            }
+        };
+
+        // Special case: PointerQuery is resolved locally, not through executor
+        if op_name == "PointerQuery" {
+            return self.resolve_pointer_query(&parsed_args);
+        }
+
+        // Convert to CommandOp and execute through executor (cage-checked, audited)
+        let cmd_op = match op_name.as_str() {
+            "FileRead" => CommandOp::FileRead {
+                path: parsed_args["path"].as_str().unwrap_or("").to_string(),
+            },
+            "FileWrite" => CommandOp::FileWrite {
+                path: parsed_args["path"].as_str().unwrap_or("").to_string(),
+                content: parsed_args["content"].as_str().unwrap_or("").to_string(),
+            },
+            "FileDelete" => CommandOp::FileDelete {
+                path: parsed_args["path"].as_str().unwrap_or("").to_string(),
+            },
+            "ShellExec" => CommandOp::ShellExec {
+                command: parsed_args["command"].as_str().unwrap_or("").to_string(),
+                workdir: parsed_args.get("workdir").and_then(|w| w.as_str()).map(String::from),
+                timeout_ms: parsed_args.get("timeout_ms").and_then(|t| t.as_u64()),
+            },
+            "MemRead" => CommandOp::MemRead {
+                key: parsed_args["key"].as_str().unwrap_or("").to_string(),
+            },
+            "MemWrite" => CommandOp::MemWrite {
+                key: parsed_args["key"].as_str().unwrap_or("").to_string(),
+                content: parsed_args["content"].as_str().unwrap_or("").to_string(),
+                scope: parsed_args.get("scope").and_then(|s| s.as_str()).unwrap_or("project").to_string(),
+                level: parsed_args.get("level").and_then(|l| l.as_str()).unwrap_or("L2").to_string(),
+            },
+            "MemSearch" => CommandOp::MemSearch {
+                query: parsed_args["query"].as_str().unwrap_or("").to_string(),
+                top_k: parsed_args.get("top_k").and_then(|t| t.as_u64()).unwrap_or(5) as u32,
+            },
+            "ArtifactSave" => CommandOp::ArtifactSave {
+                artifact_type: parsed_args["artifact_type"].as_str().unwrap_or("").to_string(),
+                content: parsed_args.get("content").cloned().unwrap_or(serde_json::json!({})),
+            },
+            "ArtifactLoad" => CommandOp::ArtifactLoad {
+                artifact_type: parsed_args["artifact_type"].as_str().unwrap_or("").to_string(),
+                version: parsed_args.get("version").and_then(|v| v.as_u64()).map(|v| v as u32),
+            },
+            unknown => {
+                warn!(op = unknown, "unhandled tool op in execute_tool_call");
+                return format!("Error: unhandled operation '{}'", unknown);
+            }
+        };
+
+        let cmd = Command::new("main", cmd_op);
+        let result = self.executor.execute(cmd).await;
+
+        // Format result for LLM consumption
+        match result.status {
+            terra_types::CommandStatus::Ok => {
+                match result.data {
+                    Some(data) => serde_json::to_string(&data).unwrap_or_else(|_| "{}".into()),
+                    None => "OK".to_string(),
+                }
+            }
+            terra_types::CommandStatus::NotFound => {
+                format!("Not found: {}", result.error.unwrap_or_default())
+            }
+            terra_types::CommandStatus::PermissionDenied => {
+                format!("Permission denied: {}", result.error.unwrap_or_default())
+            }
+            terra_types::CommandStatus::Error => {
+                format!("Error: {}", result.error.unwrap_or_default())
+            }
+        }
+    }
+
+    /// Resolve a PointerQuery DSL expression against the orchestrator's PointerTable.
+    fn resolve_pointer_query(&self, args: &serde_json::Value) -> String {
+        let dsl = args.get("dsl").and_then(|d| d.as_str()).unwrap_or("");
+        if dsl.is_empty() {
+            return "Error: empty DSL query".to_string();
+        }
+
+        let pt = self.orchestrator.pointer_table().lock().unwrap();
+        let results = pt.resolve(dsl);
+
+        if results.is_empty() {
+            return format!("No results for: {}", dsl);
+        }
+
+        // Format results for LLM
+        let formatted: Vec<String> = results.iter().map(|p| {
+            format!(
+                "- {} [{:?}/{:?}] (salience: {:.2}): {}",
+                p.key, p.level, p.scope, p.salience, p.annotation
+            )
+        }).collect();
+
+        format!("Pointer results ({}):\n{}", results.len(), formatted.join("\n"))
     }
 
     /// Check if context needs compaction. Returns notification if compacted.
@@ -567,13 +1013,27 @@ impl Repl {
             .join("\n");
 
         // Externalize summary to memory L5
+        let compaction_key = format!("compaction:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
         let cmd = Command::new("session", CommandOp::MemWrite {
-            key: format!("compaction:{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+            key: compaction_key.clone(),
             content: summary.clone(),
             scope: "task".into(),
             level: "L5".into(),
         });
         self.executor.execute(cmd).await;
+
+        // Register pointer for the compaction memory entry
+        let annotation = if summary.len() > 60 {
+            format!("{}...", &summary[..57])
+        } else {
+            summary.clone()
+        };
+        self.orchestrator.register_pointer(
+            &compaction_key,
+            terra_memory::types::Level::L5,
+            terra_memory::types::Scope::Task,
+            &annotation,
+        );
 
         // Replace context: one summary turn + recent turns
         let mut new_context = vec![ConversationTurn {
