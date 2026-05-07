@@ -1,26 +1,17 @@
 //! Terra TUI — ratatui-based terminal user interface
 //!
-#![allow(dead_code, unused_imports)] // TUI module built but activated only in terminal mode
-//! 5-zone layout:
-//! ┌──────────────────────────────────────┐
-//! │ Logo + Status (model | mode)          │ ← compact
-//! ├──────────────────────────────────────┤
-//! │ Smart Greeter / Notification area     │ ← 3-5 lines
-//! ├──────────────────────────────────────┤
-//! │                                      │
-//! │ Chat area (scrollable)               │ ← main body
-//! │                                      │
-//! ├──────────────────────────────────────┤
-//! │ Status bar: mode | model | tokens    │ ← 1 line
-//! ├──────────────────────────────────────┤
-//! │ Input area                           │ ← bottom
-//! └──────────────────────────────────────┘
+//! Architecture:
+//! - Single task: REPL lives inline (no Send requirement)
+//! - Key events polled at 50ms; pending input processed each loop iteration
+//! - UI blocks briefly during LLM calls (acceptable for CLI TUI)
 //!
+//! Horizontal layout, spacious. Chat area dominates.
 //! Activated only when stdout is a terminal.
-//! Falls back to readline REPL when piped.
+
+#![allow(dead_code, unused_imports)]
 
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -28,220 +19,237 @@ use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
+use terra_agents::repl::{Repl, ReplOutput};
+use terra_core::IntelligenceCore;
+use terra_executor::CommandExecutor;
+
 /// TUI application state.
-pub struct TuiApp {
-    pub input: String,
-    pub cursor_pos: usize,
-    pub messages: Vec<ChatMessage>,
-    pub status_line: String,
-    pub greeter_text: String,
-    pub model_name: String,
-    pub mode: String,
-    pub tokens: u64,
-    pub running: bool,
-    pub thinking: bool,
+struct TuiState {
+    input: String,
+    cursor_pos: usize,
+    messages: Vec<(String, String, Style)>,
+    model_name: String,
+    mode: String,
+    tokens: u64,
+    thinking: bool,
+    greeter_lines: Vec<String>,
+    input_history: Vec<String>,
+    history_pos: Option<usize>,
 }
 
-/// A message in the chat area.
-pub struct ChatMessage {
-    pub role: String,    // "user", "assistant", "system"
-    pub content: String,
-}
-
-impl TuiApp {
-    pub fn new(model_name: &str, greeter: &str) -> Self {
+impl TuiState {
+    fn new(model_name: &str, greeter_lines: Vec<String>) -> Self {
         Self {
             input: String::new(),
             cursor_pos: 0,
             messages: Vec::new(),
-            status_line: String::new(),
-            greeter_text: greeter.to_string(),
             model_name: model_name.to_string(),
             mode: "conversation".into(),
             tokens: 0,
-            running: true,
             thinking: false,
+            greeter_lines,
+            input_history: Vec::new(),
+            history_pos: None,
         }
     }
 
-    pub fn add_message(&mut self, role: &str, content: &str) {
-        self.messages.push(ChatMessage {
-            role: role.to_string(),
-            content: content.to_string(),
-        });
+    fn add_msg(&mut self, prefix: &str, content: &str, style: Style) {
+        self.messages.push((prefix.into(), content.into(), style));
+    }
+
+    fn process_outputs(&mut self, outputs: Vec<ReplOutput>) {
+        self.thinking = false;
+        for output in outputs {
+            match output {
+                ReplOutput::Text(t) => self.add_msg("", &t, Style::default()),
+                ReplOutput::Notification(n) => {
+                    let style = if n.starts_with("  ●") || n.starts_with("  ✓") || n.starts_with("  ─") {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::Yellow)
+                    };
+                    let prefix = if style.fg == Some(Color::Yellow) { "[Terra] " } else { "" };
+                    self.add_msg(prefix, &n, style);
+                }
+                ReplOutput::Prompt(_) => {}
+                ReplOutput::Token(t) => {
+                    if let Some(last) = self.messages.last_mut() { last.1.push_str(&t); }
+                }
+                ReplOutput::Event(_) => {}
+            }
+        }
     }
 }
 
-/// Initialize and run the TUI. Returns when user quits.
-pub fn run_tui(app: &mut TuiApp) -> io::Result<()> {
+/// Run full TUI with inline REPL processing.
+///
+/// The REPL lives in the same task — no `tokio::spawn`, no `Send` requirement.
+/// Input is processed inline via `pending_input`. The UI blocks briefly during
+/// LLM calls, which is acceptable for a CLI TUI.
+pub async fn run_tui_async(
+    executor: Arc<CommandExecutor>,
+    core: Arc<IntelligenceCore>,
+    model_name: &str,
+    greeter_lines: Vec<String>,
+) -> io::Result<()> {
+    // REPL lives in the SAME task — no Send requirement
+    let mut repl = Repl::new(executor, core);
+
+    // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_event_loop(&mut terminal, app);
+    let mut state = TuiState::new(model_name, greeter_lines);
+    let mut running = true;
+    let mut pending_input: Option<String> = None;
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    while running {
+        terminal.draw(|f| draw_ui(f, &state))?;
 
-    result
-}
+        // Process pending input inline (no spawn needed)
+        if let Some(input) = pending_input.take() {
+            let outputs = repl.process_input(&input).await;
+            let quit = Repl::should_quit(&outputs);
+            state.process_outputs(outputs);
+            if quit {
+                running = false;
+                continue;
+            }
+        }
 
-/// Main event loop.
-fn run_event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut TuiApp) -> io::Result<()> {
-    loop {
-        terminal.draw(|f| draw_ui(f, app))?;
-
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Key events (50ms poll for responsive UI)
+        if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if app.thinking {
-                            app.thinking = false;
-                            app.add_message("system", "[interrupted]");
+                        if state.thinking {
+                            state.thinking = false;
+                            state.add_msg("", "[interrupted]", Style::default().fg(Color::Yellow));
                         }
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.running = false;
-                        return Ok(());
+                        running = false;
                     }
                     KeyCode::Enter => {
-                        if !app.input.is_empty() {
-                            let input = app.input.clone();
-                            app.input.clear();
-                            app.cursor_pos = 0;
-
-                            if input == "/quit" || input == "/q" {
-                                app.running = false;
-                                return Ok(());
-                            }
-
-                            app.add_message("user", &input);
-                            // Note: actual LLM processing would be async
-                            // For now, mark as thinking — real integration
-                            // requires async channel between TUI and REPL
-                            app.thinking = true;
+                        if !state.input.is_empty() {
+                            let input = state.input.clone();
+                            state.input_history.push(input.clone());
+                            state.history_pos = None;
+                            state.input.clear();
+                            state.cursor_pos = 0;
+                            state.add_msg("you ❯ ", &input, Style::default().fg(Color::Green));
+                            state.thinking = true;
+                            pending_input = Some(input);
                         }
                     }
-                    KeyCode::Char(c) => {
-                        app.input.insert(app.cursor_pos, c);
-                        app.cursor_pos += 1;
-                    }
-                    KeyCode::Backspace => {
-                        if app.cursor_pos > 0 {
-                            app.cursor_pos -= 1;
-                            app.input.remove(app.cursor_pos);
+                    KeyCode::Char(c) => { state.input.insert(state.cursor_pos, c); state.cursor_pos += 1; }
+                    KeyCode::Backspace => { if state.cursor_pos > 0 { state.cursor_pos -= 1; state.input.remove(state.cursor_pos); } }
+                    KeyCode::Left => { if state.cursor_pos > 0 { state.cursor_pos -= 1; } }
+                    KeyCode::Right => { if state.cursor_pos < state.input.len() { state.cursor_pos += 1; } }
+                    KeyCode::Up => {
+                        if !state.input_history.is_empty() {
+                            let pos = state.history_pos.map(|p| p.saturating_sub(1)).unwrap_or(state.input_history.len() - 1);
+                            state.history_pos = Some(pos);
+                            state.input = state.input_history[pos].clone();
+                            state.cursor_pos = state.input.len();
                         }
                     }
-                    KeyCode::Left => {
-                        if app.cursor_pos > 0 { app.cursor_pos -= 1; }
-                    }
-                    KeyCode::Right => {
-                        if app.cursor_pos < app.input.len() { app.cursor_pos += 1; }
+                    KeyCode::Down => {
+                        if let Some(pos) = state.history_pos {
+                            if pos + 1 < state.input_history.len() {
+                                state.history_pos = Some(pos + 1);
+                                state.input = state.input_history[pos + 1].clone();
+                            } else { state.history_pos = None; state.input.clear(); }
+                            state.cursor_pos = state.input.len();
+                        }
                     }
                     _ => {}
                 }
             }
         }
-
-        if !app.running { break; }
     }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
     Ok(())
 }
 
-/// Draw the 5-zone UI.
-fn draw_ui(f: &mut ratatui::Frame, app: &TuiApp) {
+/// Draw UI — 3 zones: status bar (top), chat (middle), input (bottom).
+/// Horizontal, spacious, chat dominates.
+fn draw_ui(f: &mut ratatui::Frame, state: &TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),   // header
-            Constraint::Length(5),   // greeter/notifications
-            Constraint::Min(10),    // chat area
             Constraint::Length(1),   // status bar
+            Constraint::Min(5),     // chat
             Constraint::Length(3),   // input
         ])
         .split(f.area());
 
-    // Header
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(" Terra ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::styled("Agent OS", Style::default().fg(Color::DarkGray)),
-        Span::raw("  │  "),
-        Span::styled(&app.model_name, Style::default().fg(Color::Green)),
-        Span::raw("  │  "),
-        Span::styled(&app.mode, Style::default().fg(Color::Yellow)),
-    ]))
-    .block(Block::default().borders(Borders::BOTTOM));
-    f.render_widget(header, chunks[0]);
-
-    // Greeter / Notification area
-    let greeter = Paragraph::new(Text::raw(&app.greeter_text))
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::NONE));
-    f.render_widget(greeter, chunks[1]);
+    // Status bar
+    let status = Line::from(vec![
+        Span::styled(" ◆ Terra ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&state.model_name, Style::default().fg(Color::Green)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&state.mode, Style::default().fg(Color::Yellow)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} tok", state.tokens), Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ Ctrl+C interrupt │ Ctrl+D exit", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(status), chunks[0]);
 
     // Chat area
-    let mut chat_lines: Vec<Line> = Vec::new();
-    for msg in &app.messages {
-        let (prefix, color) = match msg.role.as_str() {
-            "user" => ("you > ", Color::Green),
-            "assistant" => ("terra > ", Color::Cyan),
-            "system" => ("", Color::Yellow),
-            _ => ("", Color::White),
-        };
-        chat_lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::raw(&msg.content),
-        ]));
-        chat_lines.push(Line::from("")); // spacing
-    }
-    if app.thinking {
-        chat_lines.push(Line::from(Span::styled(
-            "  ⠹ Thinking...",
-            Style::default().fg(Color::DarkGray),
-        )));
+    let mut lines: Vec<Line> = Vec::new();
+
+    if state.messages.is_empty() {
+        for gl in &state.greeter_lines {
+            lines.push(Line::from(Span::styled(gl.as_str(), Style::default().fg(Color::DarkGray))));
+        }
+        lines.push(Line::from(""));
     }
 
-    let chat = Paragraph::new(chat_lines)
+    for (prefix, content, style) in &state.messages {
+        if !prefix.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(prefix.as_str(), style.add_modifier(Modifier::BOLD)),
+                Span::raw(content.as_str()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(content.as_str(), *style)));
+        }
+    }
+
+    if state.thinking {
+        lines.push(Line::from(Span::styled("  ⠹ Thinking...", Style::default().fg(Color::DarkGray))));
+    }
+
+    let chat_h = chunks[1].height.saturating_sub(2) as usize;
+    let scroll = if lines.len() > chat_h { (lines.len() - chat_h) as u16 } else { 0 };
+
+    let chat = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Chat "));
-    f.render_widget(chat, chunks[2]);
+        .scroll((scroll, 0))
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(chat, chunks[1]);
 
-    // Status bar
-    let status = Paragraph::new(Line::from(vec![
-        Span::styled(format!(" {} ", app.mode), Style::default().fg(Color::Black).bg(Color::Yellow)),
-        Span::raw("  "),
-        Span::styled(format!("{}", app.model_name), Style::default().fg(Color::Green)),
-        Span::raw("  │  "),
-        Span::styled(format!("{} tokens", app.tokens), Style::default().fg(Color::DarkGray)),
-    ]));
-    f.render_widget(status, chunks[3]);
-
-    // Input area
+    // Input
+    let prompt = if state.mode == "goal" { "goal ❯ " } else { "terra ❯ " };
     let input = Paragraph::new(Line::from(vec![
-        Span::styled(
-            if app.mode == "goal" { "goal > " } else { "terra > " },
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(&app.input),
+        Span::styled(prompt, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::raw(&state.input),
     ]))
-    .block(Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
-        .title(" Input "));
-    f.render_widget(input, chunks[4]);
+    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Green)));
+    f.render_widget(input, chunks[2]);
 
-    // Cursor position
-    let cursor_x = chunks[4].x + 1 + (if app.mode == "goal" { 7 } else { 8 }) as u16 + app.cursor_pos as u16;
-    let cursor_y = chunks[4].y + 1;
-    f.set_cursor_position((cursor_x, cursor_y));
+    let prompt_len = prompt.chars().count() as u16;
+    f.set_cursor_position((chunks[2].x + 1 + prompt_len + state.cursor_pos as u16, chunks[2].y + 1));
 }

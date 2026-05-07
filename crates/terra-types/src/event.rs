@@ -149,6 +149,24 @@ impl EventBus for CollectorBus {
     }
 }
 
+/// Channel-based event bus for TUI — sends events via mpsc.
+pub struct ChannelBus {
+    sender: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+}
+
+impl ChannelBus {
+    pub fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<StreamEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Self { sender: tx }, rx)
+    }
+}
+
+impl EventBus for ChannelBus {
+    fn emit(&self, event: StreamEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

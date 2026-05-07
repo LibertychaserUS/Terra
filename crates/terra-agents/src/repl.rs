@@ -452,13 +452,6 @@ impl Repl {
                 crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
                 _ => String::new(),
             };
-            let short_goal = if goal.len() > 30 { format!("{}...", &goal[..27]) } else { goal.clone() };
-            out.push(ReplOutput::Notification(format!("Analyzing: {}", short_goal)));
-
-            let goal = match self.session.mode() {
-                crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
-                _ => String::new(),
-            };
             let history: String = self.context.iter()
                 .rev().skip(1).take(10).collect::<Vec<_>>().into_iter().rev()
                 .map(|t| format!("{}: {}", t.role, t.content))
@@ -471,9 +464,6 @@ impl Repl {
             }
         } else {
             // Conversation Mode: direct ProviderCall (lightweight)
-            let short_input = if input.len() > 30 { format!("{}...", &input[..27]) } else { input.to_string() };
-            out.push(ReplOutput::Notification(format!("Processing: {}", short_input)));
-
             let history: String = self.context.iter()
                 .map(|t| format!("{}: {}", t.role, t.content))
                 .collect::<Vec<_>>()

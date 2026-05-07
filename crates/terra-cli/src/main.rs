@@ -158,13 +158,23 @@ fn bootstrap() -> Orchestrator {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    // Chat mode: suppress INFO logs (spinner covers "thinking" state).
+    // Other commands: keep INFO for diagnostics.
+    // User can always override with RUST_LOG=terra=info.
+    let default_filter = match &cli.command {
+        Some(Commands::Chat) | None => "terra=warn",
+        _ => "terra=info",
+    };
     tracing_subscriber::fmt()
-        .with_env_filter("terra=info")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter))
+        )
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();
-
-    let cli = Cli::parse();
 
     match cli.command {
         Some(Commands::Init) => {
@@ -407,15 +417,13 @@ max_candidates = 10
                     Ok(line) => {
                         let _ = rl.add_history_entry(&line);
 
-                        // Start spinner for non-command input (conversation)
+                        // Start thinking spinner for non-command input
                         let is_command = line.trim().starts_with('/');
-                        let spinner_msg = if !is_command && !line.trim().is_empty() {
-                            let short = if line.len() > 30 { format!("{}...", &line.trim()[..27]) } else { line.trim().to_string() };
-                            Some(short)
+                        let spinner = if !is_command && !line.trim().is_empty() {
+                            Some(ui::Spinner::start())
                         } else {
                             None
                         };
-                        let spinner = spinner_msg.as_ref().map(|msg| ui::Spinner::start(msg));
 
                         let outputs = repl.process_input(&line).await;
 
@@ -438,11 +446,17 @@ max_candidates = 10
                             break;
                         }
 
+                        let had_spinner = spinner.is_some();
+
                         for output in &outputs {
                             match output {
                                 ReplOutput::Prompt(_) => {}
-                                // Skip "Thinking" notifications — spinner already showed it
-                                ReplOutput::Notification(msg) if (msg.contains("Thinking") || msg.contains("Analyzing") || msg.contains("Processing")) && spinner.is_some() => {}
+                                // Skip thinking/processing notifications — spinner covered it
+                                ReplOutput::Notification(msg) if (msg.contains("Thinking") || msg.contains("Analyzing") || msg.contains("Processing")) && had_spinner => {}
+                                // LLM responses: typewriter display
+                                ReplOutput::Text(text) if had_spinner => {
+                                    ui::typewriter_print(text).await;
+                                }
                                 other => renderer.render(other),
                             }
                         }

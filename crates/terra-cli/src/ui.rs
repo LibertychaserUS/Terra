@@ -5,35 +5,37 @@
 //! Fully decoupled from REPL logic — consumes ReplOutput enum.
 //!
 //! Architecture:
-//! - TermRenderer: colored terminal output
+//! - TermRenderer: colored terminal output with code block tracking
 //! - PlainRenderer: no colors (for piping)
-//! - PetRenderer: optional ASCII pet status (plug-in, not built-in)
+//! - Spinner: dynamic "Thinking..." with elapsed time
+//! - typewriter_print: gradual character-by-character display for LLM responses
 
 #![allow(dead_code)] // Colors and methods used incrementally
 
 use terra_agents::repl::ReplOutput;
 use terra_types::event::TokenTracker;
 
-/// Dynamic thinking spinner — prints dots on same line.
+/// Dynamic thinking spinner — shows elapsed time on same line.
 pub struct Spinner {
     handle: Option<tokio::task::JoinHandle<()>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Spinner {
-    /// Start a spinner with the given message.
-    pub fn start(msg: &str) -> Self {
+    /// Start a thinking spinner with live elapsed timer.
+    pub fn start() -> Self {
         use std::io::Write;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_clone = stop.clone();
-        let msg = msg.to_string();
 
         let handle = tokio::spawn(async move {
             let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let start_time = std::time::Instant::now();
             let mut i = 0;
             loop {
                 if stop_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                print!("\r\x1b[2m  {} {}\x1b[0m  ", frames[i % frames.len()], msg);
+                let elapsed = start_time.elapsed().as_secs_f32();
+                print!("\r\x1b[2m  {} Thinking... ({:.1}s)\x1b[0m  ", frames[i % frames.len()], elapsed);
                 std::io::stdout().flush().ok();
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                 i += 1;
@@ -62,6 +64,120 @@ const RED: &str = "\x1b[31m";
 const MAGENTA: &str = "\x1b[35m";
 const BLUE: &str = "\x1b[34m";
 
+/// Format a single markdown line with ANSI codes.
+/// Returns the formatted string (does not print).
+fn format_markdown_line(line: &str) -> String {
+    if line.starts_with("## ") {
+        format!("{BOLD}{BLUE}{}{RESET}", &line[3..])
+    } else if line.starts_with("# ") {
+        format!("{BOLD}{MAGENTA}{}{RESET}", &line[2..])
+    } else if line.starts_with("- ") || line.starts_with("  -") {
+        format!("{CYAN}{}{RESET}", line)
+    } else if line.starts_with("  /") {
+        // Command in help
+        let parts: Vec<&str> = line.splitn(2, " — ").collect();
+        if parts.len() == 2 {
+            format!("{GREEN}{}{RESET} — {DIM}{}{RESET}", parts[0], parts[1])
+        } else {
+            format!("{GREEN}{}{RESET}", line)
+        }
+    } else {
+        line.to_string()
+    }
+}
+
+/// Render a multi-line text block with code block state tracking.
+/// Handles ``` fenced code blocks with box-drawing borders.
+fn render_text_block(text: &str) {
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        if line.starts_with("```") {
+            if !in_code_block {
+                // Opening fence — extract language tag
+                let lang = line[3..].trim();
+                if lang.is_empty() {
+                    println!("{DIM}  ┌──────────────────────────────────{RESET}");
+                } else {
+                    println!("{DIM}  ┌── {lang} ──────────────────────────{RESET}");
+                }
+                in_code_block = true;
+            } else {
+                // Closing fence
+                println!("{DIM}  └──────────────────────────────────{RESET}");
+                in_code_block = false;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            // Code line: dim border, normal content (no markdown detection)
+            println!("{DIM}  │{RESET} {}", line);
+        } else {
+            println!("{}", format_markdown_line(line));
+        }
+    }
+}
+
+/// Typewriter-style gradual display for LLM responses.
+/// Renders markdown formatting while printing character-by-character.
+pub async fn typewriter_print(text: &str) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        // Handle code fence transitions
+        if line.starts_with("```") {
+            if !in_code_block {
+                let lang = line[3..].trim();
+                let fence = if lang.is_empty() {
+                    format!("{DIM}  ┌──────────────────────────────────{RESET}")
+                } else {
+                    format!("{DIM}  ┌── {lang} ──────────────────────────{RESET}")
+                };
+                for ch in fence.chars() {
+                    print!("{ch}");
+                    stdout.flush().ok();
+                }
+                println!();
+                in_code_block = true;
+            } else {
+                let fence = format!("{DIM}  └──────────────────────────────────{RESET}");
+                for ch in fence.chars() {
+                    print!("{ch}");
+                    stdout.flush().ok();
+                }
+                println!();
+                in_code_block = false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            continue;
+        }
+
+        // Format the line
+        let formatted = if in_code_block {
+            format!("{DIM}  │{RESET} {}", line)
+        } else {
+            format_markdown_line(line)
+        };
+
+        // Print character-by-character
+        for ch in formatted.chars() {
+            print!("{ch}");
+            stdout.flush().ok();
+            // Skip delay for ANSI escape sequences (invisible chars)
+            if ch == '\x1b' {
+                // We're in an escape sequence — don't delay
+                continue;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        println!();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 /// Trait for pluggable renderers. CLI uses TermRenderer by default.
 /// Pet, TUI, or Web renderers can implement this trait.
 pub trait OutputRenderer {
@@ -88,29 +204,7 @@ impl OutputRenderer for TermRenderer {
 
         match output {
             ReplOutput::Text(text) => {
-                // Simple markdown-like rendering
-                for line in text.lines() {
-                    if line.starts_with("## ") {
-                        println!("{BOLD}{BLUE}{}{RESET}", &line[3..]);
-                    } else if line.starts_with("# ") {
-                        println!("{BOLD}{MAGENTA}{}{RESET}", &line[2..]);
-                    } else if line.starts_with("- ") || line.starts_with("  -") {
-                        println!("{CYAN}{}{RESET}", line);
-                    } else if line.starts_with("```") {
-                        println!("{DIM}{}{RESET}", line);
-                    } else if line.starts_with("  /") {
-                        // Command in help
-                        let parts: Vec<&str> = line.splitn(2, " — ").collect();
-                        if parts.len() == 2 {
-                            print!("{GREEN}{}{RESET}", parts[0]);
-                            println!(" — {DIM}{}{RESET}", parts[1]);
-                        } else {
-                            println!("{GREEN}{}{RESET}", line);
-                        }
-                    } else {
-                        println!("{}", line);
-                    }
-                }
+                render_text_block(text);
             }
             ReplOutput::Notification(msg) => {
                 if msg.starts_with("  ●") || msg.starts_with("  ✓") || msg.starts_with("  ─") {

@@ -10,4 +10,4 @@ pub mod event;
 
 pub use command::{Command, CommandOp, CommandResult, CommandStatus};
 pub use contract::{OutputContract, ContractParseResult};
-pub use event::{StreamEvent, EventType, TokenTracker, EventBus, NullBus, CollectorBus};
+pub use event::{StreamEvent, EventType, TokenTracker, EventBus, NullBus, CollectorBus, ChannelBus};
