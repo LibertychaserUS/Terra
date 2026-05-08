@@ -263,17 +263,33 @@ pub async fn route(
 
             match tokio::time::timeout(timeout, child.wait_with_output()).await {
                 Ok(Ok(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    // Cap output size to prevent OOM (10 MB)
+                    const MAX_OUTPUT: usize = 10 * 1024 * 1024;
+                    let (stdout, truncated) = if output.stdout.len() > MAX_OUTPUT {
+                        (String::from_utf8_lossy(&output.stdout[..MAX_OUTPUT]).to_string(), true)
+                    } else {
+                        (String::from_utf8_lossy(&output.stdout).to_string(), false)
+                    };
+                    let stderr = if output.stderr.len() > MAX_OUTPUT {
+                        String::from_utf8_lossy(&output.stderr[..MAX_OUTPUT]).to_string()
+                    } else {
+                        String::from_utf8_lossy(&output.stderr).to_string()
+                    };
                     let exit_code = output.status.code().unwrap_or(-1);
 
                     if output.status.success() {
-                        CommandResult::ok("", Some(serde_json::json!({
+                        let mut result = CommandResult::ok("", Some(serde_json::json!({
                             "command": command,
                             "exit_code": exit_code,
                             "stdout": stdout,
                             "stderr": stderr,
-                        })))
+                        })));
+                        if truncated {
+                            result.notification = Some(format!(
+                                "[Terra] Output truncated at {} bytes", MAX_OUTPUT
+                            ));
+                        }
+                        result
                     } else {
                         CommandResult::err("", format!(
                             "ShellExec exit {}: {}",
@@ -497,5 +513,44 @@ mod tests {
         ).await;
         assert_eq!(result.status, CommandStatus::Ok);
         assert!(result.notification.is_none(), "L2 writes should not produce notifications");
+    }
+
+    // ShellExec timeout test
+    #[tokio::test]
+    async fn shell_exec_timeout() {
+        let mem = test_memory();
+        let (art, _d) = test_artifacts();
+        let search = test_search();
+        let prov = test_provider();
+        let result = route(
+            &CommandOp::ShellExec {
+                command: "sleep 10".into(),
+                workdir: None,
+                timeout_ms: Some(200), // 200ms timeout, sleep 10s
+            },
+            "main", &mem, &art, &search, &prov,
+        ).await;
+        assert_eq!(result.status, CommandStatus::Error);
+        assert!(result.error.as_deref().unwrap().contains("timed out"));
+    }
+
+    // ShellExec success
+    #[tokio::test]
+    async fn shell_exec_success() {
+        let mem = test_memory();
+        let (art, _d) = test_artifacts();
+        let search = test_search();
+        let prov = test_provider();
+        let result = route(
+            &CommandOp::ShellExec {
+                command: "echo hello".into(),
+                workdir: None,
+                timeout_ms: Some(5000),
+            },
+            "main", &mem, &art, &search, &prov,
+        ).await;
+        assert_eq!(result.status, CommandStatus::Ok);
+        let stdout = result.data.unwrap()["stdout"].as_str().unwrap().to_string();
+        assert!(stdout.contains("hello"));
     }
 }

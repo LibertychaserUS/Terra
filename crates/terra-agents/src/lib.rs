@@ -35,3 +35,4 @@ pub use subagent::SubAgentRunner;
 pub use skill::{SkillRegistry, SkillDef, TrustLevel};
 pub use tools::{ToolRegistry, ToolLevel, ToolProvider};
 pub use repl::Repl;
+pub use repl::ConfirmCallback;

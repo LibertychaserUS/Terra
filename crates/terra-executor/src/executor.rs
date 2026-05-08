@@ -562,4 +562,29 @@ mod tests {
         let entries = exec.audit.entries();
         assert_eq!(entries.len(), 2, "both file ops should be audited");
     }
+
+    #[tokio::test]
+    async fn audit_llm_call_records() {
+        let (exec, _dir) = test_executor();
+        assert_eq!(exec.audit.len(), 0);
+
+        exec.audit_llm_call("main", 100, 50, 2, 1);
+
+        assert_eq!(exec.audit.len(), 1, "audit_llm_call should create one entry");
+    }
+
+    #[tokio::test]
+    async fn shell_exec_timeout_via_executor() {
+        let (exec, _dir) = test_executor();
+        let cmd = Command::new("main", CommandOp::ShellExec {
+            command: "sleep 10".into(),
+            workdir: None,
+            timeout_ms: Some(200),
+        });
+        let result = exec.execute(cmd).await;
+        // Should be blocked by cage (ShellExec is warned but allowed) or timeout
+        // The cage may block or allow depending on configuration
+        // Either way it should not hang
+        assert!(result.status == CommandStatus::Error || result.status == CommandStatus::PermissionDenied);
+    }
 }

@@ -1450,4 +1450,28 @@ mod tests {
         assert!(!repl.auto_approve_shell, "auto_approve_shell should default to false");
         assert!(!repl.auto_approve_delete, "auto_approve_delete should default to false");
     }
+
+    // /accept without /done returns helpful error
+    #[tokio::test]
+    async fn accept_without_done_returns_error() {
+        let (mut repl, _dir) = test_repl();
+        let out = repl.process_input("/accept 0").await;
+        let has_error = out.iter().any(|o| match o {
+            ReplOutput::Text(t) => t.contains("No consolidation report"),
+            _ => false,
+        });
+        assert!(has_error, "should tell user to /done first");
+    }
+
+    // /accept with invalid index returns error
+    #[tokio::test]
+    async fn accept_invalid_index_returns_error() {
+        let (mut repl, _dir) = test_repl();
+        let out = repl.process_input("/accept abc").await;
+        let has_error = out.iter().any(|o| match o {
+            ReplOutput::Text(t) => t.contains("Usage"),
+            _ => false,
+        });
+        assert!(has_error, "should show usage for non-numeric input");
+    }
 }

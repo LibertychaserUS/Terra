@@ -502,6 +502,7 @@ impl OpenAICompatibleAdapter {
         let mut full_content = String::new();
         let mut total_prompt = 0u32;
         let mut total_completion = 0u32;
+        let mut parse_errors = 0u32;
 
         for line in body.lines() {
             let line = line.trim();
@@ -527,10 +528,16 @@ impl OpenAICompatibleAdapter {
                         }
                     }
                     Err(e) => {
-                        warn!(line, error = %e, "failed to parse SSE chunk, skipping");
+                        parse_errors += 1;
+                        warn!(error = %e, "failed to parse SSE chunk, skipping");
                     }
                 }
             }
+        }
+
+        // If we got parse errors but no content, the stream was likely corrupted
+        if full_content.is_empty() && parse_errors > 0 {
+            bail!("SSE stream failed: {} chunks could not be parsed, no content received", parse_errors);
         }
 
         let _ = tx.send(StreamEvent::End {

@@ -515,10 +515,30 @@ impl McpServer {
                 Ok(CommandOp::TraceCheckpoint { title, summary })
             }
             "PointerQuery" => {
-                // PointerQuery uses the MemSearch op with a DSL prefix
-                // that the memory layer interprets.
+                // MCP PointerQuery falls back to MemSearch because the MCP server
+                // doesn't hold a PointerTable. Full DSL resolution is only available
+                // in the interactive REPL. Here we extract the search intent from
+                // common DSL patterns and route to MemSearch.
                 let dsl = get_str(args, "dsl")?;
-                Ok(CommandOp::MemSearch { query: dsl, top_k: 10 })
+                let query = if dsl.starts_with("@search(") {
+                    // @search("query", N) → extract query
+                    dsl.trim_start_matches("@search(")
+                        .split(',').next()
+                        .unwrap_or(&dsl)
+                        .trim_matches(|c| c == '"' || c == '\'' || c == ')')
+                        .to_string()
+                } else if dsl.starts_with("@mem[") {
+                    // @mem["key"] → exact key lookup via MemRead
+                    let key = dsl.trim_start_matches("@mem[")
+                        .trim_end_matches(']')
+                        .trim_matches('"')
+                        .to_string();
+                    return Ok(CommandOp::MemRead { key });
+                } else {
+                    // @L1[*], @top(N), etc. → search with the raw DSL as query
+                    dsl.clone()
+                };
+                Ok(CommandOp::MemSearch { query, top_k: 10 })
             }
             "ProviderCall" => {
                 let system_prompt = get_str(args, "system_prompt")?;
