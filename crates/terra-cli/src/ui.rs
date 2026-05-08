@@ -88,7 +88,7 @@ fn format_markdown_line(line: &str) -> String {
 
 /// Render a multi-line text block with code block state tracking.
 /// Handles ``` fenced code blocks with box-drawing borders.
-fn render_text_block(text: &str) {
+pub fn render_text_block(text: &str) {
     let mut in_code_block = false;
 
     for line in text.lines() {

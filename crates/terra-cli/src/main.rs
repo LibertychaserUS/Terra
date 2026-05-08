@@ -496,10 +496,10 @@ max_candidates = 10
 
                         let outputs = repl.process_input(&line).await;
 
-                        // Stop spinner
+                        // Stop spinner before rendering any output
                         if let Some(s) = &spinner {
                             s.stop();
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         }
 
                         if Repl::should_quit(&outputs) {
@@ -515,16 +515,26 @@ max_candidates = 10
                             break;
                         }
 
-                        let had_spinner = spinner.is_some();
-
                         for output in &outputs {
                             match output {
                                 ReplOutput::Prompt(_) => {}
-                                // Skip thinking/processing notifications — spinner covered it
-                                ReplOutput::Notification(msg) if (msg.contains("Thinking") || msg.contains("Analyzing") || msg.contains("Processing")) && had_spinner => {}
-                                // LLM responses: typewriter display
-                                ReplOutput::Text(text) if had_spinner => {
-                                    ui::typewriter_print(text).await;
+                                // Token: streaming word-by-word display
+                                ReplOutput::Token(word) => {
+                                    use std::io::Write;
+                                    print!("{}", word);
+                                    std::io::stdout().flush().ok();
+                                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                                }
+                                // Empty text = end of streaming response
+                                ReplOutput::Text(t) if t.is_empty() => {
+                                    println!();
+                                }
+                                // Non-empty text: render immediately (commands, errors)
+                                ReplOutput::Text(text) => {
+                                    ui::render_text_block(text);
+                                }
+                                ReplOutput::Notification(_msg) => {
+                                    renderer.render(output);
                                 }
                                 other => renderer.render(other),
                             }

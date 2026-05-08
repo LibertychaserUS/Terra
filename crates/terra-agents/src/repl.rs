@@ -75,6 +75,8 @@ pub struct Repl {
     pub auto_approve_shell: bool,
     /// Skip confirmation for FileDelete when true.
     pub auto_approve_delete: bool,
+    /// Turn count for system prompt strategy (first turn = full, subsequent = minimal).
+    turn_count: u32,
 }
 
 /// Approximate token count from text (chars / 4 is a rough heuristic).
@@ -150,6 +152,7 @@ impl Repl {
             confirm_callback: None,
             auto_approve_shell: false,
             auto_approve_delete: false,
+            turn_count: 0,
         }
     }
 
@@ -709,13 +712,11 @@ impl Repl {
 
     /// Handle a conversation turn with agent loop (tool calling).
     ///
-    /// Pipeline:
-    /// 1. Determine tool level based on session mode (Conversation -> L0, Goal -> L1).
-    /// 2. Build tool definitions from ToolRegistry.
-    /// 3. Build system prompt (with IC rules in Goal mode, pointer DSL docs).
-    /// 4. Call the provider WITH tools.
-    /// 5. If response has tool_calls: execute each, collect results, call LLM again.
-    /// 6. Loop until LLM returns text (no tool_calls) or max iterations reached.
+    /// System prompt strategy:
+    /// - Turn 1: full context (identity + tools docs + project memory + pointer DSL)
+    /// - Turn 2+: minimal (identity only; model retains context from turn 1)
+    /// - /goal entry: adds goal intent + relevant IC rules (once)
+    /// Tool descriptions are NOT in the prompt — they're in the API tools field.
     async fn handle_conversation(&mut self, input: &str) -> Vec<ReplOutput> {
         // Add user turn to context
         self.context.push(ConversationTurn {
@@ -723,12 +724,11 @@ impl Repl {
             content: input.to_string(),
         });
         self.session_record.add_turn("user", input);
+        self.turn_count += 1;
 
         let mut out = Vec::new();
 
-        // --- 1. Determine tool level and build system prompt ---
-        // Both modes expose L2 tools. L2 (dangerous) tools are gated by confirmation callback.
-        // The difference between modes is Goal has SpecIR, plan, and drift detection — not permissions.
+        // --- 1. Tool level + definitions ---
         let is_goal = self.session.mode().is_goal();
         let tool_level = ToolLevel::L2Dangerous;
 
@@ -743,46 +743,47 @@ impl Repl {
             })
             .collect();
 
-        let system_prompt = if is_goal {
-            // Goal Mode: IC-enriched prompt with goal context
-            let goal = match self.session.mode() {
-                crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
-                _ => String::new(),
-            };
-            let rules = self.orchestrator.core().all_rules();
-            let rules_text: String = rules
-                .iter()
-                .map(|r| format!("- [{}] {}: {}", r.severity_str(), r.id, r.description))
-                .collect::<Vec<_>>()
-                .join("\n");
+        // --- 2. System prompt: first turn full, subsequent minimal ---
+        let system_prompt = if self.turn_count == 1 {
+            // First turn: full context
+            let mut prompt = String::from(
+                "You are Terra, an AI Agent OS. You help users with coding tasks.\n\
+                 Use tools when you need to read files, write files, search memory, or execute commands.\n\
+                 Be direct: when the user asks you to do something, do it using tools. Don't just describe what you would do.\n"
+            );
 
-            // Pointer memory context
+            // Inject pointer DSL docs (once, model will remember)
+            prompt.push_str("\n");
+            prompt.push_str(ToolRegistry::pointer_dsl_docs());
+
+            // Inject L1 project memory summary (compact)
             let pointer_ctx = {
                 let pt = self.orchestrator.pointer_table().lock().unwrap();
                 pt.serialize_compact()
             };
-
-            let mut prompt = format!(
-                "You are Terra, an AI Agent OS. Execute tasks using tools when needed.\n\n\
-                 ## Active Rules\n{}\n\n\
-                 ## Current Goal\n{}\n\n\
-                 {}\n\n\
-                 Use tools to gather information and take actions. Be precise and concise.",
-                rules_text, goal, ToolRegistry::pointer_dsl_docs()
-            );
             if !pointer_ctx.is_empty() {
-                prompt.push_str("\n\n## Memory Pointers\n");
+                prompt.push_str("\n\n## Project Memory\n");
                 prompt.push_str(&pointer_ctx);
             }
+
+            // If already in goal mode at turn 1
+            if is_goal {
+                if let crate::session::SessionMode::Goal { spec, .. } = self.session.mode() {
+                    prompt.push_str(&format!("\n\n## Active Goal\n{}", spec.intent));
+                }
+            }
+
             prompt
+        } else if is_goal {
+            // Goal mode, turn 2+: just identity + goal
+            let goal = match self.session.mode() {
+                crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
+                _ => String::new(),
+            };
+            format!("You are Terra. Active goal: {}", goal)
         } else {
-            // Conversation Mode: lightweight prompt
-            format!(
-                "You are Terra, an AI Agent OS assistant. Be helpful and concise.\n\n\
-                 You have access to tools for reading files, searching memory, and querying pointers.\n\n\
-                 {}",
-                ToolRegistry::pointer_dsl_docs()
-            )
+            // Conversation mode, turn 2+: minimal
+            "You are Terra.".to_string()
         };
 
         // --- 2. Build conversation history for the user_prompt ---
@@ -910,8 +911,13 @@ impl Repl {
         // Auto-save session to disk
         self.auto_save();
 
-        // Output: response + turn summary + drift check + compaction check
-        out.push(ReplOutput::Text(response.clone()));
+        // Output: emit response as Token chunks for streaming display
+        // Split on word boundaries so the UI can render incrementally
+        for word in response.split_inclusive(|c: char| c.is_whitespace()) {
+            out.push(ReplOutput::Token(word.to_string()));
+        }
+        // Signal end of streaming with empty text
+        out.push(ReplOutput::Text(String::new()));
 
         // Drift detection: feed response to detector (only fires in Goal Mode)
         if let Some(drift_result) = self.session.check_drift(&response) {
@@ -1224,10 +1230,10 @@ mod tests {
         let (mut repl, _dir) = test_repl();
 
         let out1 = repl.process_input("Hello").await;
-        assert!(out1.iter().any(|o| matches!(o, ReplOutput::Text(_))));
+        assert!(out1.iter().any(|o| matches!(o, ReplOutput::Token(_))));
 
         let out2 = repl.process_input("What did I just say?").await;
-        assert!(out2.iter().any(|o| matches!(o, ReplOutput::Text(_))));
+        assert!(out2.iter().any(|o| matches!(o, ReplOutput::Token(_))));
 
         // Context should accumulate
         assert_eq!(repl.context.len(), 4); // 2 user + 2 assistant
@@ -1247,7 +1253,7 @@ mod tests {
 
         // Can still converse in goal mode
         let out = repl.process_input("What files should I look at?").await;
-        assert!(out.iter().any(|o| matches!(o, ReplOutput::Text(_))));
+        assert!(out.iter().any(|o| matches!(o, ReplOutput::Token(_))));
     }
 
     // Command dispatch: /help

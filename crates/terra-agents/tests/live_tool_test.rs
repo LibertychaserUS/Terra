@@ -114,13 +114,13 @@ async fn loop_single_tool_call_live() {
         ))
         .await;
 
-    // Should have at least one Text output (the LLM's answer)
+    // Should have Token outputs (the LLM's answer, streamed word-by-word)
     let has_response = outputs
         .iter()
-        .any(|o| matches!(o, ReplOutput::Text(t) if !t.is_empty()));
+        .any(|o| matches!(o, ReplOutput::Token(t) if !t.is_empty()));
     assert!(
         has_response,
-        "Expected a text response from LLM. Outputs: {:?}",
+        "Expected token response from LLM. Outputs: {:?}",
         outputs
     );
 
@@ -158,8 +158,8 @@ async fn loop_multi_tool_call_live() {
 
     let has_response = outputs
         .iter()
-        .any(|o| matches!(o, ReplOutput::Text(t) if !t.is_empty()));
-    assert!(has_response, "Expected text response");
+        .any(|o| matches!(o, ReplOutput::Token(t) if !t.is_empty()));
+    assert!(has_response, "Expected token response");
 
     // Count tool uses
     let tool_uses: Vec<_> = outputs
@@ -231,11 +231,11 @@ async fn loop_max_iterations_enforced() {
 
     let outputs = repl.process_input("Hello, just testing").await;
 
-    // Should get a response (even if DRY_RUN)
+    // Should get a response (even if DRY_RUN) — now emitted as Token chunks
     let has_text = outputs
         .iter()
-        .any(|o| matches!(o, ReplOutput::Text(t) if !t.is_empty()));
-    assert!(has_text, "Expected text response from DryRun");
+        .any(|o| matches!(o, ReplOutput::Token(t) if !t.is_empty()));
+    assert!(has_text, "Expected token response from DryRun");
 }
 
 // T-AGLV-005: loop_malformed_tool_call_handled

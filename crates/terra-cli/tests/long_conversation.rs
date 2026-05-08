@@ -55,14 +55,16 @@ fn live_repl() -> Option<(Repl, tempfile::TempDir)> {
 }
 
 /// Extract text responses from ReplOutput vec.
+/// Collects both Text and Token outputs (Token is now used for streamed LLM responses).
 fn extract_text(outputs: &[ReplOutput]) -> String {
     outputs.iter()
         .filter_map(|o| match o {
-            ReplOutput::Text(t) => Some(t.as_str()),
+            ReplOutput::Text(t) if !t.is_empty() => Some(t.as_str()),
+            ReplOutput::Token(t) => Some(t.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("")
 }
 
 fn has_notification(outputs: &[ReplOutput]) -> bool {
