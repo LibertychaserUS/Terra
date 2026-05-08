@@ -551,6 +551,9 @@ max_candidates = 10
             // Save history
             let _ = std::fs::create_dir_all(&terra_dir);
             let _ = rl.save_history(&history_path);
+
+            // Lifecycle cleanup: soft-delete session-scoped memory entries
+            repl.cleanup_session();
         }
 
         Some(Commands::Doctor { as_json }) => {

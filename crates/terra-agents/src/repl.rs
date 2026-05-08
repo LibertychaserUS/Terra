@@ -1172,6 +1172,14 @@ impl Repl {
     pub fn should_quit(outputs: &[ReplOutput]) -> bool {
         outputs.iter().any(|o| matches!(o, ReplOutput::Text(t) if t == "Goodbye."))
     }
+
+    /// Clean up session-scoped memory entries on exit.
+    pub fn cleanup_session(&self) {
+        let cleaned = self.executor.cleanup_memory_scope(terra_memory::types::Scope::Session);
+        if cleaned > 0 {
+            tracing::info!(cleaned, "session-scoped memory entries cleaned on exit");
+        }
+    }
 }
 
 #[cfg(test)]
