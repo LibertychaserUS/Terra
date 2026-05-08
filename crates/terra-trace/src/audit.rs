@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Mutex;
-use terra_protocol::command::{Command, CommandResult};
+use terra_types::command::{Command, CommandResult};
+
+use crate::persistent::PersistentAuditLog;
 
 /// A single entry in the audit log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,21 +16,39 @@ pub struct AuditEntry {
     pub duration_us: Option<u64>,
 }
 
-/// In-memory audit log. All commands pass through here.
+/// Audit log with optional write-through SQLite persistence.
 ///
-/// Thread-safe via Mutex. In production, this would also
-/// flush to disk (MessagePack files in .terra/audit/).
+/// Thread-safe via Mutex. When a persistent backend is attached,
+/// every write goes to both in-memory and SQLite. On startup with
+/// a path, entries are restored from disk.
 pub struct AuditLog {
     entries: Mutex<Vec<AuditEntry>>,
     next_seq: Mutex<u64>,
+    persistent: Option<Mutex<PersistentAuditLog>>,
 }
 
 impl AuditLog {
+    /// Create an in-memory-only audit log (no persistence).
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
             next_seq: Mutex::new(1),
+            persistent: None,
         }
+    }
+
+    /// Create an audit log with SQLite write-through persistence.
+    /// Restores existing entries from disk on open.
+    pub fn with_persistence(path: &Path) -> anyhow::Result<Self> {
+        let persistent = PersistentAuditLog::open(path)?;
+        let existing = persistent.entries()?;
+        let next_seq = existing.last().map(|e| e.seq + 1).unwrap_or(1);
+
+        Ok(Self {
+            entries: Mutex::new(existing),
+            next_seq: Mutex::new(next_seq),
+            persistent: Some(Mutex::new(persistent)),
+        })
     }
 
     /// Record a command before execution.
@@ -35,6 +56,13 @@ impl AuditLog {
         let mut seq = self.next_seq.lock().unwrap();
         let current_seq = *seq;
         *seq += 1;
+
+        // Write-through to SQLite if persistent backend attached
+        if let Some(ref persistent) = self.persistent {
+            if let Ok(p) = persistent.lock() {
+                let _ = p.record_command(&command);
+            }
+        }
 
         let entry = AuditEntry {
             seq: current_seq,
@@ -50,6 +78,13 @@ impl AuditLog {
 
     /// Record the result of a command after execution.
     pub fn record_result(&self, seq: u64, result: CommandResult, duration_us: u64) {
+        // Write-through to SQLite
+        if let Some(ref persistent) = self.persistent {
+            if let Ok(p) = persistent.lock() {
+                let _ = p.record_result(seq, &result, duration_us);
+            }
+        }
+
         let mut entries = self.entries.lock().unwrap();
         if let Some(entry) = entries.iter_mut().find(|e| e.seq == seq) {
             entry.result = Some(result);
@@ -69,6 +104,11 @@ impl AuditLog {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Whether this log has a persistent backend attached.
+    pub fn is_persistent(&self) -> bool {
+        self.persistent.is_some()
     }
 
     /// Render the audit log to Markdown for human review.
@@ -96,7 +136,7 @@ impl AuditLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terra_protocol::command::{CommandOp, CommandResult};
+    use terra_types::command::{CommandOp, CommandResult};
 
     #[test]
     fn record_and_retrieve() {
@@ -147,7 +187,7 @@ mod tests {
         assert!(md.contains("MVP1 complete"));
     }
 
-    // T-TR-006: empty log renders valid markdown
+    // T-AT-006: empty log renders valid markdown
     #[test]
     fn empty_log_renders() {
         let log = AuditLog::new();
@@ -155,7 +195,7 @@ mod tests {
         assert!(md.contains("Terra Audit Log"));
     }
 
-    // T-TR-007: result for unknown seq doesn't panic
+    // T-AT-007: result for unknown seq doesn't panic
     #[test]
     fn unknown_seq_ignored() {
         let log = AuditLog::new();
@@ -163,7 +203,7 @@ mod tests {
         assert_eq!(log.len(), 0);
     }
 
-    // T-TR-008: concurrent writes from 10 threads
+    // T-AT-008: concurrent writes from 10 threads
     #[test]
     fn concurrent_recording_safe() {
         use std::sync::Arc;
@@ -203,7 +243,7 @@ mod tests {
         }
     }
 
-    // T-TR-009: large log performance
+    // T-AT-009: large log performance
     #[test]
     fn large_log_performance() {
         let log = AuditLog::new();
@@ -225,5 +265,51 @@ mod tests {
             "10K entries took {:?}, expected < 2s",
             elapsed
         );
+    }
+
+    // T-FIX-003: audit persists to disk and survives reopen
+    #[test]
+    fn audit_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("audit.db");
+
+        // Write entries with persistence
+        {
+            let log = AuditLog::with_persistence(&db_path).unwrap();
+            assert!(log.is_persistent());
+
+            let cmd = Command::new("main", CommandOp::MemRead { key: "persist_test".into() });
+            let seq = log.record_command(cmd);
+            log.record_result(seq, CommandResult::ok("cmd-1", None), 100);
+
+            let cmd2 = Command::new("worker", CommandOp::MemRead { key: "key2".into() });
+            log.record_command(cmd2);
+
+            assert_eq!(log.len(), 2);
+        }
+        // log dropped here — in-memory gone
+
+        // Reopen from disk — entries should be restored
+        {
+            let log = AuditLog::with_persistence(&db_path).unwrap();
+            assert_eq!(log.len(), 2, "entries should survive reopen");
+
+            let entries = log.entries();
+            assert_eq!(entries[0].command.agent, "main");
+            assert_eq!(entries[1].command.agent, "worker");
+            assert!(entries[0].result.is_some(), "result should persist");
+            assert_eq!(entries[0].duration_us, Some(100));
+
+            // New writes continue with correct seq
+            let cmd3 = Command::new("explorer", CommandOp::MemRead { key: "key3".into() });
+            let seq3 = log.record_command(cmd3);
+            assert_eq!(seq3, 3);
+        }
+    }
+
+    #[test]
+    fn in_memory_not_persistent() {
+        let log = AuditLog::new();
+        assert!(!log.is_persistent());
     }
 }

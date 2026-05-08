@@ -1,7 +1,7 @@
 //! Mock server tests for OpenAI-compatible adapter.
-//! T-PR-010: retry on 429
-//! T-PR-011: timeout
-//! T-PR-012: streaming (placeholder)
+//! T-PV-010: retry on 429
+//! T-PV-011: timeout
+//! T-PV-012: streaming (placeholder)
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -17,6 +17,9 @@ fn test_request() -> CompletionRequest {
         user_prompt: "test".into(),
         max_tokens: Some(10),
         temperature: None,
+        tools: None,
+        tool_results: None,
+        pending_tool_calls: None,
     }
 }
 
@@ -52,7 +55,7 @@ impl wiremock::Respond for RetryResponder {
     }
 }
 
-// T-PR-010: retry on 429
+// T-PV-010: retry on 429
 #[tokio::test]
 async fn openai_retry_on_429() {
     let mock_server = MockServer::start().await;
@@ -79,7 +82,7 @@ async fn openai_retry_on_429() {
     assert_eq!(result.unwrap().content, "ok");
 }
 
-// T-PR-011: timeout
+// T-PV-011: timeout
 #[tokio::test]
 async fn openai_timeout() {
     let mock_server = MockServer::start().await;
@@ -109,7 +112,7 @@ async fn openai_timeout() {
     );
 }
 
-// T-PR-012: streaming placeholder
+// T-PV-012: streaming placeholder
 #[tokio::test]
 async fn openai_streaming_placeholder() {
     // Streaming is a future feature. This test documents the intent

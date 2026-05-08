@@ -1,9 +1,11 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
+use crate::backend::StorageBackend;
 use crate::error::MemoryError;
 use crate::types::{Level, MemoryEntry, Scope};
 
@@ -11,15 +13,20 @@ use crate::types::{Level, MemoryEntry, Scope};
 ///
 /// Business rules (ownership, lifetime, promotion gates) are
 /// enforced by the `safety` module, not here.
+///
+/// The inner `Connection` is wrapped in a `Mutex` to satisfy
+/// `Send + Sync` required by `StorageBackend`. rusqlite's
+/// `Connection` is `Send` but not `Sync`; the Mutex provides
+/// the Sync guarantee.
 pub struct SqliteStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl SqliteStore {
     /// Open or create a database at the given path.
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
         let conn = Connection::open(path)?;
-        let store = Self { conn };
+        let store = Self { conn: Mutex::new(conn) };
         store.initialize()?;
         Ok(store)
     }
@@ -27,13 +34,14 @@ impl SqliteStore {
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> Result<Self, MemoryError> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self { conn: Mutex::new(conn) };
         store.initialize()?;
         Ok(store)
     }
 
     fn initialize(&self) -> Result<(), MemoryError> {
-        self.conn.execute_batch(
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA user_version = 1;
 
@@ -60,7 +68,8 @@ impl SqliteStore {
 
     /// Insert a new memory entry.
     pub fn insert(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
-        self.conn
+        let conn = self.conn.lock().unwrap();
+        conn
             .execute(
                 "INSERT INTO memories (id, key, scope, level, owner, content, version, ref_count, alive, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -91,8 +100,8 @@ impl SqliteStore {
 
     /// Read a memory entry by key.
     pub fn read(&self, key: &str) -> Result<Option<MemoryEntry>, MemoryError> {
-        let result = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let result = conn
             .query_row(
                 "SELECT id, key, scope, level, owner, content, version, ref_count, alive, created_at, updated_at
                  FROM memories WHERE key = ?1",
@@ -128,16 +137,44 @@ impl SqliteStore {
         content: &[u8],
         expected_version: u64,
     ) -> Result<u64, MemoryError> {
+        let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let new_version = expected_version + 1;
-        let rows = self.conn.execute(
+        let rows = conn.execute(
             "UPDATE memories SET content = ?1, version = ?2, updated_at = ?3
              WHERE key = ?4 AND version = ?5 AND alive = 1",
             params![content, new_version, now, key, expected_version],
         )?;
         if rows == 0 {
             // Either key doesn't exist, or version mismatch
-            if let Some(entry) = self.read(key)? {
+            // Need to query within the same lock to avoid TOCTOU
+            let entry = conn
+                .query_row(
+                    "SELECT id, key, scope, level, owner, content, version, ref_count, alive, created_at, updated_at
+                     FROM memories WHERE key = ?1",
+                    params![key],
+                    |row| {
+                        Ok(MemoryEntry {
+                            id: row.get(0)?,
+                            key: row.get(1)?,
+                            scope: Scope::from_str(&row.get::<_, String>(2)?).unwrap_or(Scope::Task),
+                            level: Level::from_str(&row.get::<_, String>(3)?).unwrap_or(Level::L2),
+                            owner: row.get(4)?,
+                            content: row.get(5)?,
+                            version: row.get(6)?,
+                            ref_count: row.get(7)?,
+                            alive: row.get(8)?,
+                            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                                .unwrap_or_default()
+                                .with_timezone(&Utc),
+                            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                                .unwrap_or_default()
+                                .with_timezone(&Utc),
+                        })
+                    },
+                )
+                .optional()?;
+            if let Some(entry) = entry {
                 if !entry.alive {
                     return Err(MemoryError::Dangling(key.to_string()));
                 }
@@ -153,8 +190,9 @@ impl SqliteStore {
 
     /// Soft-delete: set alive=false.
     pub fn soft_delete(&self, key: &str) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
-        let rows = self.conn.execute(
+        let rows = conn.execute(
             "UPDATE memories SET alive = 0, updated_at = ?1 WHERE key = ?2 AND alive = 1",
             params![now, key],
         )?;
@@ -166,8 +204,9 @@ impl SqliteStore {
 
     /// Update the level of a memory entry (promotion).
     pub fn update_level(&self, key: &str, new_level: &Level) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
-        let rows = self.conn.execute(
+        let rows = conn.execute(
             "UPDATE memories SET level = ?1, updated_at = ?2 WHERE key = ?3 AND alive = 1",
             params![new_level.as_str(), now, key],
         )?;
@@ -179,8 +218,8 @@ impl SqliteStore {
 
     /// Get the owner of a memory entry.
     pub fn get_owner(&self, key: &str) -> Result<Option<String>, MemoryError> {
-        let result = self
-            .conn
+        let conn = self.conn.lock().unwrap();
+        let result = conn
             .query_row(
                 "SELECT owner FROM memories WHERE key = ?1 AND alive = 1",
                 params![key],
@@ -193,7 +232,8 @@ impl SqliteStore {
     /// Remove entries with ref_count=0 and non-protected level.
     /// Returns number of entries removed.
     pub fn gc(&self) -> Result<usize, MemoryError> {
-        let rows = self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
             "DELETE FROM memories
              WHERE alive = 0 AND ref_count = 0
              AND level NOT IN ('L0', 'L1')",
@@ -204,12 +244,102 @@ impl SqliteStore {
 
     /// Count all alive entries.
     pub fn count_alive(&self) -> Result<usize, MemoryError> {
-        let count: usize = self.conn.query_row(
+        let conn = self.conn.lock().unwrap();
+        let count: usize = conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE alive = 1",
             [],
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Increment reference count for a memory entry.
+    pub fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE memories SET ref_count = ref_count + 1 WHERE key = ?1 AND alive = 1",
+            params![key],
+        )?;
+        if rows == 0 {
+            return Err(MemoryError::NotFound(key.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Decrement reference count for a memory entry.
+    pub fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE memories SET ref_count = CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END WHERE key = ?1 AND alive = 1",
+            params![key],
+        )?;
+        if rows == 0 {
+            return Err(MemoryError::NotFound(key.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Soft-delete all entries matching the given scope.
+    pub fn soft_delete_by_scope(&self, scope: &str) -> Result<usize, MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE memories SET alive = 0, updated_at = ?1 WHERE scope = ?2 AND alive = 1",
+            params![now, scope],
+        )?;
+        Ok(rows)
+    }
+}
+
+/// Implement StorageBackend for SqliteStore — delegates to existing methods.
+impl StorageBackend for SqliteStore {
+    fn insert(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        SqliteStore::insert(self, entry)
+    }
+
+    fn read(&self, key: &str) -> Result<Option<MemoryEntry>, MemoryError> {
+        SqliteStore::read(self, key)
+    }
+
+    fn update_content(
+        &self,
+        key: &str,
+        content: &[u8],
+        expected_version: u64,
+    ) -> Result<u64, MemoryError> {
+        SqliteStore::update_content(self, key, content, expected_version)
+    }
+
+    fn soft_delete(&self, key: &str) -> Result<(), MemoryError> {
+        SqliteStore::soft_delete(self, key)
+    }
+
+    fn update_level(&self, key: &str, new_level: &Level) -> Result<(), MemoryError> {
+        SqliteStore::update_level(self, key, new_level)
+    }
+
+    fn get_owner(&self, key: &str) -> Result<Option<String>, MemoryError> {
+        SqliteStore::get_owner(self, key)
+    }
+
+    fn gc(&self) -> Result<usize, MemoryError> {
+        SqliteStore::gc(self)
+    }
+
+    fn count_alive(&self) -> Result<usize, MemoryError> {
+        SqliteStore::count_alive(self)
+    }
+
+    fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        SqliteStore::increment_ref(self, key)
+    }
+
+    fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        SqliteStore::decrement_ref(self, key)
+    }
+
+    fn soft_delete_by_scope(&self, scope: &str) -> Result<usize, MemoryError> {
+        SqliteStore::soft_delete_by_scope(self, scope)
     }
 }
 
@@ -332,7 +462,8 @@ mod tests {
     #[test]
     fn scope_constraint() {
         let store = test_store();
-        let result = store.conn.execute(
+        let conn = store.conn.lock().unwrap();
+        let result = conn.execute(
             "INSERT INTO memories VALUES ('id','key','INVALID','L0','owner',X'00',1,0,1,'now','now')",
             [],
         );
@@ -343,7 +474,8 @@ mod tests {
     #[test]
     fn level_constraint() {
         let store = test_store();
-        let result = store.conn.execute(
+        let conn = store.conn.lock().unwrap();
+        let result = conn.execute(
             "INSERT INTO memories VALUES ('id','key','project','INVALID','owner',X'00',1,0,1,'now','now')",
             [],
         );
@@ -409,5 +541,46 @@ mod tests {
         store.update_level("promoted", &Level::L1).unwrap();
         let read = store.read("promoted").unwrap().unwrap();
         assert_eq!(read.level, Level::L1);
+    }
+
+    #[test]
+    fn increment_and_decrement_ref_count() {
+        let store = test_store();
+        store.insert(&test_entry("ref_test")).unwrap();
+
+        store.increment_ref("ref_test").unwrap();
+        let entry = store.read("ref_test").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 1);
+
+        store.increment_ref("ref_test").unwrap();
+        let entry = store.read("ref_test").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 2);
+
+        store.decrement_ref("ref_test").unwrap();
+        let entry = store.read("ref_test").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 1);
+    }
+
+    #[test]
+    fn gc_preserves_entry_with_refs() {
+        let store = test_store();
+        let entry = new_entry("protected_by_ref", Scope::Task, Level::L5, "main", b"x".to_vec());
+        store.insert(&entry).unwrap();
+        store.increment_ref("protected_by_ref").unwrap();
+        store.soft_delete("protected_by_ref").unwrap();
+        let removed = store.gc().unwrap();
+        assert_eq!(removed, 0, "entry with ref_count > 0 should survive GC");
+    }
+
+    #[test]
+    fn soft_delete_by_scope() {
+        let store = test_store();
+        store.insert(&new_entry("task_a", Scope::Task, Level::L2, "main", b"a".to_vec())).unwrap();
+        store.insert(&new_entry("task_b", Scope::Task, Level::L2, "main", b"b".to_vec())).unwrap();
+        store.insert(&new_entry("proj_c", Scope::Project, Level::L1, "main", b"c".to_vec())).unwrap();
+
+        let removed = store.soft_delete_by_scope("task").unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.count_alive().unwrap(), 1); // only proj_c alive
     }
 }

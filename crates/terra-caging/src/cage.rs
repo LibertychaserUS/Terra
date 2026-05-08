@@ -30,6 +30,12 @@ pub trait Cage: Send + Sync {
 
     /// Check whether the given action is allowed.
     fn check(&self, context: &CageContext) -> CageCheckResult;
+
+    /// Whether this cage only activates in Goal Mode.
+    /// Default: false (always active).
+    fn goal_only(&self) -> bool {
+        false
+    }
 }
 
 /// Context passed to cage checks.
@@ -39,6 +45,9 @@ pub trait Cage: Send + Sync {
 pub struct CageContext {
     pub agent: String,
     pub action: CageAction,
+    /// Whether the session is in Goal Mode.
+    /// Goal-only cages skip when this is false.
+    pub goal_mode: bool,
 }
 
 /// The action being checked by the caging engine.
@@ -52,12 +61,44 @@ pub enum CageAction {
     FileRead { path: std::path::PathBuf },
     /// Agent wants to delete a file at this path.
     FileDelete { path: std::path::PathBuf },
-    /// Agent wants to write memory owned by another agent.
-    MemoryWrite { key: String, owner: String },
+    /// Agent wants to write memory.
+    MemoryWrite {
+        key: String,
+        owner: String,
+        /// Target memory level (L0-L6)
+        level: String,
+        /// Whether this write originates from a user command (/remember)
+        is_user_command: bool,
+    },
     /// Agent claims task is complete.
     ClaimComplete { verified: bool },
     /// Agent attempts to modify a protected rule.
     ModifyRule { rule_name: String },
+    /// Agent wants to execute a shell command.
+    ShellExec { command: String },
+    /// Agent wants to continue exploring after path was accepted.
+    ExploreAfterAccepted { path_id: String },
+    /// Agent makes a knowledge claim. Authority ranking determines trust.
+    KnowledgeClaim {
+        /// The source of this knowledge
+        source: KnowledgeSource,
+        /// Whether a higher-authority source contradicts this claim
+        contradicted_by_higher: bool,
+    },
+}
+
+/// Authority ranking for knowledge claims (FR-073).
+/// Higher rank = higher authority. Lower never overrides higher.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KnowledgeSource {
+    /// Rank 0 (lowest): Agent assumption / inference
+    Assumption,
+    /// Rank 1: From memory database (L1-L6)
+    Memory,
+    /// Rank 2: From project documentation
+    Documentation,
+    /// Rank 3 (highest): From current source code
+    Code,
 }
 
 #[cfg(test)]

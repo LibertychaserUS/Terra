@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::backend::StorageBackend;
 use crate::cache::MemoryCache;
 use crate::error::MemoryError;
 use crate::safety::SafetyEnforcer;
@@ -16,12 +17,12 @@ const DEFAULT_CACHE_TTL: u64 = 300;
 /// Composes three layers:
 /// 1. Cache (moka) — fast in-memory access
 /// 2. Safety (SafetyEnforcer) — ownership and permission checks
-/// 3. Store (SqliteStore) — persistent SQLite storage
+/// 3. Store (dyn StorageBackend) — pluggable persistent storage
 ///
-/// Read path: cache → SQLite (read-through)
-/// Write path: safety check → SQLite → cache (write-through)
+/// Read path: cache → backend (read-through)
+/// Write path: safety check → backend → cache (write-through)
 pub struct MemoryDatabase {
-    store: SqliteStore,
+    store: Box<dyn StorageBackend>,
     cache: MemoryCache,
 }
 
@@ -32,36 +33,59 @@ pub struct GcReport {
 }
 
 impl MemoryDatabase {
-    /// Open a database at the given path.
+    /// Open a database at the given path (uses SqliteStore backend).
     pub fn open(path: &Path) -> Result<Self, MemoryError> {
         Ok(Self {
-            store: SqliteStore::open(path)?,
+            store: Box::new(SqliteStore::open(path)?),
             cache: MemoryCache::new(DEFAULT_CACHE_CAPACITY, DEFAULT_CACHE_TTL),
         })
     }
 
-    /// Open an in-memory database (for testing).
+    /// Open an in-memory SQLite database (for testing).
     pub fn open_in_memory() -> Result<Self, MemoryError> {
         Ok(Self {
-            store: SqliteStore::open_in_memory()?,
+            store: Box::new(SqliteStore::open_in_memory()?),
             cache: MemoryCache::new(DEFAULT_CACHE_CAPACITY, DEFAULT_CACHE_TTL),
         })
     }
 
-    /// Open with custom cache configuration.
+    /// Open with custom cache configuration (uses SqliteStore backend).
     pub fn open_with_cache(
         path: &Path,
         cache_capacity: u64,
         cache_ttl_secs: u64,
     ) -> Result<Self, MemoryError> {
         Ok(Self {
-            store: SqliteStore::open(path)?,
+            store: Box::new(SqliteStore::open(path)?),
             cache: MemoryCache::new(cache_capacity, cache_ttl_secs),
         })
     }
 
+    /// Create a MemoryDatabase with a custom StorageBackend.
+    ///
+    /// Use this to inject alternative backends (e.g., `InMemoryBackend`
+    /// for testing, or a future PostgreSQL/RocksDB backend).
+    pub fn with_backend(backend: Box<dyn StorageBackend>) -> Self {
+        Self {
+            store: backend,
+            cache: MemoryCache::new(DEFAULT_CACHE_CAPACITY, DEFAULT_CACHE_TTL),
+        }
+    }
+
+    /// Create a MemoryDatabase with a custom StorageBackend and cache config.
+    pub fn with_backend_and_cache(
+        backend: Box<dyn StorageBackend>,
+        cache_capacity: u64,
+        cache_ttl_secs: u64,
+    ) -> Self {
+        Self {
+            store: backend,
+            cache: MemoryCache::new(cache_capacity, cache_ttl_secs),
+        }
+    }
+
     /// Write a new memory entry.
-    /// Write-through: SQLite first, then cache.
+    /// Write-through: backend first, then cache.
     pub fn write(
         &self,
         key: impl Into<String>,
@@ -71,7 +95,7 @@ impl MemoryDatabase {
         content: Vec<u8>,
     ) -> Result<(), MemoryError> {
         let entry = store::new_entry(key, scope, level, owner, content);
-        // Write to SQLite first (source of truth)
+        // Write to backend first (source of truth)
         self.store.insert(&entry)?;
         // Then populate cache
         let cache_key = entry.key.clone();
@@ -80,7 +104,7 @@ impl MemoryDatabase {
     }
 
     /// Read a memory entry by key.
-    /// Read-through: check cache first, fall through to SQLite on miss.
+    /// Read-through: check cache first, fall through to backend on miss.
     pub fn read(&self, key: &str) -> Result<Option<MemoryEntry>, MemoryError> {
         // Check cache first
         if let Some(cached) = self.cache.get(key) {
@@ -91,7 +115,7 @@ impl MemoryDatabase {
             return Ok(Some((*cached).clone()));
         }
 
-        // Cache miss — fall through to SQLite
+        // Cache miss — fall through to backend
         let entry = self.store.read(key)?;
         if let Some(ref e) = entry {
             if !e.alive {
@@ -104,25 +128,25 @@ impl MemoryDatabase {
     }
 
     /// Update content of an existing entry. Enforces ownership.
-    /// Write-through: safety check → SQLite → invalidate cache.
+    /// Write-through: safety check → backend → invalidate cache.
     pub fn update(
         &self,
         key: &str,
         content: Vec<u8>,
         agent: &str,
     ) -> Result<u64, MemoryError> {
-        SafetyEnforcer::check_write_permission(&self.store, key, agent)?;
+        SafetyEnforcer::check_write_permission(self.store.as_ref(), key, agent)?;
         let entry = self.store.read(key)?
             .ok_or_else(|| MemoryError::NotFound(key.to_string()))?;
         let new_version = self.store.update_content(key, &content, entry.version)?;
-        // Invalidate cache — next read will repopulate from SQLite
+        // Invalidate cache — next read will repopulate from backend
         self.cache.invalidate(key);
         Ok(new_version)
     }
 
     /// Soft-delete a memory entry. Enforces ownership.
     pub fn delete(&self, key: &str, agent: &str) -> Result<(), MemoryError> {
-        SafetyEnforcer::check_write_permission(&self.store, key, agent)?;
+        SafetyEnforcer::check_write_permission(self.store.as_ref(), key, agent)?;
         self.store.soft_delete(key)?;
         self.cache.invalidate(key);
         Ok(())
@@ -135,7 +159,7 @@ impl MemoryDatabase {
         target_level: Level,
         reviewed: bool,
     ) -> Result<(), MemoryError> {
-        SafetyEnforcer::check_promotion(&self.store, key, &target_level, reviewed)?;
+        SafetyEnforcer::check_promotion(self.store.as_ref(), key, &target_level, reviewed)?;
         self.store.update_level(key, &target_level)?;
         self.cache.invalidate(key);
         Ok(())
@@ -166,6 +190,30 @@ impl MemoryDatabase {
     /// Get number of entries currently in cache.
     pub fn cache_entry_count(&self) -> u64 {
         self.cache.entry_count()
+    }
+
+    /// Increment reference count (called when a Pointer is registered).
+    pub fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        self.store.increment_ref(key)?;
+        self.cache.invalidate(key);
+        Ok(())
+    }
+
+    /// Decrement reference count (called when a Pointer is unregistered).
+    pub fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        self.store.decrement_ref(key)?;
+        self.cache.invalidate(key);
+        Ok(())
+    }
+
+    /// Soft-delete all entries in a given scope.
+    /// Called at lifecycle boundaries: task end, session end.
+    pub fn cleanup_scope(&self, scope: Scope) -> Result<usize, MemoryError> {
+        let removed = self.store.soft_delete_by_scope(scope.as_str())?;
+        if removed > 0 {
+            self.cache.clear(); // conservative: clear all cache
+        }
+        Ok(removed)
     }
 }
 
@@ -356,5 +404,27 @@ mod tests {
 
         assert!(db.cache_hits() >= 1);
         assert!(db.cache_misses() >= 1);
+    }
+
+    #[test]
+    fn cleanup_scope_removes_task_entries() {
+        let db = db();
+        db.write("task1", Scope::Task, Level::L2, "main", b"a".to_vec()).unwrap();
+        db.write("task2", Scope::Task, Level::L2, "main", b"b".to_vec()).unwrap();
+        db.write("proj1", Scope::Project, Level::L1, "main", b"c".to_vec()).unwrap();
+        let removed = db.cleanup_scope(Scope::Task).unwrap();
+        assert_eq!(removed, 2);
+        // Project entry still alive
+        assert!(db.read("proj1").unwrap().is_some());
+    }
+
+    #[test]
+    fn ref_count_protects_from_gc() {
+        let db = db();
+        db.write("ref_protected", Scope::Task, Level::L5, "main", b"x".to_vec()).unwrap();
+        db.increment_ref("ref_protected").unwrap();
+        db.delete("ref_protected", "main").unwrap();
+        let report = db.gc().unwrap();
+        assert_eq!(report.entries_removed, 0);
     }
 }

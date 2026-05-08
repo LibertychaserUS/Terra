@@ -53,10 +53,13 @@ mod tests {
             user_prompt: "Fix the bug in auth.py line 42".into(),
             max_tokens: Some(2000),
             temperature: None,
+            tools: None,
+            tool_results: None,
+            pending_tool_calls: None,
         }
     }
 
-    // T-PR-001: dry run deterministic
+    // T-PV-001: dry run deterministic
     #[tokio::test]
     async fn dry_run_deterministic() {
         let adapter = DryRunAdapter::new();
@@ -66,7 +69,7 @@ mod tests {
         assert!(r2.content.contains("DRY_RUN"));
     }
 
-    // T-PR-002: dry run zero tokens
+    // T-PV-002: dry run zero tokens
     #[tokio::test]
     async fn dry_run_zero_tokens() {
         let adapter = DryRunAdapter::new();
@@ -75,7 +78,7 @@ mod tests {
         assert_eq!(response.usage_completion_tokens, 0);
     }
 
-    // T-PR-003: dry run capabilities
+    // T-PV-003: dry run capabilities
     #[test]
     fn dry_run_capabilities() {
         let adapter = DryRunAdapter::new();
@@ -86,7 +89,7 @@ mod tests {
         assert_eq!(cap.latency_class, LatencyClass::Fast);
     }
 
-    // T-PR-004: dry run no network
+    // T-PV-004: dry run no network
     #[tokio::test]
     async fn dry_run_no_network() {
         let adapter = DryRunAdapter::new();
@@ -95,7 +98,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // T-PR-005: dry run model field
+    // T-PV-005: dry run model field
     #[tokio::test]
     async fn dry_run_model_field() {
         let adapter = DryRunAdapter::new();
@@ -103,7 +106,7 @@ mod tests {
         assert_eq!(response.model, "dry_run");
     }
 
-    // T-PR-013: dispatch dry run mode
+    // T-PV-013: dispatch dry run mode
     #[tokio::test]
     async fn dispatch_dry_run() {
         let adapter = DryRunAdapter::new();
@@ -111,7 +114,7 @@ mod tests {
         assert_eq!(result.mode, DispatchMode::DryRun);
     }
 
-    // T-PR-014: dispatch live mode (with dry run adapter, mode is just a label)
+    // T-PV-014: dispatch live mode (with dry run adapter, mode is just a label)
     #[tokio::test]
     async fn dispatch_live_mode() {
         let adapter = DryRunAdapter::new();
@@ -119,7 +122,7 @@ mod tests {
         assert_eq!(result.mode, DispatchMode::Live);
     }
 
-    // T-PR-015: dispatch result has response
+    // T-PV-015: dispatch result has response
     #[tokio::test]
     async fn dispatch_result_has_response() {
         let adapter = DryRunAdapter::new();
@@ -127,7 +130,7 @@ mod tests {
         assert!(!result.response.content.is_empty());
     }
 
-    // T-PR-016: dispatch result has usage
+    // T-PV-016: dispatch result has usage
     #[tokio::test]
     async fn dispatch_result_has_usage() {
         let adapter = DryRunAdapter::new();
@@ -137,7 +140,7 @@ mod tests {
         assert_eq!(result.response.usage_completion_tokens, 0);
     }
 
-    // T-PR-017: dispatch propagates error
+    // T-PV-017: dispatch propagates error
     #[tokio::test]
     async fn dispatch_propagates_error() {
         let adapter = FailingAdapter;
@@ -146,7 +149,7 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("mock provider failure"));
     }
 
-    // T-PR-018: dispatch mode in result
+    // T-PV-018: dispatch mode in result
     #[tokio::test]
     async fn dispatch_mode_in_result() {
         let adapter = DryRunAdapter::new();
@@ -155,4 +158,38 @@ mod tests {
         assert_eq!(r1.mode, DispatchMode::DryRun);
         assert_eq!(r2.mode, DispatchMode::Live);
     }
+
+    // T-STR-001: streaming provider emits tokens
+    #[tokio::test]
+    async fn streaming_provider_emits_tokens() {
+        let adapter = DryRunAdapter::new();
+        let request = CompletionRequest {
+            system_prompt: "test".into(),
+            user_prompt: "hello world test".into(),
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            tool_results: None,
+            pending_tool_calls: None,
+        };
+        let chunks = adapter.complete_stream(request).await.unwrap();
+
+        // Should have multiple chunks (word by word)
+        assert!(chunks.len() > 1, "should emit multiple chunks, got {}", chunks.len());
+
+        // Last chunk should be done
+        assert!(chunks.last().unwrap().done);
+
+        // Concatenated text should form the full response
+        let full: String = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert!(full.contains("DRY_RUN"));
+
+        // Non-last chunks should not be done
+        for chunk in &chunks[..chunks.len() - 1] {
+            assert!(!chunk.done);
+        }
+    }
+
+    // T-STR-005: progress events structure (tested via event module in terra-types)
+    // Already covered by T-STR-006/007 in terra-types/event.rs
 }

@@ -106,7 +106,7 @@ impl AgentMessage {
 mod tests {
     use super::*;
 
-    // T-P-001: task assignment with all fields
+    // T-PT-001: task assignment with all fields
     #[test]
     fn task_assignment_fields() {
         let msg = AgentMessage::task_assignment(
@@ -125,7 +125,7 @@ mod tests {
         assert!(!msg.id.is_empty());
     }
 
-    // T-P-002: result with success status
+    // T-PT-002: result with success status
     #[test]
     fn task_result_success() {
         let msg = AgentMessage::task_result(
@@ -147,7 +147,7 @@ mod tests {
         }
     }
 
-    // T-P-003: result with failure and error
+    // T-PT-003: result with failure and error
     #[test]
     fn task_result_failure() {
         let msg = AgentMessage::task_result(
@@ -166,7 +166,7 @@ mod tests {
         }
     }
 
-    // T-P-004: message ID uniqueness
+    // T-PT-004: message ID uniqueness
     #[test]
     fn message_id_unique() {
         let payload = TaskPayload {
@@ -181,7 +181,7 @@ mod tests {
         assert_ne!(msg1.id, msg2.id);
     }
 
-    // T-P-005: timestamp is UTC and recent
+    // T-PT-005: timestamp is UTC and recent
     #[test]
     fn message_timestamp_utc() {
         let before = Utc::now();
@@ -200,7 +200,7 @@ mod tests {
         assert!(msg.timestamp <= after);
     }
 
-    // T-P-006: all AgentRole variants serialize/deserialize
+    // T-PT-006: all AgentRole variants serialize/deserialize
     #[test]
     fn agent_role_serialization() {
         let roles = vec![

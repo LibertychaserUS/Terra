@@ -82,6 +82,43 @@ pub fn render_command(cmd: &Command) -> String {
             lines.push(format!("- **Title**: {}", title));
             lines.push(format!("- **Summary**: {}", summary));
         }
+        CommandOp::ProviderCall { system_prompt: _, user_prompt, max_tokens, temperature, output_contract } => {
+            lines.push(format!("- **Op**: provider_call"));
+            let prompt_end = user_prompt.char_indices().nth(100).map(|(i, _)| i).unwrap_or(user_prompt.len());
+            lines.push(format!("- **Prompt**: {}", &user_prompt[..prompt_end]));
+            if let Some(mt) = max_tokens {
+                lines.push(format!("- **Max tokens**: {}", mt));
+            }
+            if let Some(t) = temperature {
+                lines.push(format!("- **Temperature**: {}", t));
+            }
+            if let Some(c) = output_contract {
+                lines.push(format!("- **Contract**: {}", c));
+            }
+        }
+        CommandOp::FileRead { path } => {
+            lines.push(format!("- **Op**: file_read"));
+            lines.push(format!("- **Path**: `{}`", path));
+        }
+        CommandOp::FileWrite { path, content } => {
+            lines.push(format!("- **Op**: file_write"));
+            lines.push(format!("- **Path**: `{}`", path));
+            lines.push(format!("- **Bytes**: {}", content.len()));
+        }
+        CommandOp::FileDelete { path } => {
+            lines.push(format!("- **Op**: file_delete"));
+            lines.push(format!("- **Path**: `{}`", path));
+        }
+        CommandOp::ShellExec { command, workdir, timeout_ms } => {
+            lines.push(format!("- **Op**: shell_exec"));
+            lines.push(format!("- **Command**: `{}`", command));
+            if let Some(dir) = workdir {
+                lines.push(format!("- **Workdir**: `{}`", dir));
+            }
+            if let Some(t) = timeout_ms {
+                lines.push(format!("- **Timeout**: {}ms", t));
+            }
+        }
     }
 
     lines.join("\n")
@@ -92,7 +129,7 @@ mod tests {
     use super::*;
     use crate::message::{AgentRole, ResultPayload, ResultStatus, TaskPayload};
 
-    // T-P-020: render message contains operation
+    // T-PT-020: render message contains operation
     #[test]
     fn render_message_contains_op() {
         let msg = AgentMessage::task_assignment(
@@ -111,7 +148,7 @@ mod tests {
         assert!(md.contains("2000 tokens"));
     }
 
-    // T-P-021: render command contains agent
+    // T-PT-021: render command contains agent
     #[test]
     fn render_command_contains_agent() {
         let cmd = Command::new(
@@ -129,7 +166,7 @@ mod tests {
         assert!(md.contains("auth_pattern"));
     }
 
-    // T-P-022: render result contains status
+    // T-PT-022: render result contains status
     #[test]
     fn render_message_contains_status() {
         let msg = AgentMessage::task_result(

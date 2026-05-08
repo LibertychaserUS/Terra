@@ -30,6 +30,20 @@ impl Scope {
             _ => None,
         }
     }
+
+    /// Return all scopes visible from this scope level.
+    /// Task can see: task + session + project + global
+    /// Session can see: session + project + global
+    /// Project can see: project + global
+    /// Global can see: global only
+    pub fn visible_scopes(&self) -> Vec<&'static str> {
+        match self {
+            Scope::Task => vec!["task", "session", "project", "global"],
+            Scope::Session => vec!["session", "project", "global"],
+            Scope::Project => vec!["project", "global"],
+            Scope::Global => vec!["global"],
+        }
+    }
 }
 
 /// Memory semantic level (L0 = most authoritative, L6 = least).
@@ -135,5 +149,13 @@ mod tests {
     #[test]
     fn invalid_level() {
         assert_eq!(Level::from_str("L9"), None);
+    }
+
+    #[test]
+    fn scope_visibility() {
+        assert_eq!(Scope::Task.visible_scopes(), vec!["task", "session", "project", "global"]);
+        assert_eq!(Scope::Session.visible_scopes(), vec!["session", "project", "global"]);
+        assert_eq!(Scope::Project.visible_scopes(), vec!["project", "global"]);
+        assert_eq!(Scope::Global.visible_scopes(), vec!["global"]);
     }
 }

@@ -46,18 +46,21 @@ impl DomainModule for CodingModule {
                 category: RuleCategory::Behavioral,
                 description: "No .unwrap() in production code".into(),
                 severity: Severity::Must,
+                threshold: None,
             },
             Rule {
                 id: "C-002".into(),
                 category: RuleCategory::Behavioral,
                 description: "All public APIs must have documentation".into(),
                 severity: Severity::Should,
+                threshold: None,
             },
             Rule {
                 id: "C-003".into(),
                 category: RuleCategory::Behavioral,
                 description: "Follow existing project naming conventions".into(),
                 severity: Severity::Must,
+                threshold: None,
             },
         ]
     }
@@ -93,12 +96,14 @@ impl DomainModule for AlgorithmModule {
                 category: RuleCategory::Reasoning,
                 description: "State complexity class before implementing".into(),
                 severity: Severity::Should,
+                threshold: None,
             },
             Rule {
                 id: "A-002".into(),
                 category: RuleCategory::Reasoning,
                 description: "Consider edge cases: empty input, single element, maximum size".into(),
                 severity: Severity::Must,
+                threshold: None,
             },
         ]
     }

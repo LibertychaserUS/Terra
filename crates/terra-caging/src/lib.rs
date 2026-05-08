@@ -5,14 +5,19 @@
 //! reachable state space.
 //!
 //! Architecture:
-//! - `cage`: core Cage trait and CageCheckResult
+//! - `cage`: core Cage trait, CageCheckResult, CageAction, KnowledgeSource
 //! - `sandbox`: file system permission enforcement (Action Cage)
-//! - `engine`: orchestrates all cages in sequence
+//! - `constitution`: TOML-based project constitution (immutable at runtime)
+//! - `engine`: orchestrates all cages in sequence (7 cages active)
 
 pub mod cage;
 pub mod sandbox;
+pub mod constitution;
 pub mod engine;
+pub mod output;
 
-pub use cage::{Cage, CageCheckResult};
+pub use cage::{Cage, CageAction, CageCheckResult, CageContext, KnowledgeSource};
+pub use constitution::Constitution;
 pub use sandbox::{SandboxGuard, SandboxViolation};
-pub use engine::CagingEngine;
+pub use engine::{CagingEngine, ConvergenceCage, KnowledgeCage};
+pub use output::{check_output, OutputCheckResult};

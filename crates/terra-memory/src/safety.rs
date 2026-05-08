@@ -1,5 +1,5 @@
+use crate::backend::StorageBackend;
 use crate::error::MemoryError;
-use crate::store::SqliteStore;
 use crate::types::Level;
 
 /// Safety enforcer — decoupled from storage.
@@ -7,12 +7,14 @@ use crate::types::Level;
 /// Checks ownership, lifetime, and promotion rules before
 /// allowing mutations. This is the "Rust-style borrow checker"
 /// for the memory system.
+///
+/// Operates on any `StorageBackend`, not tied to SqliteStore.
 pub struct SafetyEnforcer;
 
 impl SafetyEnforcer {
     /// Check if agent is allowed to write/update/delete a key.
     pub fn check_write_permission(
-        store: &SqliteStore,
+        store: &dyn StorageBackend,
         key: &str,
         agent: &str,
     ) -> Result<(), MemoryError> {
@@ -30,7 +32,7 @@ impl SafetyEnforcer {
 
     /// Check if promotion to target level is allowed.
     pub fn check_promotion(
-        store: &SqliteStore,
+        store: &dyn StorageBackend,
         key: &str,
         target: &Level,
         reviewed: bool,
@@ -75,7 +77,7 @@ impl SafetyEnforcer {
 
     /// Check that a read target is alive (not dangling).
     pub fn check_alive(
-        store: &SqliteStore,
+        store: &dyn StorageBackend,
         key: &str,
     ) -> Result<(), MemoryError> {
         if let Some(entry) = store.read(key)? {

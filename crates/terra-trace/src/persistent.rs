@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 
 use crate::audit::AuditEntry;
 use terra_protocol::codec;
-use terra_protocol::command::{Command, CommandResult};
+use terra_types::command::{Command, CommandResult};
 
 /// SQLite-backed persistent audit log.
 ///
@@ -139,7 +139,7 @@ impl PersistentAuditLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terra_protocol::command::{CommandOp, CommandResult as CmdResult};
+    use terra_types::command::{CommandOp, CommandResult as CmdResult};
 
     fn test_log() -> PersistentAuditLog {
         PersistentAuditLog::open_in_memory().unwrap()

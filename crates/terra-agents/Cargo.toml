@@ -5,12 +5,12 @@ edition.workspace = true
 
 [dependencies]
 terra-core = { path = "../terra-core" }
-terra-memory = { path = "../terra-memory" }
+terra-types = { path = "../terra-types" }
 terra-protocol = { path = "../terra-protocol" }
-terra-providers = { path = "../terra-providers" }
-terra-caging = { path = "../terra-caging" }
 terra-compile = { path = "../terra-compile" }
-terra-trace = { path = "../terra-trace" }
+terra-executor = { path = "../terra-executor" }
+terra-memory = { path = "../terra-memory" }
+terra-providers = { path = "../terra-providers" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -18,3 +18,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+terra-caging = { path = "../terra-caging" }
+terra-trace = { path = "../terra-trace" }

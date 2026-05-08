@@ -9,3 +9,6 @@ Cargo.lock
 # Terra runtime data (not source)
 *.terra.db
 .terra/
+
+# Internal/private documents — never push
+VISION_OLIVER.md

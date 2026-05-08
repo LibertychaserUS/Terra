@@ -2,6 +2,11 @@
 name = "terra-cli"
 version.workspace = true
 edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "terra"
@@ -9,8 +14,14 @@ path = "src/main.rs"
 
 [dependencies]
 terra-agents = { path = "../terra-agents" }
-terra-providers = { path = "../terra-providers" }
+terra-types = { path = "../terra-types" }
+terra-core = { path = "../terra-core" }
+terra-executor = { path = "../terra-executor" }
+terra-memory = { path = "../terra-memory" }
+terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }
+terra-providers = { path = "../terra-providers" }
+terra-mcp = { path = "../terra-mcp" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -20,11 +31,15 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 dirs.workspace = true
+rustyline.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
-terra-memory = { path = "../terra-memory" }
-terra-caging = { path = "../terra-caging" }
+tokio = { workspace = true, features = ["full", "test-util"] }
+terra-types = { path = "../terra-types" }
 terra-protocol = { path = "../terra-protocol" }
+terra-providers = { path = "../terra-providers" }
