@@ -250,6 +250,11 @@ max_candidates = 10
             std::fs::write(terra_dir.join("config.toml"), config_content)?;
             println!("  \x1b[32m✓\x1b[0m Config written");
 
+            // Generate prompt.md (user-editable system prompt)
+            let prompt_content = include_str!("../../terra-agents/src/prompt.md");
+            std::fs::write(terra_dir.join("prompt.md"), prompt_content)?;
+            println!("  \x1b[32m✓\x1b[0m Prompt written (editable: .terra/prompt.md)");
+
             // Check API key
             let has_key = std::env::var("DASHSCOPE_API_KEY").is_ok()
                 || std::env::var("TERRA_PROVIDER_API_KEY").is_ok();

@@ -745,16 +745,15 @@ impl Repl {
 
         // --- 2. System prompt: first turn full, subsequent minimal ---
         let system_prompt = if self.turn_count == 1 {
-            // First turn: full context
-            let mut prompt = String::from(
-                "You are Terra, an AI Agent OS. You help users with coding tasks.\n\
-                 Use tools when you need to read files, write files, search memory, or execute commands.\n\
-                 Be direct: when the user asks you to do something, do it using tools. Don't just describe what you would do.\n"
-            );
-
-            // Inject pointer DSL docs (once, model will remember)
-            prompt.push_str("\n");
-            prompt.push_str(ToolRegistry::pointer_dsl_docs());
+            // First turn: load prompt from .terra/prompt.md (user-editable) or fallback to embedded
+            let project_root = std::env::current_dir().unwrap_or_default();
+            let prompt_path = project_root.join(".terra").join("prompt.md");
+            let mut prompt = if prompt_path.exists() {
+                std::fs::read_to_string(&prompt_path)
+                    .unwrap_or_else(|_| include_str!("prompt.md").to_string())
+            } else {
+                include_str!("prompt.md").to_string()
+            };
 
             // Inject L1 project memory summary (compact)
             let pointer_ctx = {
