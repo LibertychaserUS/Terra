@@ -82,6 +82,22 @@ impl CommandExecutor {
         &self.provider
     }
 
+    /// Clean up memory entries for a given scope (lifecycle boundary).
+    /// Called by SessionManager when a goal/session ends.
+    pub fn cleanup_memory_scope(&self, scope: terra_memory::types::Scope) -> usize {
+        self.memory.cleanup_scope(scope).unwrap_or(0)
+    }
+
+    /// Increment ref_count for a memory entry (pointer registered).
+    pub fn increment_memory_ref(&self, key: &str) {
+        let _ = self.memory.increment_ref(key);
+    }
+
+    /// Decrement ref_count for a memory entry (pointer unregistered).
+    pub fn decrement_memory_ref(&self, key: &str) {
+        let _ = self.memory.decrement_ref(key);
+    }
+
     /// Execute a command through the full pipeline.
     pub async fn execute(&self, cmd: Command) -> CommandResult {
         let start = Instant::now();

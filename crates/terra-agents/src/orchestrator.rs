@@ -77,6 +77,16 @@ impl Orchestrator {
         if let Ok(mut pt) = self.pointer_table.lock() {
             pt.register(key.to_string(), level, scope, annotation.to_string());
         }
+        // Increment ref_count in memory DB so GC won't collect this entry
+        self.executor.increment_memory_ref(key);
+    }
+
+    /// Unregister a pointer and decrement the memory ref_count.
+    pub fn unregister_pointer(&self, key: &str) {
+        if let Ok(mut pt) = self.pointer_table.lock() {
+            pt.unregister(key);
+        }
+        self.executor.decrement_memory_ref(key);
     }
 
     /// Build IC-enriched system prompt for Goal Mode.

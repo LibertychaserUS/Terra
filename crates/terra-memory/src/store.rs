@@ -252,6 +252,43 @@ impl SqliteStore {
         )?;
         Ok(count)
     }
+
+    /// Increment reference count for a memory entry.
+    pub fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE memories SET ref_count = ref_count + 1 WHERE key = ?1 AND alive = 1",
+            params![key],
+        )?;
+        if rows == 0 {
+            return Err(MemoryError::NotFound(key.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Decrement reference count for a memory entry.
+    pub fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE memories SET ref_count = CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END WHERE key = ?1 AND alive = 1",
+            params![key],
+        )?;
+        if rows == 0 {
+            return Err(MemoryError::NotFound(key.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Soft-delete all entries matching the given scope.
+    pub fn soft_delete_by_scope(&self, scope: &str) -> Result<usize, MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE memories SET alive = 0, updated_at = ?1 WHERE scope = ?2 AND alive = 1",
+            params![now, scope],
+        )?;
+        Ok(rows)
+    }
 }
 
 /// Implement StorageBackend for SqliteStore — delegates to existing methods.
@@ -291,6 +328,18 @@ impl StorageBackend for SqliteStore {
 
     fn count_alive(&self) -> Result<usize, MemoryError> {
         SqliteStore::count_alive(self)
+    }
+
+    fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        SqliteStore::increment_ref(self, key)
+    }
+
+    fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        SqliteStore::decrement_ref(self, key)
+    }
+
+    fn soft_delete_by_scope(&self, scope: &str) -> Result<usize, MemoryError> {
+        SqliteStore::soft_delete_by_scope(self, scope)
     }
 }
 
@@ -492,5 +541,46 @@ mod tests {
         store.update_level("promoted", &Level::L1).unwrap();
         let read = store.read("promoted").unwrap().unwrap();
         assert_eq!(read.level, Level::L1);
+    }
+
+    #[test]
+    fn increment_and_decrement_ref_count() {
+        let store = test_store();
+        store.insert(&test_entry("ref_test")).unwrap();
+
+        store.increment_ref("ref_test").unwrap();
+        let entry = store.read("ref_test").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 1);
+
+        store.increment_ref("ref_test").unwrap();
+        let entry = store.read("ref_test").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 2);
+
+        store.decrement_ref("ref_test").unwrap();
+        let entry = store.read("ref_test").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 1);
+    }
+
+    #[test]
+    fn gc_preserves_entry_with_refs() {
+        let store = test_store();
+        let entry = new_entry("protected_by_ref", Scope::Task, Level::L5, "main", b"x".to_vec());
+        store.insert(&entry).unwrap();
+        store.increment_ref("protected_by_ref").unwrap();
+        store.soft_delete("protected_by_ref").unwrap();
+        let removed = store.gc().unwrap();
+        assert_eq!(removed, 0, "entry with ref_count > 0 should survive GC");
+    }
+
+    #[test]
+    fn soft_delete_by_scope() {
+        let store = test_store();
+        store.insert(&new_entry("task_a", Scope::Task, Level::L2, "main", b"a".to_vec())).unwrap();
+        store.insert(&new_entry("task_b", Scope::Task, Level::L2, "main", b"b".to_vec())).unwrap();
+        store.insert(&new_entry("proj_c", Scope::Project, Level::L1, "main", b"c".to_vec())).unwrap();
+
+        let removed = store.soft_delete_by_scope("task").unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.count_alive().unwrap(), 1); // only proj_c alive
     }
 }

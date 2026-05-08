@@ -41,6 +41,16 @@ pub trait StorageBackend: Send + Sync {
 
     /// Count all alive entries.
     fn count_alive(&self) -> Result<usize, MemoryError>;
+
+    /// Increment reference count for a memory entry.
+    fn increment_ref(&self, key: &str) -> Result<(), MemoryError>;
+
+    /// Decrement reference count for a memory entry.
+    fn decrement_ref(&self, key: &str) -> Result<(), MemoryError>;
+
+    /// Soft-delete all entries matching the given scope.
+    /// Used for lifecycle cleanup (task ends -> delete task entries, etc.)
+    fn soft_delete_by_scope(&self, scope: &str) -> Result<usize, MemoryError>;
 }
 
 /// HashMap-based in-memory backend for testing.
@@ -151,6 +161,44 @@ impl StorageBackend for InMemoryBackend {
     fn count_alive(&self) -> Result<usize, MemoryError> {
         let map = self.entries.read().unwrap();
         Ok(map.values().filter(|e| e.alive).count())
+    }
+
+    fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        let mut map = self.entries.write().unwrap();
+        match map.get_mut(key) {
+            Some(entry) if entry.alive => {
+                entry.ref_count += 1;
+                Ok(())
+            }
+            Some(_) => Err(MemoryError::Dangling(key.to_string())),
+            None => Err(MemoryError::NotFound(key.to_string())),
+        }
+    }
+
+    fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        let mut map = self.entries.write().unwrap();
+        match map.get_mut(key) {
+            Some(entry) if entry.ref_count > 0 => {
+                entry.ref_count -= 1;
+                Ok(())
+            }
+            Some(entry) if !entry.alive => Err(MemoryError::Dangling(key.to_string())),
+            Some(_) => Ok(()), // already 0, don't underflow
+            None => Err(MemoryError::NotFound(key.to_string())),
+        }
+    }
+
+    fn soft_delete_by_scope(&self, scope: &str) -> Result<usize, MemoryError> {
+        let mut map = self.entries.write().unwrap();
+        let mut count = 0;
+        for entry in map.values_mut() {
+            if entry.alive && entry.scope.as_str() == scope {
+                entry.alive = false;
+                entry.updated_at = chrono::Utc::now();
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -264,6 +312,39 @@ mod tests {
         b.insert(&new_entry("b", Scope::Task, Level::L2, "main", b"x".to_vec())).unwrap();
         assert_eq!(b.count_alive().unwrap(), 2);
         b.soft_delete("a").unwrap();
+        assert_eq!(b.count_alive().unwrap(), 1);
+    }
+
+    #[test]
+    fn increment_and_decrement_ref() {
+        let b = backend();
+        b.insert(&test_entry("ref")).unwrap();
+        b.increment_ref("ref").unwrap();
+        let entry = b.read("ref").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 1);
+        b.decrement_ref("ref").unwrap();
+        let entry = b.read("ref").unwrap().unwrap();
+        assert_eq!(entry.ref_count, 0);
+    }
+
+    #[test]
+    fn gc_preserves_with_refs() {
+        let b = backend();
+        b.insert(&new_entry("ref_gc", Scope::Task, Level::L5, "main", b"x".to_vec())).unwrap();
+        b.increment_ref("ref_gc").unwrap();
+        b.soft_delete("ref_gc").unwrap();
+        let removed = b.gc().unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn soft_delete_by_scope_test() {
+        let b = backend();
+        b.insert(&new_entry("t1", Scope::Task, Level::L2, "main", b"a".to_vec())).unwrap();
+        b.insert(&new_entry("t2", Scope::Task, Level::L2, "main", b"b".to_vec())).unwrap();
+        b.insert(&new_entry("p1", Scope::Project, Level::L1, "main", b"c".to_vec())).unwrap();
+        let removed = b.soft_delete_by_scope("task").unwrap();
+        assert_eq!(removed, 2);
         assert_eq!(b.count_alive().unwrap(), 1);
     }
 }

@@ -188,6 +188,12 @@ impl SessionManager {
 
         let report = consolidate(&self.session_actions, self.sleep_settings.max_candidates);
 
+        // Lifecycle cleanup: soft-delete task-scoped memory entries
+        let cleaned = self.executor.cleanup_memory_scope(terra_memory::types::Scope::Task);
+        if cleaned > 0 {
+            tracing::info!(cleaned, "task-scoped memory entries cleaned on goal exit");
+        }
+
         self.mode = SessionMode::Conversation;
         self.session_actions.clear();
         self.drift_detector = None;

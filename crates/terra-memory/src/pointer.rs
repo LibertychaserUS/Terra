@@ -33,6 +33,9 @@ pub struct Pointer {
     pub annotation: String,
     /// Dynamic relevance score in `[0.0, 1.0]`.
     pub salience: f32,
+    /// Individual salience components (preserved for accurate recalculation).
+    pub salience_keyword: f32,
+    pub salience_semantic: f32,
     pub last_accessed: DateTime<Utc>,
     pub access_count: u32,
     pub created_at: DateTime<Utc>,
@@ -94,6 +97,8 @@ impl PointerTable {
             path: None,
             annotation,
             salience: 0.5, // neutral initial salience
+            salience_keyword: 0.0,
+            salience_semantic: 0.0,
             last_accessed: now,
             access_count: 0,
             created_at: now,
@@ -118,6 +123,8 @@ impl PointerTable {
             path: Some(path),
             annotation,
             salience: 0.5,
+            salience_keyword: 0.0,
+            salience_semantic: 0.0,
             last_accessed: now,
             access_count: 0,
             created_at: now,
@@ -246,45 +253,32 @@ impl PointerTable {
     /// Each signal updates its component and the final salience is recalculated.
     pub fn update_salience(&mut self, key: &str, signal: SalienceSignal) {
         if let Some(ptr) = self.entries.get_mut(key) {
+            // Update the specific component
             match signal {
                 SalienceSignal::Accessed => {
                     ptr.access_count += 1;
                     ptr.last_accessed = Utc::now();
-                    // Recalculate with updated access stats
-                    let access_freq = (ptr.access_count as f32 / 20.0).min(1.0);
-                    let time_decay = compute_time_decay(ptr.last_accessed);
-                    // Preserve keyword/semantic components (encoded in current salience),
-                    // but update the access + time components.
-                    // Since we don't store components separately, recalculate from
-                    // access and time only, blending with current salience.
-                    let new_salience =
-                        ptr.salience * 0.7 + time_decay * 0.2 + access_freq * 0.1;
-                    ptr.salience = new_salience.clamp(0.0, 1.0);
                 }
                 SalienceSignal::KeywordMatch(score) => {
-                    let score = score.clamp(0.0, 1.0);
-                    let access_freq = (ptr.access_count as f32 / 20.0).min(1.0);
-                    let time_decay = compute_time_decay(ptr.last_accessed);
-                    let new_salience =
-                        score * 0.3 + ptr.salience * 0.4 + time_decay * 0.2 + access_freq * 0.1;
-                    ptr.salience = new_salience.clamp(0.0, 1.0);
+                    ptr.salience_keyword = score.clamp(0.0, 1.0);
                 }
                 SalienceSignal::SemanticMatch(score) => {
-                    let score = score.clamp(0.0, 1.0);
-                    let access_freq = (ptr.access_count as f32 / 20.0).min(1.0);
-                    let time_decay = compute_time_decay(ptr.last_accessed);
-                    let new_salience =
-                        ptr.salience * 0.3 + score * 0.4 + time_decay * 0.2 + access_freq * 0.1;
-                    ptr.salience = new_salience.clamp(0.0, 1.0);
+                    ptr.salience_semantic = score.clamp(0.0, 1.0);
                 }
                 SalienceSignal::TimeDecay => {
-                    let time_decay = compute_time_decay(ptr.last_accessed);
-                    let access_freq = (ptr.access_count as f32 / 20.0).min(1.0);
-                    let new_salience =
-                        ptr.salience * 0.7 + time_decay * 0.2 + access_freq * 0.1;
-                    ptr.salience = new_salience.clamp(0.0, 1.0);
+                    // No component to update; time is always recomputed
                 }
             }
+
+            // Recompute composite salience from all components
+            let time_decay = compute_time_decay(ptr.last_accessed);
+            let access_freq = (ptr.access_count as f32 / 20.0).min(1.0);
+            ptr.salience = (
+                ptr.salience_keyword * 0.3
+                + ptr.salience_semantic * 0.4
+                + time_decay * 0.2
+                + access_freq * 0.1
+            ).clamp(0.0, 1.0);
         }
     }
 
@@ -476,6 +470,10 @@ struct TomlPointer {
     path: Option<String>,
     annotation: String,
     salience: f32,
+    #[serde(default)]
+    salience_keyword: f32,
+    #[serde(default)]
+    salience_semantic: f32,
     last_accessed: String, // ISO 8601
     access_count: u32,
     created_at: String, // ISO 8601
@@ -493,6 +491,8 @@ impl TomlWrapper {
                 path: p.path.clone(),
                 annotation: p.annotation.clone(),
                 salience: p.salience,
+                salience_keyword: p.salience_keyword,
+                salience_semantic: p.salience_semantic,
                 last_accessed: p.last_accessed.to_rfc3339(),
                 access_count: p.access_count,
                 created_at: p.created_at.to_rfc3339(),
@@ -520,6 +520,8 @@ impl TomlWrapper {
                 path: tp.path,
                 annotation: tp.annotation,
                 salience: tp.salience,
+                salience_keyword: tp.salience_keyword,
+                salience_semantic: tp.salience_semantic,
                 last_accessed,
                 access_count: tp.access_count,
                 created_at,
@@ -1138,5 +1140,40 @@ mod tests {
     fn default_impl() {
         let table = PointerTable::default();
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn salience_components_preserved() {
+        let mut pt = PointerTable::new();
+        pt.register("key1".into(), Level::L1, Scope::Project, "test".into());
+
+        pt.update_salience("key1", SalienceSignal::KeywordMatch(0.8));
+        let p = pt.get("key1").unwrap();
+        assert!((p.salience_keyword - 0.8).abs() < 0.01);
+
+        pt.update_salience("key1", SalienceSignal::SemanticMatch(0.6));
+        let p = pt.get("key1").unwrap();
+        assert!((p.salience_semantic - 0.6).abs() < 0.01);
+        assert!((p.salience_keyword - 0.8).abs() < 0.01); // keyword preserved
+
+        // Final salience should be: 0.8*0.3 + 0.6*0.4 + time*0.2 + 0*0.1
+        // = 0.24 + 0.24 + ~0.2 + 0 = ~0.68
+        assert!(p.salience > 0.5);
+    }
+
+    #[test]
+    fn salience_consistent_formula() {
+        let mut pt = PointerTable::new();
+        pt.register("k".into(), Level::L2, Scope::Task, "test".into());
+
+        // All signals should use the same 0.3+0.4+0.2+0.1 formula
+        pt.update_salience("k", SalienceSignal::KeywordMatch(1.0));
+        pt.update_salience("k", SalienceSignal::SemanticMatch(1.0));
+        pt.update_salience("k", SalienceSignal::Accessed);
+
+        let p = pt.get("k").unwrap();
+        // keyword=1.0*0.3 + semantic=1.0*0.4 + time~=1.0*0.2 + access=0.05*0.1
+        // Should be close to 0.3 + 0.4 + 0.2 + 0.005 = 0.905
+        assert!(p.salience > 0.85, "salience should be ~0.9, got {}", p.salience);
     }
 }

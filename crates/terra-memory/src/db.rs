@@ -191,6 +191,30 @@ impl MemoryDatabase {
     pub fn cache_entry_count(&self) -> u64 {
         self.cache.entry_count()
     }
+
+    /// Increment reference count (called when a Pointer is registered).
+    pub fn increment_ref(&self, key: &str) -> Result<(), MemoryError> {
+        self.store.increment_ref(key)?;
+        self.cache.invalidate(key);
+        Ok(())
+    }
+
+    /// Decrement reference count (called when a Pointer is unregistered).
+    pub fn decrement_ref(&self, key: &str) -> Result<(), MemoryError> {
+        self.store.decrement_ref(key)?;
+        self.cache.invalidate(key);
+        Ok(())
+    }
+
+    /// Soft-delete all entries in a given scope.
+    /// Called at lifecycle boundaries: task end, session end.
+    pub fn cleanup_scope(&self, scope: Scope) -> Result<usize, MemoryError> {
+        let removed = self.store.soft_delete_by_scope(scope.as_str())?;
+        if removed > 0 {
+            self.cache.clear(); // conservative: clear all cache
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
@@ -380,5 +404,27 @@ mod tests {
 
         assert!(db.cache_hits() >= 1);
         assert!(db.cache_misses() >= 1);
+    }
+
+    #[test]
+    fn cleanup_scope_removes_task_entries() {
+        let db = db();
+        db.write("task1", Scope::Task, Level::L2, "main", b"a".to_vec()).unwrap();
+        db.write("task2", Scope::Task, Level::L2, "main", b"b".to_vec()).unwrap();
+        db.write("proj1", Scope::Project, Level::L1, "main", b"c".to_vec()).unwrap();
+        let removed = db.cleanup_scope(Scope::Task).unwrap();
+        assert_eq!(removed, 2);
+        // Project entry still alive
+        assert!(db.read("proj1").unwrap().is_some());
+    }
+
+    #[test]
+    fn ref_count_protects_from_gc() {
+        let db = db();
+        db.write("ref_protected", Scope::Task, Level::L5, "main", b"x".to_vec()).unwrap();
+        db.increment_ref("ref_protected").unwrap();
+        db.delete("ref_protected", "main").unwrap();
+        let report = db.gc().unwrap();
+        assert_eq!(report.entries_removed, 0);
     }
 }
