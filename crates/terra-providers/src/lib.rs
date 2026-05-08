@@ -7,6 +7,6 @@ pub mod adapter;
 pub mod dispatch;
 pub mod openai;
 
-pub use adapter::{ProviderAdapter, ProviderCapability, StreamChunk};
+pub use adapter::{ProviderAdapter, ProviderCapability, StreamChunk, StreamEvent};
 pub use dispatch::{DispatchResult, DispatchMode, dispatch};
 pub use openai::OpenAICompatibleAdapter;

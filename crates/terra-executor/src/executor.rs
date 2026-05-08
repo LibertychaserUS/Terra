@@ -179,6 +179,37 @@ impl CommandExecutor {
         result
     }
 
+    /// Record an LLM call in the audit trail without going through cage/router.
+    ///
+    /// The REPL agent loop calls provider.complete() directly (needs tools/tool_results
+    /// fields that CommandOp::ProviderCall doesn't support). This method ensures those
+    /// calls are still audited.
+    pub fn audit_llm_call(
+        &self,
+        agent: &str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        tool_calls_count: usize,
+        iteration: u32,
+    ) {
+        let cmd = Command::new(agent, CommandOp::ProviderCall {
+            system_prompt: format!("[agent_loop iter={}]", iteration),
+            user_prompt: format!("[{} tool_calls]", tool_calls_count),
+            max_tokens: None,
+            temperature: None,
+            output_contract: None,
+        });
+        let seq = self.audit.record_command(cmd);
+        let result = CommandResult::ok("", Some(serde_json::json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "tool_calls": tool_calls_count,
+            "iteration": iteration,
+            "source": "agent_loop",
+        })));
+        self.audit.record_result(seq, result, 0);
+    }
+
     /// Map a CommandOp to a CageContext for cage checking.
     fn command_to_cage_context(&self, op: &CommandOp, agent: &str) -> CageContext {
         let action = match op {

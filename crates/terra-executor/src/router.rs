@@ -246,24 +246,23 @@ pub async fn route(
         }
 
         CommandOp::ShellExec { command, workdir, timeout_ms } => {
-            use std::process::Stdio;
-
-            let _timeout = std::time::Duration::from_millis(
+            let timeout = std::time::Duration::from_millis(
                 timeout_ms.unwrap_or(30_000)
             );
-            // TODO: enforce timeout with tokio::time::timeout in async context
 
-            let mut cmd = std::process::Command::new("sh");
-            cmd.args(["-c", command])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            let child = match tokio::process::Command::new("sh")
+                .args(["-c", command])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .current_dir(workdir.as_deref().unwrap_or("."))
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => return CommandResult::err("", format!("ShellExec failed: {}", e)),
+            };
 
-            if let Some(dir) = workdir {
-                cmd.current_dir(dir);
-            }
-
-            match cmd.output() {
-                Ok(output) => {
+            match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                Ok(Ok(output)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                     let exit_code = output.status.code().unwrap_or(-1);
@@ -283,7 +282,13 @@ pub async fn route(
                         ))
                     }
                 }
-                Err(e) => CommandResult::err("", format!("ShellExec failed: {}", e)),
+                Ok(Err(e)) => CommandResult::err("", format!("ShellExec failed: {}", e)),
+                Err(_) => {
+                    CommandResult::err("", format!(
+                        "ShellExec timed out after {}ms: {}",
+                        timeout.as_millis(), command
+                    ))
+                }
             }
         }
     }

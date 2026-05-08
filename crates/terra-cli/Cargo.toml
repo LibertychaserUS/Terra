@@ -21,6 +21,7 @@ terra-memory = { path = "../terra-memory" }
 terra-caging = { path = "../terra-caging" }
 terra-trace = { path = "../terra-trace" }
 terra-providers = { path = "../terra-providers" }
+terra-mcp = { path = "../terra-mcp" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

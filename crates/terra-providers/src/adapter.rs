@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 /// Capabilities a provider/model supports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,21 @@ pub struct StreamChunk {
     pub text: String,
     /// True if this is the final chunk.
     pub done: bool,
+}
+
+/// Stream events emitted during streaming completion via mpsc channel.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Stream has started.
+    Start,
+    /// A token delta arrived.
+    Delta(String),
+    /// Stream completed with usage stats.
+    End {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+    },
 }
 
 /// A tool definition for function calling.
@@ -78,6 +94,24 @@ pub trait ProviderAdapter: Send + Sync {
             text: response.content,
             done: true,
         }])
+    }
+
+    /// Start streaming completion, sending events to the channel.
+    /// Default falls back to complete() and emits Start + Delta(full_content) + End.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+    ) -> anyhow::Result<CompletionResponse> {
+        let response = self.complete(request).await?;
+        let _ = tx.send(StreamEvent::Start);
+        let _ = tx.send(StreamEvent::Delta(response.content.clone()));
+        let _ = tx.send(StreamEvent::End {
+            prompt_tokens: response.usage_prompt_tokens,
+            completion_tokens: response.usage_completion_tokens,
+            total_tokens: response.usage_prompt_tokens + response.usage_completion_tokens,
+        });
+        Ok(response)
     }
 
     /// Get the capabilities of this provider.

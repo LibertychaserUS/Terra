@@ -5,8 +5,11 @@ use std::env;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use tokio::sync::mpsc;
+
 use crate::adapter::{
     CompletionRequest, CompletionResponse, LatencyClass, ProviderAdapter, ProviderCapability,
+    StreamEvent,
 };
 
 /// Environment variable names for Terra provider configuration.
@@ -36,7 +39,7 @@ pub struct OpenAICompatibleAdapter {
 }
 
 /// OpenAI chat completions request body.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
@@ -46,6 +49,8 @@ struct ChatRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ChatTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -60,14 +65,14 @@ struct ChatMessage {
 }
 
 /// OpenAI tool definition format.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ChatTool {
     #[serde(rename = "type")]
     tool_type: String,
     function: ChatFunction,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ChatFunction {
     name: String,
     description: String,
@@ -113,6 +118,24 @@ struct ChatChoiceMessage {
 struct ChatUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+}
+
+/// SSE chunk from a streaming chat completion response.
+#[derive(Deserialize)]
+struct SseChunk {
+    choices: Vec<SseChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Deserialize)]
+struct SseChoice {
+    delta: SseDelta,
+}
+
+#[derive(Deserialize)]
+struct SseDelta {
+    content: Option<String>,
 }
 
 /// OpenAI error response body.
@@ -250,6 +273,7 @@ impl OpenAICompatibleAdapter {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             tools,
+            stream: None,
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -364,10 +388,187 @@ impl OpenAICompatibleAdapter {
     }
 }
 
+impl OpenAICompatibleAdapter {
+    /// Build a ChatRequest from a CompletionRequest (shared logic).
+    fn build_chat_request(&self, request: &CompletionRequest, stream: bool) -> ChatRequest {
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some(request.system_prompt.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some(request.user_prompt.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        // Append tool call results if present (multi-turn tool conversation)
+        if let (Some(pending_calls), Some(results)) =
+            (&request.pending_tool_calls, &request.tool_results)
+        {
+            let chat_tool_calls: Vec<ChatToolCall> = pending_calls
+                .iter()
+                .map(|tc| ChatToolCall {
+                    id: tc.id.clone(),
+                    call_type: "function".into(),
+                    function: ChatFunctionCall {
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.to_string(),
+                    },
+                })
+                .collect();
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(chat_tool_calls),
+                tool_call_id: None,
+            });
+
+            for result in results {
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: Some(result.content.clone()),
+                    tool_calls: None,
+                    tool_call_id: Some(result.tool_call_id.clone()),
+                });
+            }
+        }
+
+        let tools: Option<Vec<ChatTool>> = request.tools.as_ref().map(|defs| {
+            defs.iter()
+                .map(|d| ChatTool {
+                    tool_type: "function".into(),
+                    function: ChatFunction {
+                        name: d.name.clone(),
+                        description: d.description.clone(),
+                        parameters: d.parameters.clone(),
+                    },
+                })
+                .collect()
+        });
+
+        ChatRequest {
+            model: self.model.clone(),
+            messages,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            tools,
+            stream: if stream { Some(true) } else { None },
+        }
+    }
+
+    /// Real SSE streaming implementation.
+    ///
+    /// Sends a request with `stream: true`, reads the response body,
+    /// parses SSE `data:` lines, and emits `StreamEvent` deltas through the channel.
+    async fn complete_streaming_sse(
+        &self,
+        request: &CompletionRequest,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<CompletionResponse> {
+        let chat_request = self.build_chat_request(request, true);
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&chat_request)
+            .send()
+            .await
+            .context("failed to send streaming request")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_msg = response
+                .json::<ErrorResponse>()
+                .await
+                .map(|e| e.error.message)
+                .unwrap_or_else(|_| format!("HTTP {}", status));
+            bail!("streaming request failed (HTTP {}): {}", status, error_msg);
+        }
+
+        let body = response
+            .text()
+            .await
+            .context("failed to read streaming response body")?;
+
+        let _ = tx.send(StreamEvent::Start);
+
+        let mut full_content = String::new();
+        let mut total_prompt = 0u32;
+        let mut total_completion = 0u32;
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line == "data: [DONE]" {
+                continue;
+            }
+            if let Some(json_str) = line.strip_prefix("data: ") {
+                match serde_json::from_str::<SseChunk>(json_str) {
+                    Ok(chunk) => {
+                        if let Some(delta) = chunk
+                            .choices
+                            .first()
+                            .and_then(|c| c.delta.content.as_ref())
+                        {
+                            if !delta.is_empty() {
+                                full_content.push_str(delta);
+                                let _ = tx.send(StreamEvent::Delta(delta.clone()));
+                            }
+                        }
+                        if let Some(usage) = chunk.usage {
+                            total_prompt = usage.prompt_tokens;
+                            total_completion = usage.completion_tokens;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(line, error = %e, "failed to parse SSE chunk, skipping");
+                    }
+                }
+            }
+        }
+
+        let _ = tx.send(StreamEvent::End {
+            prompt_tokens: total_prompt,
+            completion_tokens: total_completion,
+            total_tokens: total_prompt + total_completion,
+        });
+
+        info!(
+            model = %self.model,
+            prompt_tokens = total_prompt,
+            completion_tokens = total_completion,
+            content_len = full_content.len(),
+            "streaming response complete"
+        );
+
+        Ok(CompletionResponse {
+            content: full_content,
+            usage_prompt_tokens: total_prompt,
+            usage_completion_tokens: total_completion,
+            model: self.model.clone(),
+            tool_calls: vec![],
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl ProviderAdapter for OpenAICompatibleAdapter {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         self.complete_with_retry(&request).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<CompletionResponse> {
+        self.complete_streaming_sse(&request, tx).await
     }
 
     fn capabilities(&self) -> &ProviderCapability {
@@ -456,5 +657,210 @@ mod tests {
         assert!(response.usage_prompt_tokens > 0);
         assert!(response.usage_completion_tokens > 0);
         assert!(!response.model.is_empty());
+    }
+
+    // --- SSE parsing unit tests ---
+
+    // T-SSE-001: parse a single SSE chunk with delta content
+    #[test]
+    fn sse_chunk_parse_delta() {
+        let json = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"},"index":0}]}"#;
+        let chunk: SseChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(
+            chunk.choices[0].delta.content.as_deref(),
+            Some("Hello")
+        );
+        assert!(chunk.usage.is_none());
+    }
+
+    // T-SSE-002: parse SSE chunk with empty delta (role-only chunk)
+    #[test]
+    fn sse_chunk_parse_empty_delta() {
+        let json = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"delta":{},"index":0}]}"#;
+        let chunk: SseChunk = serde_json::from_str(json).unwrap();
+        assert!(chunk.choices[0].delta.content.is_none());
+    }
+
+    // T-SSE-003: parse SSE chunk with usage stats (final chunk from some providers)
+    #[test]
+    fn sse_chunk_parse_with_usage() {
+        let json = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+        let chunk: SseChunk = serde_json::from_str(json).unwrap();
+        assert!(chunk.choices.is_empty());
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+    }
+
+    // T-SSE-004: simulate full SSE body parsing
+    #[test]
+    fn sse_body_parse_full_stream() {
+        let body = "\
+data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\n\
+\n\
+data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"index\":0}]}\n\
+\n\
+data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\" world\"},\"index\":0}]}\n\
+\n\
+data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{},\"index\":0}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2}}\n\
+\n\
+data: [DONE]\n";
+
+        let mut full_content = String::new();
+        let mut total_prompt = 0u32;
+        let mut total_completion = 0u32;
+        let mut delta_count = 0usize;
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line == "data: [DONE]" {
+                continue;
+            }
+            if let Some(json_str) = line.strip_prefix("data: ") {
+                if let Ok(chunk) = serde_json::from_str::<SseChunk>(json_str) {
+                    if let Some(delta) = chunk
+                        .choices
+                        .first()
+                        .and_then(|c| c.delta.content.as_ref())
+                    {
+                        if !delta.is_empty() {
+                            full_content.push_str(delta);
+                            delta_count += 1;
+                        }
+                    }
+                    if let Some(usage) = chunk.usage {
+                        total_prompt = usage.prompt_tokens;
+                        total_completion = usage.completion_tokens;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(full_content, "Hello world");
+        assert_eq!(delta_count, 2);
+        assert_eq!(total_prompt, 8);
+        assert_eq!(total_completion, 2);
+    }
+
+    // T-SSE-005: ChatRequest serializes stream field correctly
+    #[test]
+    fn chat_request_stream_field() {
+        let req = ChatRequest {
+            model: "test".into(),
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            stream: Some(true),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["stream"], true);
+
+        // When stream is None, field should be omitted
+        let req_no_stream = ChatRequest {
+            model: "test".into(),
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            stream: None,
+        };
+        let json2 = serde_json::to_value(&req_no_stream).unwrap();
+        assert!(json2.get("stream").is_none());
+    }
+
+    // T-SSE-006: build_chat_request sets stream field
+    #[test]
+    fn build_chat_request_stream() {
+        let adapter = OpenAICompatibleAdapter::new(
+            "test-key".into(),
+            "http://localhost".into(),
+            "test-model".into(),
+            10,
+        )
+        .unwrap();
+
+        let request = CompletionRequest {
+            system_prompt: "system".into(),
+            user_prompt: "hello".into(),
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            tool_results: None,
+            pending_tool_calls: None,
+        };
+
+        let chat_req_stream = adapter.build_chat_request(&request, true);
+        assert_eq!(chat_req_stream.stream, Some(true));
+
+        let chat_req_no_stream = adapter.build_chat_request(&request, false);
+        assert_eq!(chat_req_no_stream.stream, None);
+    }
+
+    // T-SSE-007: StreamEvent enum construction
+    #[test]
+    fn stream_event_variants() {
+        let start = StreamEvent::Start;
+        assert!(matches!(start, StreamEvent::Start));
+
+        let delta = StreamEvent::Delta("token".into());
+        match delta {
+            StreamEvent::Delta(s) => assert_eq!(s, "token"),
+            _ => panic!("expected Delta"),
+        }
+
+        let end = StreamEvent::End {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        };
+        match end {
+            StreamEvent::End {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            } => {
+                assert_eq!(prompt_tokens, 10);
+                assert_eq!(completion_tokens, 5);
+                assert_eq!(total_tokens, 15);
+            }
+            _ => panic!("expected End"),
+        }
+    }
+
+    // T-SSE-008: mpsc channel streaming simulation
+    #[tokio::test]
+    async fn stream_event_channel_flow() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
+
+        // Simulate what complete_streaming does
+        tx.send(StreamEvent::Start).unwrap();
+        tx.send(StreamEvent::Delta("Hello".into())).unwrap();
+        tx.send(StreamEvent::Delta(" world".into())).unwrap();
+        tx.send(StreamEvent::End {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            total_tokens: 12,
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], StreamEvent::Start));
+        match &events[1] {
+            StreamEvent::Delta(s) => assert_eq!(s, "Hello"),
+            _ => panic!("expected Delta"),
+        }
+        match &events[2] {
+            StreamEvent::Delta(s) => assert_eq!(s, " world"),
+            _ => panic!("expected Delta"),
+        }
+        assert!(matches!(events[3], StreamEvent::End { .. }));
     }
 }

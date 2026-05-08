@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use serde_json::Value;
 use tracing::{info, warn};
 
 use terra_core::IntelligenceCore;
@@ -28,6 +29,10 @@ use crate::skill::{SkillRegistry, SkillContext, code_editor_skill, test_runner_s
 use crate::session::SessionManager;
 use crate::session_store::{SessionRecord, SessionStore};
 use crate::tools::{ToolLevel, ToolRegistry};
+
+/// Callback for L2 tool confirmation.
+/// Receives a human-readable prompt string. Returns true if approved, false if declined.
+pub type ConfirmCallback = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Output from the REPL — UI-agnostic, renderable by any frontend.
 #[derive(Debug, Clone)]
@@ -61,11 +66,52 @@ pub struct Repl {
     pending_plan: Option<ExecutionPlan>,
     /// Skill registry for /skill command.
     skill_registry: SkillRegistry,
+    /// Last sleep consolidation report (for /accept and /reject).
+    last_consolidation: Option<crate::session::SleepConsolidationReport>,
+    /// Optional callback for L2 dangerous tool confirmation.
+    /// If None, L2 tools execute without confirmation (non-interactive / test mode).
+    confirm_callback: Option<ConfirmCallback>,
+    /// Skip confirmation for ShellExec when true.
+    pub auto_approve_shell: bool,
+    /// Skip confirmation for FileDelete when true.
+    pub auto_approve_delete: bool,
 }
 
 /// Approximate token count from text (chars / 4 is a rough heuristic).
 fn approx_tokens(text: &str) -> u32 {
     (text.len() / 4) as u32
+}
+
+/// Check if an L2 (dangerous) tool execution is approved.
+///
+/// Returns true if the operation should proceed, false if declined.
+/// - Auto-approve flags bypass the callback for their respective tool.
+/// - If no callback is set, the operation is allowed (non-interactive mode).
+fn check_l2_confirmation(
+    op_name: &str,
+    parsed_args: &Value,
+    auto_approve_shell: bool,
+    auto_approve_delete: bool,
+    confirm_callback: &Option<ConfirmCallback>,
+) -> bool {
+    match op_name {
+        "ShellExec" if auto_approve_shell => true,
+        "FileDelete" if auto_approve_delete => true,
+        "ShellExec" => {
+            let cmd = parsed_args.get("command").and_then(|c| c.as_str()).unwrap_or("?");
+            let prompt = format!("[Terra] Execute: `{}`? (y/N)", cmd);
+            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(true)
+        }
+        "FileDelete" => {
+            let path = parsed_args.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+            let prompt = format!("[Terra] Delete {}? (y/N)", path);
+            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(true)
+        }
+        _ => {
+            let prompt = format!("[Terra] Execute {} (dangerous)? (y/N)", op_name);
+            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(true)
+        }
+    }
 }
 
 /// Compaction threshold: 70% of max.
@@ -100,6 +146,10 @@ impl Repl {
             max_context_tokens: 128_000, // default, overridden by provider capability
             pending_plan: None,
             skill_registry,
+            last_consolidation: None,
+            confirm_callback: None,
+            auto_approve_shell: false,
+            auto_approve_delete: false,
         }
     }
 
@@ -111,6 +161,14 @@ impl Repl {
     /// Set the session store for persistence.
     pub fn with_store(mut self, store: SessionStore) -> Self {
         self.session_store = Some(store);
+        self
+    }
+
+    /// Set the confirmation callback for L2 dangerous tool operations.
+    /// When set, the callback is invoked before executing ShellExec or FileDelete.
+    /// If the callback returns false, the tool call is declined.
+    pub fn with_confirm_callback(mut self, cb: ConfirmCallback) -> Self {
+        self.confirm_callback = Some(cb);
         self
     }
 
@@ -219,6 +277,7 @@ impl Repl {
                     }
                     out.push(ReplOutput::Text("─────────────────────────────────".into()));
                     out.push(ReplOutput::Text("Use /accept N or /reject N to decide.".into()));
+                    self.last_consolidation = Some(report);
                 }
                 out.push(self.prompt());
                 out
@@ -520,19 +579,44 @@ impl Repl {
                         self.prompt(),
                     ],
                 };
-                // Write accepted candidate to L1 memory
+                // Get actual candidate content from the last consolidation report
+                let principle = match &self.last_consolidation {
+                    Some(report) => match report.candidates.get(idx) {
+                        Some(c) => c.principle.clone(),
+                        None => return vec![
+                            ReplOutput::Text(format!("Invalid index {}. Only {} candidates.", idx, report.candidates.len())),
+                            self.prompt(),
+                        ],
+                    },
+                    None => return vec![
+                        ReplOutput::Text("No consolidation report. Use /done first.".into()),
+                        self.prompt(),
+                    ],
+                };
+                // Write the actual principle to L1 memory
                 let key = format!("promoted:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
-                let content = format!("Accepted promotion candidate #{}", idx);
                 let cmd = Command::new("user", CommandOp::MemWrite {
                     key: key.clone(),
-                    content,
+                    content: principle.clone(),
                     scope: "project".into(),
                     level: "L1".into(),
                 });
                 self.executor.execute(cmd).await;
                 self.session.record_verdict(idx, true).await;
+                // Register pointer
+                let annotation = if principle.len() > 60 {
+                    format!("{}...", &principle[..57])
+                } else {
+                    principle.clone()
+                };
+                self.orchestrator.register_pointer(
+                    &key,
+                    terra_memory::types::Level::L1,
+                    terra_memory::types::Scope::Project,
+                    &annotation,
+                );
                 vec![
-                    ReplOutput::Notification(format!("Candidate #{} accepted → promoted to L1", idx)),
+                    ReplOutput::Notification(format!("Candidate #{} accepted → L1: \"{}\"", idx, annotation)),
                     self.prompt(),
                 ]
             }
@@ -643,12 +727,10 @@ impl Repl {
         let mut out = Vec::new();
 
         // --- 1. Determine tool level and build system prompt ---
+        // Both modes expose L2 tools. L2 (dangerous) tools are gated by confirmation callback.
+        // The difference between modes is Goal has SpecIR, plan, and drift detection — not permissions.
         let is_goal = self.session.mode().is_goal();
-        let tool_level = if is_goal {
-            ToolLevel::L1Write
-        } else {
-            ToolLevel::L0ReadOnly
-        };
+        let tool_level = ToolLevel::L2Dangerous;
 
         let tool_registry = ToolRegistry::with_builtins();
         let tool_defs: Vec<ProviderToolDef> = tool_registry
@@ -744,6 +826,15 @@ impl Repl {
             // Track tokens from this iteration
             prompt_tokens += completion.usage_prompt_tokens;
             completion_tokens += completion.usage_completion_tokens;
+
+            // Audit the LLM call
+            self.executor.audit_llm_call(
+                "main",
+                completion.usage_prompt_tokens,
+                completion.usage_completion_tokens,
+                completion.tool_calls.len(),
+                iteration,
+            );
 
             info!(
                 iteration,
@@ -872,6 +963,21 @@ impl Repl {
                 return format!("Error: invalid arguments for '{}': {}", tool_name, e);
             }
         };
+
+        // L2 confirmation gate: check before executing dangerous tools
+        if tool.level() == ToolLevel::L2Dangerous {
+            let approved = check_l2_confirmation(
+                &op_name,
+                &parsed_args,
+                self.auto_approve_shell,
+                self.auto_approve_delete,
+                &self.confirm_callback,
+            );
+            if !approved {
+                info!(tool_name, "L2 tool declined by user");
+                return "UserDeclined: operation cancelled by user".to_string();
+            }
+        }
 
         // Special case: PointerQuery is resolved locally, not through executor
         if op_name == "PointerQuery" {
@@ -1211,5 +1317,137 @@ mod tests {
             _ => None,
         }).unwrap();
         assert!(prompt.contains("terra"), "should show 'terra' in conversation mode");
+    }
+
+    // ─── L2 Confirmation Tests ──────────────────────────────────
+
+    // T-CONF-001: ShellExec declined when callback returns false
+    #[test]
+    fn l2_shell_exec_declined() {
+        let args = serde_json::json!({"command": "rm -rf /", "timeout_ms": 30000});
+        let cb: ConfirmCallback = Arc::new(|_| false);
+        let approved = check_l2_confirmation("ShellExec", &args, false, false, &Some(cb));
+        assert!(!approved, "ShellExec should be declined when callback returns false");
+    }
+
+    // T-CONF-002: ShellExec approved when callback returns true
+    #[test]
+    fn l2_shell_exec_approved() {
+        let args = serde_json::json!({"command": "ls", "timeout_ms": 30000});
+        let cb: ConfirmCallback = Arc::new(|_| true);
+        let approved = check_l2_confirmation("ShellExec", &args, false, false, &Some(cb));
+        assert!(approved, "ShellExec should be approved when callback returns true");
+    }
+
+    // T-CONF-003: FileDelete declined when callback returns false
+    #[test]
+    fn l2_file_delete_declined() {
+        let args = serde_json::json!({"path": "/important/file.txt"});
+        let cb: ConfirmCallback = Arc::new(|_| false);
+        let approved = check_l2_confirmation("FileDelete", &args, false, false, &Some(cb));
+        assert!(!approved, "FileDelete should be declined when callback returns false");
+    }
+
+    // T-CONF-004: No callback = allowed (non-interactive mode)
+    #[test]
+    fn l2_no_callback_allows_execution() {
+        let args = serde_json::json!({"command": "echo hello"});
+        let approved = check_l2_confirmation("ShellExec", &args, false, false, &None);
+        assert!(approved, "should allow execution when no callback is set");
+    }
+
+    // T-CONF-005: Prompt includes the command for ShellExec
+    #[test]
+    fn l2_shell_exec_prompt_contains_command() {
+        let args = serde_json::json!({"command": "git status", "timeout_ms": 30000});
+        let received_prompt = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let prompt_capture = received_prompt.clone();
+        let cb: ConfirmCallback = Arc::new(move |prompt: &str| {
+            *prompt_capture.lock().unwrap() = prompt.to_string();
+            true
+        });
+        check_l2_confirmation("ShellExec", &args, false, false, &Some(cb));
+        let prompt = received_prompt.lock().unwrap();
+        assert!(prompt.contains("git status"), "prompt should contain the command");
+        assert!(prompt.contains("[Terra]"), "prompt should have [Terra] prefix");
+    }
+
+    // T-CONF-006: Prompt includes the path for FileDelete
+    #[test]
+    fn l2_file_delete_prompt_contains_path() {
+        let args = serde_json::json!({"path": "/tmp/to_delete.txt"});
+        let received_prompt = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let prompt_capture = received_prompt.clone();
+        let cb: ConfirmCallback = Arc::new(move |prompt: &str| {
+            *prompt_capture.lock().unwrap() = prompt.to_string();
+            false
+        });
+        check_l2_confirmation("FileDelete", &args, false, false, &Some(cb));
+        let prompt = received_prompt.lock().unwrap();
+        assert!(prompt.contains("/tmp/to_delete.txt"), "prompt should contain the file path");
+    }
+
+    // T-CONF-007: auto_approve_shell skips callback
+    #[test]
+    fn l2_auto_approve_shell_skips_callback() {
+        let args = serde_json::json!({"command": "ls"});
+        // Callback that would decline -- but auto_approve should skip it
+        let cb: ConfirmCallback = Arc::new(|_| false);
+        let approved = check_l2_confirmation("ShellExec", &args, true, false, &Some(cb));
+        assert!(approved, "auto_approve_shell should skip the callback");
+    }
+
+    // T-CONF-008: auto_approve_delete skips callback
+    #[test]
+    fn l2_auto_approve_delete_skips_callback() {
+        let args = serde_json::json!({"path": "/tmp/file.txt"});
+        let cb: ConfirmCallback = Arc::new(|_| false);
+        let approved = check_l2_confirmation("FileDelete", &args, false, true, &Some(cb));
+        assert!(approved, "auto_approve_delete should skip the callback");
+    }
+
+    // T-CONF-009: auto_approve_shell does NOT affect FileDelete
+    #[test]
+    fn l2_auto_approve_shell_does_not_affect_delete() {
+        let args = serde_json::json!({"path": "/tmp/file.txt"});
+        let cb: ConfirmCallback = Arc::new(|_| false);
+        let approved = check_l2_confirmation("FileDelete", &args, true, false, &Some(cb));
+        assert!(!approved, "auto_approve_shell should not affect FileDelete");
+    }
+
+    // T-CONF-010: unknown L2 tool falls through to generic prompt
+    #[test]
+    fn l2_unknown_dangerous_tool_prompts() {
+        let args = serde_json::json!({});
+        let received_prompt = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let prompt_capture = received_prompt.clone();
+        let cb: ConfirmCallback = Arc::new(move |prompt: &str| {
+            *prompt_capture.lock().unwrap() = prompt.to_string();
+            false
+        });
+        let approved = check_l2_confirmation("SomeNewDangerousTool", &args, false, false, &Some(cb));
+        assert!(!approved);
+        let prompt = received_prompt.lock().unwrap();
+        assert!(prompt.contains("SomeNewDangerousTool"), "prompt should name the tool");
+        assert!(prompt.contains("dangerous"), "prompt should indicate danger");
+    }
+
+    // T-CONF-011: with_confirm_callback builder pattern works
+    #[test]
+    fn with_confirm_callback_sets_callback() {
+        let (repl, _dir) = test_repl();
+        assert!(repl.confirm_callback.is_none(), "default should have no callback");
+
+        let cb: ConfirmCallback = Arc::new(|_| true);
+        let repl = repl.with_confirm_callback(cb);
+        assert!(repl.confirm_callback.is_some(), "should have callback after with_confirm_callback");
+    }
+
+    // T-CONF-012: auto_approve defaults to false
+    #[test]
+    fn auto_approve_defaults_false() {
+        let (repl, _dir) = test_repl();
+        assert!(!repl.auto_approve_shell, "auto_approve_shell should default to false");
+        assert!(!repl.auto_approve_delete, "auto_approve_delete should default to false");
     }
 }

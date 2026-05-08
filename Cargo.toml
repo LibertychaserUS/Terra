@@ -12,6 +12,7 @@ members = [
     "crates/terra-trace",
     "crates/terra-executor",
     "crates/terra-cli",
+    "crates/terra-mcp",
 ]
 
 [workspace.package]

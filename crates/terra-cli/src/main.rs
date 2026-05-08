@@ -64,6 +64,9 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Start MCP (Model Context Protocol) server on stdio.
+    Mcp,
 }
 
 #[derive(clap::Subcommand)]
@@ -430,8 +433,20 @@ max_candidates = 10
                 return Ok(());
             }
 
+            // L2 confirmation callback: prompts user in terminal for dangerous operations.
+            let confirm_cb: terra_agents::repl::ConfirmCallback = Arc::new(|prompt: &str| {
+                use std::io::{Write, BufRead};
+                print!("\n  \x1b[33m{}\x1b[0m ", prompt);
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer).ok();
+                let answer = answer.trim().to_lowercase();
+                answer == "y" || answer == "yes"
+            });
+
             let mut repl = Repl::new(executor, core)
-                .with_store(SessionStore::new(&terra_dir));
+                .with_store(SessionStore::new(&terra_dir))
+                .with_confirm_callback(confirm_cb);
             let renderer = auto_renderer(&provider_name);
 
             // Rustyline config
@@ -598,6 +613,13 @@ max_candidates = 10
                 println!("Set {} = {} in {}", key, value, config_path.display());
             }
         },
+
+        Some(Commands::Mcp) => {
+            let orchestrator = bootstrap();
+            let executor = orchestrator.executor().clone();
+            let server = terra_mcp::McpServer::new(executor);
+            server.run_stdio().await;
+        }
     }
 
     Ok(())
