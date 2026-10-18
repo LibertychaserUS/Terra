@@ -281,11 +281,13 @@ terra config set provider.api_key "..." --project # .terra/config.toml (git-igno
 terra init                    # Create .terra/ (constitution, config, prompt, .gitignore)
 terra chat                    # Interactive session (also: just `terra`)
 terra chat --tui              # Full-screen terminal UI
-terra run --task "Explain this project's architecture"
+terra run --task "Add input validation to src/main.rs"   # One-shot task
 terra doctor                  # Environment and provider check
 terra trace -n 20             # Last 20 audit entries for this project
 terra mcp                     # MCP server on stdio
 ```
+
+A `terra run` task has to name its target, such as a file. Open-ended tasks ("Explain this project's architecture") are blocked by the Specification cage unless `require_spec_complete = false` is set in `.terra/constitution.toml`.
 
 ---
 
@@ -687,11 +689,13 @@ terra config set provider.api_key "..." --project # .terra/config.toml（已被 
 terra init                    # 创建 .terra/（宪法、配置、提示词、.gitignore）
 terra chat                    # 交互式会话（直接运行 `terra` 亦可）
 terra chat --tui              # 全屏终端界面
-terra run --task "解释这个项目的架构"
+terra run --task "为 src/main.rs 添加输入校验"   # 单次任务
 terra doctor                  # 环境与供应商检查
 terra trace -n 20             # 本项目最近 20 条审计记录
 terra mcp                     # stdio 上的 MCP 服务
 ```
+
+`terra run` 的任务需写明目标，例如文件；文件名前后要留空格。开放式任务（如"解释这个项目的架构"）会被规格笼拦下，除非在 `.terra/constitution.toml` 中设置 `require_spec_complete = false`。
 
 ---
 
