@@ -768,4 +768,43 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["resources"].as_array().unwrap().len(), 0);
     }
+    /// Build a server whose sandbox protects `.terra/constitution.toml`.
+    fn protected_server() -> (McpServer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".terra")).unwrap();
+        std::fs::write(root.join(".terra/constitution.toml"), "original").unwrap();
+        let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+        let artifacts = Arc::new(ArtifactStore::new(root.clone()));
+        let audit = Arc::new(AuditLog::new());
+        let provider: Arc<dyn terra_providers::adapter::ProviderAdapter> =
+            Arc::new(DryRunAdapter::new());
+        let sandbox = SandboxGuard::new(root.clone(), vec![root.join(".terra/constitution.toml")]);
+        let caging = Arc::new(CagingEngine::new(vec![Box::new(ActionCage::new(sandbox))]));
+        let exec = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
+        (McpServer::new(exec), dir)
+    }
+
+    // Regression: `..` segments must not escape the sandbox or reach protected files.
+    #[tokio::test]
+    async fn mcp_file_write_dot_dot_cannot_escape_sandbox() {
+        let (server, dir) = protected_server();
+        let root = dir.path();
+        let escape = format!("{}/../terra_mcp_escape_test.txt", root.display());
+        let sneaky = format!("{}/.terra/../.terra/constitution.toml", root.display());
+
+        for (id, path) in [(10, escape.as_str()), (11, sneaky.as_str())] {
+            let req = rpc_request(id, "tools/call", json!({
+                "name": "FileWrite",
+                "arguments": { "path": path, "content": "pwned" }
+            }));
+            let resp = server.dispatch(&req).await.unwrap();
+            let err = resp.error.unwrap_or_else(|| panic!("write to {} should be blocked", path));
+            assert_eq!(err.data.unwrap()["cage_block"], true);
+        }
+
+        assert!(!root.parent().unwrap().join("terra_mcp_escape_test.txt").exists());
+        let constitution = std::fs::read_to_string(root.join(".terra/constitution.toml")).unwrap();
+        assert_eq!(constitution, "original");
+    }
 }
