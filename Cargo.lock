@@ -2065,7 +2065,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "terra-agents"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "terra-caging"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "terra-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2121,6 +2121,7 @@ dependencies = [
  "tempfile",
  "terra-agents",
  "terra-caging",
+ "terra-compile",
  "terra-core",
  "terra-executor",
  "terra-mcp",
@@ -2137,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "terra-compile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2150,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "terra-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2161,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "terra-executor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2183,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "terra-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2203,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "terra-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2223,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "terra-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2237,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "terra-providers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2252,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "terra-trace"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2269,7 +2270,7 @@ dependencies = [
 
 [[package]]
 name = "terra-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "rmp-serde",

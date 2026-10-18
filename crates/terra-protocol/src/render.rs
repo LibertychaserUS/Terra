@@ -119,6 +119,20 @@ pub fn render_command(cmd: &Command) -> String {
                 lines.push(format!("- **Timeout**: {}ms", t));
             }
         }
+        CommandOp::ExecuteTask { spec_id, intent, open_questions } => {
+            lines.push("- **Op**: execute_task".to_string());
+            lines.push(format!("- **Spec**: {}", spec_id));
+            lines.push(format!("- **Intent**: {}", intent));
+            for q in open_questions {
+                lines.push(format!("- **Open question**: {}", q));
+            }
+        }
+        CommandOp::ClaimComplete { goal, verified, evidence } => {
+            lines.push("- **Op**: claim_complete".to_string());
+            lines.push(format!("- **Goal**: {}", goal));
+            lines.push(format!("- **Verified**: {}", verified));
+            lines.push(format!("- **Evidence**: {}", evidence));
+        }
     }
 
     lines.join("\n")

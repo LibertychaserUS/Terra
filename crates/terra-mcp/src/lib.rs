@@ -148,7 +148,7 @@ impl McpServer {
                 },
                 "serverInfo": {
                     "name": "terra",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             })),
             error: None,
@@ -619,7 +619,7 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "terra");
-        assert_eq!(result["serverInfo"]["version"], "0.1.0");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
         assert!(result["capabilities"]["tools"].is_object());
         assert!(result["capabilities"]["resources"].is_object());
     }

@@ -29,6 +29,18 @@ impl ProjectType {
             ProjectType::Unknown => "Unknown",
         }
     }
+
+    /// Conventional test command, used by `/verify` when none is given.
+    pub fn test_command(&self) -> Option<&'static str> {
+        match self {
+            ProjectType::Rust => Some("cargo test"),
+            ProjectType::JavaScript | ProjectType::TypeScript => Some("npm test"),
+            ProjectType::Python => Some("pytest"),
+            ProjectType::Go => Some("go test ./..."),
+            // Maven or Gradle: no single convention to assume.
+            ProjectType::Java | ProjectType::Unknown => None,
+        }
+    }
 }
 
 /// A file entry in the project tree.
@@ -95,7 +107,7 @@ impl ProjectContext {
 }
 
 /// Detect project type from manifest files.
-fn detect_project_type(root: &Path) -> ProjectType {
+pub fn detect_project_type(root: &Path) -> ProjectType {
     if root.join("Cargo.toml").exists() { return ProjectType::Rust; }
     if root.join("package.json").exists() {
         if root.join("tsconfig.json").exists() { return ProjectType::TypeScript; }
@@ -329,6 +341,16 @@ mod tests {
         // Unknown
         let dir3 = tempfile::tempdir().unwrap();
         assert_eq!(detect_project_type(dir3.path()), ProjectType::Unknown);
+    }
+
+    #[test]
+    fn test_command_per_project_type() {
+        assert_eq!(ProjectType::Rust.test_command(), Some("cargo test"));
+        assert_eq!(ProjectType::TypeScript.test_command(), Some("npm test"));
+        assert_eq!(ProjectType::Python.test_command(), Some("pytest"));
+        assert_eq!(ProjectType::Go.test_command(), Some("go test ./..."));
+        assert_eq!(ProjectType::Java.test_command(), None);
+        assert_eq!(ProjectType::Unknown.test_command(), None);
     }
 
     #[test]

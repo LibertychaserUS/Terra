@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tracing::info;
 
-use terra_compile::{SpecIR, ExecutionPlan, PlanStep, StepStatus};
+use terra_compile::{SpecIR, ExecutionPlan, PlanStep, StepStatus, TermTable};
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_memory::PointerTable;
 use terra_memory::types::{Level, Scope};
-use terra_protocol::command::{Command, CommandOp};
+use terra_protocol::command::{Command, CommandOp, CommandStatus};
 
 /// Result of a full orchestration run.
 #[derive(Debug)]
@@ -18,9 +18,13 @@ pub struct RunResult {
     pub provider_id: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Commands this run recorded in the audit log.
     pub audit_entry_count: usize,
     pub ic_rules_applied: usize,
+    /// Commands of this run that every cage let through.
     pub cage_checks_passed: usize,
+    /// Why the task did not run (a cage block), if it was stopped.
+    pub blocked: Option<String>,
 }
 
 /// Result of a single goal-mode turn through the pipeline.
@@ -87,6 +91,23 @@ impl Orchestrator {
             pt.unregister(key);
         }
         self.executor.decrement_memory_ref(key);
+    }
+
+    /// Specification gate: ask the cages whether a task with this spec may run.
+    ///
+    /// Goes through the executor like any command, so the decision is audited.
+    /// `Err` carries the block reason (the spec has open questions).
+    pub async fn check_spec(&self, spec: &SpecIR) -> Result<(), String> {
+        let cmd = Command::new("main", CommandOp::ExecuteTask {
+            spec_id: spec.spec_id.clone(),
+            intent: spec.intent.clone(),
+            open_questions: spec.open_questions.clone(),
+        });
+        let result = self.executor.execute(cmd).await;
+        match result.status {
+            CommandStatus::Ok => Ok(()),
+            _ => Err(result.error.unwrap_or_else(|| "blocked".into())),
+        }
     }
 
     /// Build IC-enriched system prompt for Goal Mode.
@@ -202,12 +223,14 @@ impl Orchestrator {
         })
     }
 
-    /// Propose an ExecutionPlan for a goal by asking LLM.
+    /// Propose an ExecutionPlan for a goal spec by asking LLM.
     ///
     /// Returns a plan with steps the LLM suggests. User should confirm/modify
     /// before execution. Falls back to a default plan if LLM output can't be parsed.
-    pub async fn propose_plan(&self, goal: &str) -> Result<ExecutionPlan> {
-        let spec = SpecIR::from_task_description(goal);
+    /// The plan keeps `spec`, so `/execute` is gated on the goal's own open questions.
+    pub async fn propose_plan(&self, spec: &SpecIR) -> Result<ExecutionPlan> {
+        let goal = spec.intent.as_str();
+        let spec = spec.clone();
 
         let prompt = format!(
             "Given this coding task, propose an execution plan as JSON.\n\
@@ -281,8 +304,10 @@ impl Orchestrator {
 
     /// Run a task through the complete canonical pipeline (single-shot).
     pub async fn run(&self, task_description: &str) -> Result<RunResult> {
-        // 1. Language Compilation → Spec IR
-        let spec = SpecIR::from_task_description(task_description);
+        let audit_start = self.executor.audit().last_seq();
+
+        // 1. Language Compilation → Spec IR (lexical + terminology passes)
+        let spec = SpecIR::compile_full(task_description, &TermTable::default_coding(), None);
         info!(spec_id = %spec.spec_id, intent = %spec.intent, "spec compiled");
 
         // 2. Intelligence Core consultation
@@ -323,19 +348,30 @@ impl Orchestrator {
         );
         self.executor.execute(start_cmd).await;
 
-        // 4. Caging gate — check spec completeness (FR-004)
-        //    The CagingEngine is inside the Executor. We trigger it by
-        //    issuing a command that the cages will check.
-        let cage_cmd = Command::new(
-            "main",
-            CommandOp::TraceEvent {
-                event_type: "cage_check".into(),
-                data: serde_json::json!({
-                    "spec_complete": spec.is_complete(),
-                }),
-            },
-        );
-        self.executor.execute(cage_cmd).await;
+        // 4. Caging gate — the Specification cage blocks a spec with open
+        //    questions (FR-004). A blocked task never reaches the worker.
+        if let Err(reason) = self.check_spec(&spec).await {
+            let blocked_cmd = Command::new(
+                "main",
+                CommandOp::TraceCheckpoint {
+                    title: "task_blocked".into(),
+                    summary: reason.clone(),
+                },
+            );
+            self.executor.execute(blocked_cmd).await;
+            let (audit_entry_count, cage_checks_passed) = self.audit_counts_since(audit_start);
+            return Ok(RunResult {
+                spec,
+                worker_response: String::new(),
+                provider_id: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                audit_entry_count,
+                ic_rules_applied: ic_rules_count,
+                cage_checks_passed,
+                blocked: Some(reason),
+            });
+        }
 
         // 5. Memory search for relevant context (via Executor)
         let search_cmd = Command::new(
@@ -431,16 +467,27 @@ impl Orchestrator {
         );
         self.executor.execute(complete_cmd).await;
 
+        let (audit_entry_count, cage_checks_passed) = self.audit_counts_since(audit_start);
         Ok(RunResult {
             spec,
             worker_response,
             provider_id,
             prompt_tokens,
             completion_tokens,
-            audit_entry_count: 6, // start + cage + search + dispatch + provider + complete
+            audit_entry_count,
             ic_rules_applied: ic_rules_count,
-            cage_checks_passed: 1,
+            cage_checks_passed,
+            blocked: None,
         })
+    }
+
+    /// Audit entries recorded after `seq`, and how many of them the cages allowed.
+    fn audit_counts_since(&self, seq: u64) -> (usize, usize) {
+        let entries = self.executor.audit().entries_after(seq);
+        let passed = entries.iter()
+            .filter(|e| e.result.as_ref().is_some_and(|r| r.status != CommandStatus::PermissionDenied))
+            .count();
+        (entries.len(), passed)
     }
 }
 
@@ -517,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn main_agent_audits_result() {
         let (orch, _dir) = test_orchestrator();
-        let result = orch.run("fix the auth bug").await.unwrap();
+        let result = orch.run("fix the auth bug in src/auth.rs").await.unwrap();
         // Orchestrator records audit entries at each step
         assert!(result.audit_entry_count >= 5, "audit entries should be recorded");
         // Worker response is inspected (not just passed through)
@@ -537,6 +584,59 @@ mod tests {
         assert!(result.audit_entry_count >= 5);
     }
 
+    fn ops_in_audit(orch: &Orchestrator) -> Vec<(String, CommandStatus)> {
+        orch.executor().audit().entries().iter()
+            .map(|e| {
+                let name = match &e.command.op {
+                    CommandOp::ExecuteTask { .. } => "ExecuteTask",
+                    CommandOp::ProviderCall { .. } => "ProviderCall",
+                    _ => "other",
+                };
+                (name.to_string(), e.result.as_ref().unwrap().status.clone())
+            })
+            .collect()
+    }
+
+    // The specification cage stops a task whose spec has open questions
+    // before the worker is called.
+    #[tokio::test]
+    async fn run_with_open_questions_is_blocked_before_the_provider_call() {
+        let (orch, _dir) = test_orchestrator();
+        let result = orch.run("refactor the module").await.unwrap();
+
+        assert!(!result.spec.is_complete());
+        let ops = ops_in_audit(&orch);
+        assert!(
+            ops.contains(&("ExecuteTask".into(), CommandStatus::PermissionDenied)),
+            "spec gate should be denied: {:?}", ops
+        );
+        assert!(!ops.iter().any(|(op, _)| op == "ProviderCall"), "no worker call: {:?}", ops);
+        assert!(result.blocked.as_deref().unwrap_or("").contains("specification"));
+        assert_eq!(result.audit_entry_count, ops.len());
+    }
+
+    #[tokio::test]
+    async fn run_with_a_named_file_passes_the_spec_gate() {
+        let (orch, _dir) = test_orchestrator();
+        let result = orch.run("fix the empty password bug in auth.py line 42").await.unwrap();
+
+        assert!(result.blocked.is_none());
+        let ops = ops_in_audit(&orch);
+        assert!(ops.contains(&("ExecuteTask".into(), CommandStatus::Ok)), "{:?}", ops);
+        assert!(ops.contains(&("ProviderCall".into(), CommandStatus::Ok)), "{:?}", ops);
+        assert_eq!(result.audit_entry_count, ops.len());
+        assert_eq!(result.cage_checks_passed, ops.len());
+    }
+
+    #[tokio::test]
+    async fn plan_keeps_the_goal_spec() {
+        let (orch, _dir) = test_orchestrator();
+        let spec = SpecIR::compile("add logging to auth.rs", &terra_compile::TermTable::default_coding());
+        let plan = orch.propose_plan(&spec).await.unwrap();
+        assert_eq!(plan.spec.spec_id, spec.spec_id);
+        assert!(plan.spec.is_complete());
+    }
+
     // T-AG-016: empty_task_handled
     #[tokio::test]
     async fn empty_task_handled() {
@@ -550,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_all_stages_invoked() {
         let (orch, _dir) = test_orchestrator();
-        let result = orch.run("fix the auth bug").await.unwrap();
+        let result = orch.run("fix the auth bug in src/auth.rs").await.unwrap();
         assert!(result.ic_rules_applied > 10);
         assert!(result.audit_entry_count >= 5);
         assert!(result.worker_response.contains("DRY_RUN"));
@@ -560,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_provider_through_executor() {
         let (orch, _dir) = test_orchestrator();
-        let result = orch.run("test").await.unwrap();
+        let result = orch.run("test main.rs").await.unwrap();
         assert!(result.worker_response.contains("DRY_RUN"));
         assert_eq!(result.provider_id, "dry_run");
     }
@@ -569,7 +669,8 @@ mod tests {
     #[tokio::test]
     async fn goal_generates_plan() {
         let (orch, _dir) = test_orchestrator();
-        let plan = orch.propose_plan("add logging to auth.rs").await.unwrap();
+        let spec = SpecIR::compile("add logging to auth.rs", &terra_compile::TermTable::default_coding());
+        let plan = orch.propose_plan(&spec).await.unwrap();
         assert!(!plan.steps.is_empty(), "plan should have steps");
         assert_eq!(plan.spec.intent, "add logging to auth.rs");
         // DryRun won't produce real JSON, so fallback step expected
@@ -580,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn plan_versions_trackable() {
         let (orch, _dir) = test_orchestrator();
-        let mut plan = orch.propose_plan("fix bug").await.unwrap();
+        let mut plan = orch.propose_plan(&SpecIR::from_task_description("fix bug")).await.unwrap();
         let v1 = plan.version;
 
         plan.add_step(PlanStep {
@@ -599,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn spec_mutable_after_compile() {
         let (orch, _dir) = test_orchestrator();
-        let mut plan = orch.propose_plan("fix bug").await.unwrap();
+        let mut plan = orch.propose_plan(&SpecIR::from_task_description("fix bug")).await.unwrap();
         let v1 = plan.version;
 
         let mut new_spec = plan.spec.clone();

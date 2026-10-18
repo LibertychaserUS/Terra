@@ -28,7 +28,7 @@ pub mod greeter;
 pub use orchestrator::Orchestrator;
 pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
 pub use dispatch::{ModelDispatcher, ModelCapability, DispatchParams};
-pub use session::{SessionManager, SessionMode, SessionStatus, SleepSettings};
+pub use session::{SessionManager, SessionMode, SessionStatus, SleepSettings, Verification};
 pub use drift::{DriftDetector, DriftConfig};
 pub use profile::{AgentProfile, MemoryView};
 pub use subagent::SubAgentRunner;

@@ -27,7 +27,7 @@ use terra_compile::ExecutionPlan;
 
 use crate::orchestrator::Orchestrator;
 use crate::skill::{SkillRegistry, SkillContext, code_editor_skill, test_runner_skill, memory_inspector_skill};
-use crate::session::SessionManager;
+use crate::session::{SessionManager, SessionMode, SleepConsolidationReport, VERIFIER_AGENT};
 use crate::session_store::{SessionRecord, SessionStore};
 use crate::tools::{ToolLevel, ToolRegistry};
 
@@ -137,6 +137,15 @@ const COMPACTION_THRESHOLD: f32 = 0.70;
 
 /// Maximum iterations for the tool-call agent loop.
 const MAX_AGENT_LOOP_ITERATIONS: u32 = 20;
+
+/// Time limit for a `/verify` command (test suites can be slow).
+const VERIFY_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+
+/// Lines of command output shown after `/verify`.
+const VERIFY_OUTPUT_LINES: usize = 5;
+
+/// How to answer a spec's open questions: Goal Mode has one goal at a time.
+const RESTATE_GOAL_HINT: &str = "Restate the goal with the missing details: /abandon, then /goal \"...\".";
 
 /// A single turn in the conversation.
 #[derive(Debug, Clone)]
@@ -269,10 +278,21 @@ impl Repl {
                     ];
                 }
                 match self.session.enter_goal(arg).await {
-                    Ok(()) => vec![
-                        ReplOutput::Notification(format!("Goal Mode activated: {}", arg)),
-                        self.prompt(),
-                    ],
+                    Ok(()) => {
+                        let mut out = vec![
+                            ReplOutput::Notification(format!("Goal Mode activated: {}", arg)),
+                        ];
+                        if let SessionMode::Goal { spec, .. } = self.session.mode() {
+                            if !spec.is_complete() {
+                                out.push(ReplOutput::Text(
+                                    "Open questions (the specification cage blocks /execute until they are answered):".into(),
+                                ));
+                                out.extend(spec.open_questions.iter().map(|q| ReplOutput::Text(format!("  - {}", q))));
+                            }
+                        }
+                        out.push(self.prompt());
+                        out
+                    }
                     Err(e) => vec![
                         ReplOutput::Text(format!("Error: {}", e)),
                         self.prompt(),
@@ -280,30 +300,75 @@ impl Repl {
                 }
             }
             "/done" => {
-                let report = self.session.exit_goal().await;
-                self.pending_plan = None;
-                let mut out = vec![
-                    ReplOutput::Notification("Goal Mode ended. Back to Conversation.".into()),
-                ];
-                if !report.candidates.is_empty() {
-                    out.push(ReplOutput::Text(format!(
-                        "Sleep consolidation: {} candidates from {} actions",
-                        report.candidates.len(), report.action_count
-                    )));
-                    out.push(ReplOutput::Text("─────────────────────────────────".into()));
-                    for (i, c) in report.candidates.iter().enumerate() {
-                        out.push(ReplOutput::Text(format!(
-                            "  [{}] {}", i, c.principle,
-                        )));
-                        out.push(ReplOutput::Text(format!(
-                            "      from {} actions | IC rule: {}",
-                            c.derived_from.len(),
-                            c.ic_rule_id.as_deref().unwrap_or("none"),
-                        )));
+                let Some(verification) = self.session.verification() else {
+                    return vec![
+                        ReplOutput::Text("Not in Goal Mode. Use /goal first.".into()),
+                        self.prompt(),
+                    ];
+                };
+                match self.session.complete_goal().await {
+                    Ok(report) => self.goal_exit_output(
+                        format!("Goal complete ({}). Back to Conversation.", verification.describe()),
+                        report,
+                    ),
+                    Err(reason) => vec![
+                        ReplOutput::Notification(format!("Goal not closed: {}", reason)),
+                        ReplOutput::Text(format!("  {}", verification.describe())),
+                        ReplOutput::Text(
+                            "  Run /verify [command] to check the work, or /abandon to leave Goal Mode without claiming it is done.".into(),
+                        ),
+                        self.prompt(),
+                    ],
+                }
+            }
+            "/abandon" => match self.session.abandon_goal().await {
+                Ok(report) => self.goal_exit_output(
+                    "Goal abandoned (not claimed complete). Back to Conversation.".into(),
+                    report,
+                ),
+                Err(_) => vec![ReplOutput::Text("Not in Goal Mode.".into()), self.prompt()],
+            },
+            "/verify" => {
+                let command = if arg.is_empty() {
+                    match crate::codebase::detect_project_type(&self.project_root).test_command() {
+                        Some(c) => c.to_string(),
+                        None => return vec![
+                            ReplOutput::Text("Usage: /verify <command> (no test command detected for this project)".into()),
+                            self.prompt(),
+                        ],
                     }
-                    out.push(ReplOutput::Text("─────────────────────────────────".into()));
-                    out.push(ReplOutput::Text("Use /accept N or /reject N to decide.".into()));
-                    self.last_consolidation = Some(report);
+                } else {
+                    arg.to_string()
+                };
+                // Run as the verifier, not the agent: only this counts as
+                // verification of the goal's changes.
+                let cmd = Command::new(VERIFIER_AGENT, CommandOp::ShellExec {
+                    command: command.clone(),
+                    workdir: Some(self.project_root.to_string_lossy().to_string()),
+                    timeout_ms: Some(VERIFY_TIMEOUT_MS),
+                });
+                let result = self.executor.execute(cmd).await;
+                let (headline, output) = match result.status {
+                    terra_types::CommandStatus::Ok => {
+                        let data = result.data.unwrap_or_default();
+                        let text = format!(
+                            "{}{}",
+                            data["stdout"].as_str().unwrap_or(""),
+                            data["stderr"].as_str().unwrap_or(""),
+                        );
+                        (format!("Verification passed: `{}`", command), text)
+                    }
+                    terra_types::CommandStatus::PermissionDenied => {
+                        (format!("Verification blocked: {}", result.error.unwrap_or_default()), String::new())
+                    }
+                    _ => (format!("Verification failed: `{}`", command), result.error.unwrap_or_default()),
+                };
+                let mut out = vec![ReplOutput::Notification(headline)];
+                let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+                let tail = &lines[lines.len().saturating_sub(VERIFY_OUTPUT_LINES)..];
+                out.extend(tail.iter().map(|l| ReplOutput::Text(format!("  {}", truncate_ellipsis(l, 160)))));
+                if let Some(v) = self.session.verification() {
+                    out.push(ReplOutput::Text(format!("Goal: {}", v.describe())));
                 }
                 out.push(self.prompt());
                 out
@@ -494,12 +559,12 @@ impl Repl {
                         self.prompt(),
                     ];
                 }
-                // Try to propose a plan for the current goal
-                let goal = match self.session.mode() {
-                    crate::session::SessionMode::Goal { spec, .. } => spec.intent.clone(),
-                    _ => String::new(),
+                // Propose a plan for the current goal, keeping its spec
+                let spec = match self.session.mode() {
+                    SessionMode::Goal { spec, .. } => spec.clone(),
+                    SessionMode::Conversation => unreachable!("checked above"),
                 };
-                match self.orchestrator.propose_plan(&goal).await {
+                match self.orchestrator.propose_plan(&spec).await {
                     Ok(plan) => {
                         let display = plan.display();
                         self.pending_plan = Some(plan);
@@ -523,6 +588,13 @@ impl Repl {
                         self.prompt(),
                     ],
                 };
+                if let Err(reason) = self.orchestrator.check_spec(&plan.spec).await {
+                    let mut out = vec![ReplOutput::Notification(format!("Plan not run: {}", reason))];
+                    out.extend(plan.spec.open_questions.iter().map(|q| ReplOutput::Text(format!("  - {}", q))));
+                    out.push(ReplOutput::Text(RESTATE_GOAL_HINT.into()));
+                    out.push(self.prompt());
+                    return out;
+                }
                 let mut out = vec![
                     ReplOutput::Notification(format!("Executing plan ({} steps)...", plan.steps.len())),
                 ];
@@ -696,7 +768,9 @@ impl Repl {
                 vec![
                     ReplOutput::Text("Commands:".into()),
                     ReplOutput::Text("  /goal \"desc\"   — Enter Goal Mode (/g)".into()),
-                    ReplOutput::Text("  /done           — Exit Goal Mode, trigger sleep (/d)".into()),
+                    ReplOutput::Text("  /done           — Claim the goal is done; changes need /verify (/d)".into()),
+                    ReplOutput::Text("  /verify [cmd]   — Run tests (project default) to verify the goal".into()),
+                    ReplOutput::Text("  /abandon        — Leave Goal Mode without claiming it is done".into()),
                     ReplOutput::Text("  /status         — Show mode, drift, tokens (/s)".into()),
                     ReplOutput::Text("  /plan           — Show/propose execution plan (/p)".into()),
                     ReplOutput::Text("  /execute        — Run the most recently proposed plan".into()),
@@ -1015,6 +1089,34 @@ impl Repl {
 
         if let Some(compaction_msg) = self.check_compaction().await {
             out.push(ReplOutput::Notification(compaction_msg));
+        }
+        out.push(self.prompt());
+        out
+    }
+
+    /// Output after leaving Goal Mode: headline plus sleep consolidation candidates.
+    fn goal_exit_output(&mut self, headline: String, report: SleepConsolidationReport) -> Vec<ReplOutput> {
+        self.pending_plan = None;
+        let mut out = vec![ReplOutput::Notification(headline)];
+        if !report.candidates.is_empty() {
+            out.push(ReplOutput::Text(format!(
+                "Sleep consolidation: {} candidates from {} actions",
+                report.candidates.len(), report.action_count
+            )));
+            out.push(ReplOutput::Text("─────────────────────────────────".into()));
+            for (i, c) in report.candidates.iter().enumerate() {
+                out.push(ReplOutput::Text(format!(
+                    "  [{}] {}", i, c.principle,
+                )));
+                out.push(ReplOutput::Text(format!(
+                    "      from {} actions | IC rule: {}",
+                    c.derived_from.len(),
+                    c.ic_rule_id.as_deref().unwrap_or("none"),
+                )));
+            }
+            out.push(ReplOutput::Text("─────────────────────────────────".into()));
+            out.push(ReplOutput::Text("Use /accept N or /reject N to decide.".into()));
+            self.last_consolidation = Some(report);
         }
         out.push(self.prompt());
         out
@@ -1756,6 +1858,132 @@ mod tests {
         assert!(text.starts_with("[Response withheld by the output cage"), "{}", text);
         assert!(!text.contains("disable caging."));
     }
+    fn texts(out: &[ReplOutput]) -> String {
+        out.iter()
+            .filter_map(|o| match o {
+                ReplOutput::Text(t) | ReplOutput::Notification(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // The specification cage keeps a plan from running while the goal has open questions.
+    #[tokio::test]
+    async fn execute_is_blocked_while_the_goal_has_open_questions() {
+        let (mut repl, _dir) = test_repl();
+        repl.session.start("test", "test").await.unwrap();
+
+        let goal = texts(&repl.process_input("/goal fix the auth bug").await);
+        assert!(goal.contains("Target file not specified"), "{}", goal);
+        repl.process_input("/plan").await;
+        let run = texts(&repl.process_input("/execute").await);
+        assert!(run.contains("cage 'specification' blocked"), "{}", run);
+        assert!(!run.contains("Running:"), "no step may run: {}", run);
+    }
+
+    #[tokio::test]
+    async fn execute_runs_when_the_goal_names_its_target() {
+        let (mut repl, _dir) = test_repl();
+        repl.session.start("test", "test").await.unwrap();
+
+        let goal = texts(&repl.process_input("/goal add logging to src/auth.rs").await);
+        assert!(!goal.contains("Open questions"), "{}", goal);
+        repl.process_input("/plan").await;
+        let run = texts(&repl.process_input("/execute").await);
+        assert!(run.contains("Plan completed successfully."), "{}", run);
+    }
+
+    /// REPL whose scripted LLM writes `notes.txt` once, then answers.
+    fn writing_repl() -> (Repl, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let write = terra_providers::adapter::ToolCall {
+            id: "call_w".into(),
+            name: "FileWrite".into(),
+            arguments: serde_json::json!({
+                "path": dir.path().join("notes.txt").to_str().unwrap(),
+                "content": "hello",
+            }),
+        };
+        let provider = Arc::new(ScriptedProvider {
+            responses: std::sync::Mutex::new(vec![
+                reply("", vec![write]),
+                reply("Wrote notes.txt.", vec![]),
+            ].into()),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            capability: terra_providers::adapter::ProviderCapability {
+                provider_id: "scripted".into(),
+                model_id: "scripted".into(),
+                supports_structured_output: false,
+                supports_streaming: false,
+                supports_function_calling: true,
+                max_context_tokens: 128_000,
+                latency_class: terra_providers::adapter::LatencyClass::Fast,
+            },
+        });
+        let caging = Arc::new(CagingEngine::new(vec![
+            Box::new(SpecificationCage),
+            Box::new(MemoryCage),
+            Box::new(MetaCage),
+            Box::new(ActionCage::new(SandboxGuard::new(dir.path().to_path_buf(), vec![]))),
+            Box::new(VerificationCage),
+        ]));
+        let exec = Arc::new(CommandExecutor::new(
+            Arc::new(MemoryDatabase::open_in_memory().unwrap()),
+            Arc::new(ArtifactStore::new(dir.path().to_path_buf())),
+            Arc::new(AuditLog::new()),
+            caging,
+            provider,
+        ));
+        let repl = Repl::new(exec, Arc::new(IntelligenceCore::new())).with_project_root(dir.path());
+        (repl, dir)
+    }
+
+    // The verification cage keeps /done from closing a goal whose changes were not verified.
+    #[tokio::test]
+    async fn done_needs_a_passing_verify_after_the_agent_writes() {
+        let (mut repl, dir) = writing_repl();
+        repl.session.start("test", "test").await.unwrap();
+        repl.process_input("/goal add a greeting to notes.txt").await;
+        repl.process_input("write the greeting").await;
+        assert_eq!(std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(), "hello");
+
+        let done = texts(&repl.process_input("/done").await);
+        assert!(done.contains("cage 'verification' blocked"), "{}", done);
+        assert!(done.contains("1 write, delete or shell command"), "{}", done);
+        assert!(repl.session.mode().is_goal());
+
+        let failed = texts(&repl.process_input("/verify exit 1").await);
+        assert!(failed.contains("Verification failed"), "{}", failed);
+        assert!(texts(&repl.process_input("/done").await).contains("Goal not closed"));
+
+        let passed = texts(&repl.process_input("/verify test -f notes.txt").await);
+        assert!(passed.contains("Verification passed"), "{}", passed);
+        let done = texts(&repl.process_input("/done").await);
+        assert!(done.contains("Goal complete (verified by `test -f notes.txt`)"), "{}", done);
+        assert!(repl.session.mode().is_conversation());
+    }
+
+    #[tokio::test]
+    async fn abandon_leaves_goal_mode_without_verification() {
+        let (mut repl, _dir) = writing_repl();
+        repl.session.start("test", "test").await.unwrap();
+        assert!(texts(&repl.process_input("/done").await).contains("Not in Goal Mode"));
+
+        repl.process_input("/goal add a greeting to notes.txt").await;
+        repl.process_input("write the greeting").await;
+        let out = texts(&repl.process_input("/abandon").await);
+        assert!(out.contains("Goal abandoned"), "{}", out);
+        assert!(repl.session.mode().is_conversation());
+    }
+
+    #[tokio::test]
+    async fn verify_without_a_known_test_command_asks_for_one() {
+        let (mut repl, _dir) = writing_repl();
+        let out = texts(&repl.process_input("/verify").await);
+        assert!(out.starts_with("Usage: /verify <command>"), "{}", out);
+    }
+
     #[test]
     fn strip_quotes_handles_common_forms() {
         assert_eq!(strip_quotes("\"fix login\""), "fix login");

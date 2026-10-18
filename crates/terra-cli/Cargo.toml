@@ -46,3 +46,4 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 terra-types = { path = "../terra-types" }
 terra-protocol = { path = "../terra-protocol" }
 terra-providers = { path = "../terra-providers" }
+terra-compile = { path = "../terra-compile" }

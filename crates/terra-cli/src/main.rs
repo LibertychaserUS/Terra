@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use terra_agents::Orchestrator;
 use terra_caging::engine::*;
+use terra_caging::Cage;
 use terra_caging::sandbox::SandboxGuard;
 use terra_core::domain::{AlgorithmModule, CodingModule};
 use terra_core::IntelligenceCore;
@@ -167,13 +168,7 @@ fn build_runtime(project_root: &Path, event_bus: Option<Arc<dyn terra_types::Eve
         Some(c) => c.to_sandbox_guard(project_root),
         None => SandboxGuard::new(project_root.to_path_buf(), vec![]),
     };
-    let caging = Arc::new(CagingEngine::new(vec![
-        Box::new(SpecificationCage),
-        Box::new(MemoryCage),
-        Box::new(ActionCage::new(sandbox)),
-        Box::new(VerificationCage),
-        Box::new(MetaCage),
-    ]));
+    let caging = Arc::new(CagingEngine::new(runtime_cages(constitution.as_ref(), sandbox)));
 
     let artifacts = Arc::new(ArtifactStore::new(terra_dir));
     let (provider, provider_name) = build_provider(project_root);
@@ -189,6 +184,25 @@ fn build_runtime(project_root: &Path, event_bus: Option<Arc<dyn terra_types::Eve
     core.register(Box::new(AlgorithmModule));
 
     Runtime { executor: Arc::new(executor), core: Arc::new(core), provider_name }
+}
+
+/// The cages the runtime registers, in the order they run.
+///
+/// Meta runs before Action so a write to the constitution is reported as a
+/// rule change; the sandbox's protected paths still apply after it. The
+/// constitution can turn off the Specification and Verification gates.
+fn runtime_cages(constitution: Option<&terra_caging::Constitution>, sandbox: SandboxGuard) -> Vec<Box<dyn Cage>> {
+    let mut cages: Vec<Box<dyn Cage>> = Vec::new();
+    if constitution.is_none_or(|c| c.require_spec_complete()) {
+        cages.push(Box::new(SpecificationCage));
+    }
+    cages.push(Box::new(MemoryCage));
+    cages.push(Box::new(MetaCage));
+    cages.push(Box::new(ActionCage::new(sandbox)));
+    if constitution.is_none_or(|c| c.require_verification()) {
+        cages.push(Box::new(VerificationCage));
+    }
+    cages
 }
 
 /// `.terra/.gitignore`: only the shareable project files are tracked; memory,
@@ -594,8 +608,32 @@ async fn main() -> anyhow::Result<()> {
             let orchestrator = Orchestrator::new(executor, core);
             let result = orchestrator.run(&task).await?;
 
+            if let Some(reason) = &result.blocked {
+                if as_json {
+                    let output = serde_json::json!({
+                        "status": "blocked",
+                        "spec_id": result.spec.spec_id,
+                        "intent": result.spec.intent,
+                        "blocked": reason,
+                        "open_questions": result.spec.open_questions,
+                        "audit_entries": result.audit_entry_count,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    eprintln!("Terra run did not start: {}", reason);
+                    eprintln!("  Intent:     {}", result.spec.intent);
+                    for q in &result.spec.open_questions {
+                        eprintln!("  Open:       {}", q);
+                    }
+                    eprintln!("Name what the task changes (for example a file such as src/auth.rs),");
+                    eprintln!("or set require_spec_complete = false in .terra/constitution.toml.");
+                }
+                std::process::exit(1);
+            }
+
             if as_json {
                 let output = serde_json::json!({
+                    "status": "complete",
                     "spec_id": result.spec.spec_id,
                     "intent": result.spec.intent,
                     "provider": result.provider_id,

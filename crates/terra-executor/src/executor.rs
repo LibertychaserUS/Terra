@@ -28,6 +28,8 @@ fn status_text(op: &CommandOp) -> String {
         CommandOp::ArtifactLoad { artifact_type, .. } => format!("Loading {}", artifact_type),
         CommandOp::TraceEvent { event_type, .. } => format!("Event: {}", event_type),
         CommandOp::TraceCheckpoint { title, .. } => format!("Checkpoint: {}", title),
+        CommandOp::ExecuteTask { .. } => "Checking the task spec".into(),
+        CommandOp::ClaimComplete { .. } => "Checking the completion claim".into(),
     }
 }
 
@@ -118,12 +120,18 @@ impl CommandExecutor {
 
         if !cage_result.allowed {
             let (cage_name, reason) = cage_result.block.unwrap_or(("unknown".into(), "blocked".into()));
-            warn!(
-                agent = %agent,
-                cage = %cage_name,
-                reason = %reason,
-                "command blocked by cage"
-            );
+            // Gates (task start, completion claim) report their outcome to the
+            // user themselves, so a block there is routine, not a warning.
+            if matches!(cmd.op, CommandOp::ExecuteTask { .. } | CommandOp::ClaimComplete { .. }) {
+                info!(agent = %agent, cage = %cage_name, reason = %reason, "gate blocked by cage");
+            } else {
+                warn!(
+                    agent = %agent,
+                    cage = %cage_name,
+                    reason = %reason,
+                    "command blocked by cage"
+                );
+            }
 
             let result = CommandResult {
                 command_id: cmd_id,
@@ -297,6 +305,14 @@ impl CommandExecutor {
                 CageAction::ShellExec {
                     command: command.clone(),
                 }
+            }
+            CommandOp::ExecuteTask { open_questions, .. } => {
+                CageAction::ExecuteTask {
+                    spec_complete: open_questions.is_empty(),
+                }
+            }
+            CommandOp::ClaimComplete { verified, .. } => {
+                CageAction::ClaimComplete { verified: *verified }
             }
         };
 

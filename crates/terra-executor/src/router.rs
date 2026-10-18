@@ -176,6 +176,21 @@ pub async fn route(
             })))
         }
 
+        // Gates: reaching the router means every cage let them through.
+        CommandOp::ExecuteTask { spec_id, .. } => {
+            CommandResult::ok("", Some(serde_json::json!({
+                "spec_id": spec_id,
+                "allowed": true,
+            })))
+        }
+
+        CommandOp::ClaimComplete { goal, .. } => {
+            CommandResult::ok("", Some(serde_json::json!({
+                "goal": goal,
+                "allowed": true,
+            })))
+        }
+
         CommandOp::ProviderCall { system_prompt, user_prompt, max_tokens, temperature, .. } => {
             let request = CompletionRequest {
                 system_prompt: system_prompt.clone(),
