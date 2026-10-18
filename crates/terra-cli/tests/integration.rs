@@ -47,7 +47,7 @@ fn test_orchestrator() -> (Orchestrator, Arc<AuditLog>, tempfile::TempDir) {
 #[tokio::test]
 async fn run_produces_result() {
     let (orch, _audit, _dir) = test_orchestrator();
-    let result = orch.run("fix the auth bug").await.unwrap();
+    let result = orch.run("fix the auth bug in src/auth.rs").await.unwrap();
     assert!(!result.worker_response.is_empty());
     assert!(result.ic_rules_applied > 0);
 }
@@ -96,7 +96,7 @@ fn full_caging_chain() {
 #[tokio::test]
 async fn audit_trail_pipeline() {
     let (orch, audit, _dir) = test_orchestrator();
-    orch.run("test task").await.unwrap();
+    orch.run("test task in src/lib.rs").await.unwrap();
 
     let entries = audit.entries();
     assert!(entries.len() >= 5, "pipeline should record at least 5 audit entries");
@@ -138,7 +138,7 @@ async fn pipeline_ic_rules_applied() {
 #[tokio::test]
 async fn pipeline_ic_rules_in_prompt() {
     let (orch, _, _dir) = test_orchestrator();
-    let result = orch.run("fix bug").await.unwrap();
+    let result = orch.run("fix bug in src/lib.rs").await.unwrap();
     // DryRun adapter processes the prompt — if IC rules were not in prompt,
     // the pipeline would fail. IC rules count confirms injection.
     assert!(result.ic_rules_applied >= 13);
@@ -149,7 +149,7 @@ async fn pipeline_ic_rules_in_prompt() {
 #[tokio::test]
 async fn pipeline_audit_records_every_step() {
     let (orch, audit, _dir) = test_orchestrator();
-    orch.run("test task").await.unwrap();
+    orch.run("test task in src/lib.rs").await.unwrap();
 
     let entries = audit.entries();
     assert!(entries.len() >= 5, "should have >= 5 entries, got {}", entries.len());
@@ -195,7 +195,7 @@ async fn live_provider_e2e() {
     core.register(Box::new(AlgorithmModule));
     let orch = Orchestrator::new(executor, Arc::new(core));
 
-    let result = orch.run("What is 2+2? Reply with just the number.").await.unwrap();
+    let result = orch.run("In one sentence, say what a README.md is for.").await.unwrap();
     assert!(!result.worker_response.is_empty());
     assert!(!result.worker_response.contains("DRY_RUN"), "should use real provider");
 }
@@ -297,7 +297,7 @@ fn pipeline_cage_blocks_unverified() {
 #[tokio::test]
 async fn executor_routes_mem_to_memory() {
     let (orch, _, _dir) = test_orchestrator();
-    let result = orch.run("test mem routing").await.unwrap();
+    let result = orch.run("test mem routing in src/memory.rs").await.unwrap();
     // Pipeline runs MemSearch via executor → proves memory routing works
     assert!(result.audit_entry_count >= 3);
 }
@@ -316,7 +316,7 @@ async fn executor_routes_artifact() {
 #[tokio::test]
 async fn executor_routes_trace_to_audit() {
     let (orch, audit, _dir) = test_orchestrator();
-    orch.run("trace routing").await.unwrap();
+    orch.run("trace routing in src/trace.rs").await.unwrap();
     let entries = audit.entries();
     // Pipeline records TraceEvent + TraceCheckpoint → audit has entries
     assert!(entries.len() >= 4, "should have trace events in audit");

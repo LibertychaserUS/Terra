@@ -113,7 +113,7 @@ impl SandboxGuard {
 ///
 /// Components that do not exist yet are kept lexically, so the result is
 /// still meaningful for files about to be created.
-fn resolve_path(path: &Path) -> PathBuf {
+pub(crate) fn resolve_path(path: &Path) -> PathBuf {
     let mut link_budget = 40;
     resolve_with_budget(path, &mut link_budget)
 }

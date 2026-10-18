@@ -26,6 +26,8 @@ pub fn op_status_text(op: &CommandOp) -> String {
         CommandOp::ArtifactLoad { artifact_type, .. } => format!("  ● Loading {} artifact", artifact_type),
         CommandOp::TraceEvent { event_type, .. } => format!("  ● Recording: {}", event_type),
         CommandOp::TraceCheckpoint { title, .. } => format!("  ● Checkpoint: {}", title),
+        CommandOp::ExecuteTask { .. } => "  ● Checking the task spec".into(),
+        CommandOp::ClaimComplete { .. } => "  ● Checking the completion claim".into(),
     }
 }
 

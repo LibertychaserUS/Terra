@@ -2121,6 +2121,7 @@ dependencies = [
  "tempfile",
  "terra-agents",
  "terra-caging",
+ "terra-compile",
  "terra-core",
  "terra-executor",
  "terra-mcp",

@@ -56,6 +56,10 @@ pub fn op_summary(op: &CommandOp) -> String {
         CommandOp::FileWrite { path, content } => ("FileWrite", format!("{} ({} bytes)", path, content.len())),
         CommandOp::FileDelete { path } => ("FileDelete", path.clone()),
         CommandOp::ShellExec { command, .. } => ("ShellExec", format!("{:?}", command)),
+        CommandOp::ExecuteTask { intent, open_questions, .. } => {
+            ("ExecuteTask", format!("{:?} ({} open questions)", intent, open_questions.len()))
+        }
+        CommandOp::ClaimComplete { evidence, .. } => ("ClaimComplete", evidence.clone()),
     };
     truncate_ellipsis(&format!("{} {}", name, detail.replace('\n', " ")), 60)
 }
@@ -145,6 +149,18 @@ impl AuditLog {
     /// Get all entries (for replay or inspection).
     pub fn entries(&self) -> Vec<AuditEntry> {
         self.entries.lock().unwrap().clone()
+    }
+
+    /// Sequence number of the latest entry (0 when empty).
+    pub fn last_seq(&self) -> u64 {
+        *self.next_seq.lock().unwrap() - 1
+    }
+
+    /// Entries recorded after sequence number `seq`, oldest first.
+    pub fn entries_after(&self, seq: u64) -> Vec<AuditEntry> {
+        let entries = self.entries.lock().unwrap();
+        let start = entries.partition_point(|e| e.seq <= seq);
+        entries[start..].to_vec()
     }
 
     /// Get the number of recorded entries.

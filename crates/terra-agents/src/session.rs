@@ -4,7 +4,9 @@
 //! - Conversation Mode (default): free interaction, lightweight constraints
 //! - Goal Mode (/goal): adds drift detection + spec gating on top of conversation
 //!   - User can still talk freely — Goal Mode is additive, not restrictive
-//!   - The difference: caging checks spec alignment, drift is monitored
+//!   - The difference: drift is monitored, `/execute` is gated on the goal spec,
+//!     and `/done` is a completion claim the Verification cage checks against
+//!     the audit log (changes made during the goal need a passing `/verify`)
 //!
 //! Sleep Consolidation:
 //! - Post-session abstraction of concrete actions into general principles
@@ -18,6 +20,7 @@ use std::sync::Arc;
 use terra_compile::{SpecIR, TermTable};
 use terra_executor::CommandExecutor;
 use terra_protocol::command::{Command, CommandOp, CommandStatus};
+use terra_trace::AuditEntry;
 
 use crate::drift::{DriftCheckResult, DriftDetector};
 
@@ -50,6 +53,76 @@ impl SessionMode {
     }
 }
 
+/// Agent name of commands run by `/verify`. LLM tool calls run as "main", so a
+/// passing command under this name is Terra's own check, not the agent vouching
+/// for its work.
+pub const VERIFIER_AGENT: &str = "verifier";
+
+/// Whether the active goal's work has been verified, read from the audit log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verification {
+    /// Nothing was written, deleted or run in the shell during the goal.
+    NoChanges,
+    /// Writes, deletes or shell commands not followed by a passing `/verify`.
+    Unverified { changes: u32 },
+    /// The last `/verify` passed and nothing changed after it.
+    Passed { command: String },
+    /// The last `/verify` failed.
+    Failed { command: String },
+}
+
+impl Verification {
+    /// Fold audit entries (oldest first) into a verification state.
+    ///
+    /// A change is a successful file write or delete, or any shell command the
+    /// agent ran (it may have edited files even if it failed). A `/verify` run
+    /// resets the state to its outcome; one blocked by a cage never ran.
+    pub fn from_audit(entries: &[AuditEntry]) -> Self {
+        entries.iter().fold(Verification::NoChanges, |state, entry| {
+            let status = entry.result.as_ref().map(|r| &r.status);
+            match (&entry.command.op, status) {
+                (CommandOp::ShellExec { command, .. }, Some(status))
+                    if entry.command.agent == VERIFIER_AGENT =>
+                {
+                    match status {
+                        CommandStatus::Ok => Verification::Passed { command: command.clone() },
+                        CommandStatus::PermissionDenied => state,
+                        _ => Verification::Failed { command: command.clone() },
+                    }
+                }
+                (CommandOp::FileWrite { .. } | CommandOp::FileDelete { .. }, Some(CommandStatus::Ok))
+                | (CommandOp::ShellExec { .. }, Some(CommandStatus::Ok | CommandStatus::Error)) => {
+                    match state {
+                        Verification::Unverified { changes } => Verification::Unverified { changes: changes + 1 },
+                        _ => Verification::Unverified { changes: 1 },
+                    }
+                }
+                _ => state,
+            }
+        })
+    }
+
+    /// Whether a completion claim may rest on this state.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Verification::NoChanges | Verification::Passed { .. })
+    }
+
+    /// One line for the user and the audit log.
+    pub fn describe(&self) -> String {
+        match self {
+            Verification::NoChanges => "nothing was written, deleted or run in the shell during the goal".into(),
+            Verification::Unverified { changes: 1 } => {
+                "1 write, delete or shell command is not followed by a passing /verify".into()
+            }
+            Verification::Unverified { changes } => {
+                format!("{} writes, deletes or shell commands are not followed by a passing /verify", changes)
+            }
+            Verification::Passed { command } => format!("verified by `{}`", command),
+            Verification::Failed { command } => format!("the last /verify (`{}`) failed", command),
+        }
+    }
+}
+
 /// Session state — tracks project and lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -66,6 +139,9 @@ pub struct SessionManager {
     goal_key: Option<String>,
     sleep_settings: SleepSettings,
     drift_detector: Option<DriftDetector>,
+    /// Audit sequence number when Goal Mode was entered; verification is read
+    /// from the entries after it.
+    goal_audit_start: u64,
 }
 
 /// A recorded action during a session (for sleep consolidation).
@@ -86,6 +162,7 @@ impl SessionManager {
             goal_key: None,
             sleep_settings: SleepSettings::default(),
             drift_detector: None,
+            goal_audit_start: 0,
         }
     }
 
@@ -99,6 +176,7 @@ impl SessionManager {
             goal_key: None,
             sleep_settings: settings,
             drift_detector: None,
+            goal_audit_start: 0,
         }
     }
 
@@ -177,11 +255,55 @@ impl SessionManager {
             command_count: 0,
         };
         self.drift_detector = Some(DriftDetector::new());
+        self.goal_audit_start = self.executor.audit().last_seq();
 
         Ok(())
     }
 
+    /// Verification state of the active goal; None outside Goal Mode.
+    pub fn verification(&self) -> Option<Verification> {
+        if !self.mode.is_goal() {
+            return None;
+        }
+        let entries = self.executor.audit().entries_after(self.goal_audit_start);
+        Some(Verification::from_audit(&entries))
+    }
+
+    /// Claim the active goal is complete (`/done`).
+    ///
+    /// The claim is a command like any other: the Verification cage decides and
+    /// the audit log records it. Allowed: leave Goal Mode and return the sleep
+    /// consolidation report. Blocked: stay in Goal Mode; `Err` says why.
+    pub async fn complete_goal(&mut self) -> Result<SleepConsolidationReport, String> {
+        let (goal, verification) = match (&self.mode, self.verification()) {
+            (SessionMode::Goal { spec, .. }, Some(v)) => (spec.intent.clone(), v),
+            _ => return Err("not in Goal Mode".into()),
+        };
+        let cmd = Command::new("session", CommandOp::ClaimComplete {
+            goal,
+            verified: verification.is_verified(),
+            evidence: verification.describe(),
+        });
+        let result = self.executor.execute(cmd).await;
+        if result.status != CommandStatus::Ok {
+            return Err(result.error.unwrap_or_else(|| "completion claim rejected".into()));
+        }
+        Ok(self.exit_goal().await)
+    }
+
+    /// Leave Goal Mode without claiming the goal is complete (`/abandon`).
+    pub async fn abandon_goal(&mut self) -> Result<SleepConsolidationReport, String> {
+        let verification = self.verification().ok_or("not in Goal Mode")?;
+        self.audit_event("goal_abandoned", &serde_json::json!({
+            "verification": verification.describe(),
+        })).await;
+        Ok(self.exit_goal().await)
+    }
+
     /// Exit Goal Mode, trigger sleep consolidation, return to Conversation.
+    ///
+    /// Makes no completion claim: `/done` goes through `complete_goal` and
+    /// `/abandon` through `abandon_goal`, which both end here.
     pub async fn exit_goal(&mut self) -> SleepConsolidationReport {
         self.audit_event("mode_switch", &serde_json::json!({
             "from": "goal",
@@ -441,12 +563,12 @@ fn consolidate(actions: &[SessionAction], max_candidates: usize) -> SleepConsoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use terra_caging::engine::*;
+    use terra_protocol::command::CommandResult;
     use terra_caging::sandbox::SandboxGuard;
     use terra_memory::{ArtifactStore, MemoryDatabase};
     use terra_providers::adapter::DryRunAdapter;
-    use terra_trace::AuditLog;
+    use terra_trace::{AuditEntry, AuditLog};
 
     fn test_executor() -> (Arc<CommandExecutor>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -455,7 +577,7 @@ mod tests {
         let audit = Arc::new(AuditLog::new());
         let provider: Arc<dyn terra_providers::adapter::ProviderAdapter> =
             Arc::new(DryRunAdapter::new());
-        let sandbox = SandboxGuard::new(PathBuf::from("/projects/test"), vec![]);
+        let sandbox = SandboxGuard::new(dir.path().to_path_buf(), vec![]);
         let caging = Arc::new(CagingEngine::new(vec![
             Box::new(SpecificationCage),
             Box::new(MemoryCage),
@@ -465,6 +587,121 @@ mod tests {
         ]));
         let exec = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
         (exec, dir)
+    }
+
+    fn entry(seq: u64, agent: &str, op: CommandOp, status: CommandStatus) -> AuditEntry {
+        let result = CommandResult { status, ..CommandResult::ok("", None) };
+        AuditEntry {
+            seq,
+            timestamp: chrono::Utc::now(),
+            command: Command::new(agent, op),
+            result: Some(result),
+            duration_us: Some(1),
+        }
+    }
+
+    fn write_op() -> CommandOp {
+        CommandOp::FileWrite { path: "src/lib.rs".into(), content: "x".into() }
+    }
+
+    fn shell_op(command: &str) -> CommandOp {
+        CommandOp::ShellExec { command: command.into(), workdir: None, timeout_ms: None }
+    }
+
+    #[test]
+    fn verification_follows_the_audit_log() {
+        use CommandStatus::*;
+        let state = |entries: &[AuditEntry]| Verification::from_audit(entries);
+
+        assert_eq!(state(&[]), Verification::NoChanges);
+        // Reads and failed or blocked writes change nothing.
+        assert_eq!(state(&[
+            entry(1, "main", CommandOp::FileRead { path: "a".into() }, Ok),
+            entry(2, "main", write_op(), Error),
+            entry(3, "main", write_op(), PermissionDenied),
+        ]), Verification::NoChanges);
+        // Every write, delete or shell command by the agent counts, even a failing one.
+        assert_eq!(state(&[
+            entry(1, "main", write_op(), Ok),
+            entry(2, "main", CommandOp::FileDelete { path: "b".into() }, Ok),
+            entry(3, "main", shell_op("sed -i s/a/b/ c"), Error),
+        ]), Verification::Unverified { changes: 3 });
+        // A passing /verify clears them; a later change makes it stale.
+        let verified = [entry(1, "main", write_op(), Ok), entry(2, VERIFIER_AGENT, shell_op("cargo test"), Ok)];
+        assert_eq!(state(&verified), Verification::Passed { command: "cargo test".into() });
+        let stale = [verified[0].clone(), verified[1].clone(), entry(3, "main", write_op(), Ok)];
+        assert_eq!(state(&stale), Verification::Unverified { changes: 1 });
+        // The agent running tests itself is a change, not a verification.
+        assert_eq!(state(&[entry(1, "main", shell_op("cargo test"), Ok)]), Verification::Unverified { changes: 1 });
+        // A failing /verify is remembered until the next one passes.
+        let failed = [entry(1, VERIFIER_AGENT, shell_op("cargo test"), Error)];
+        assert_eq!(state(&failed), Verification::Failed { command: "cargo test".into() });
+        // A /verify blocked by a cage never ran.
+        assert_eq!(state(&[entry(1, VERIFIER_AGENT, shell_op("mkfs"), PermissionDenied)]), Verification::NoChanges);
+
+        assert!(Verification::NoChanges.is_verified());
+        assert!(Verification::Passed { command: "t".into() }.is_verified());
+        assert!(!Verification::Unverified { changes: 1 }.is_verified());
+        assert!(!Verification::Failed { command: "t".into() }.is_verified());
+    }
+
+    // The verification cage stops /done while the goal's changes are unverified.
+    #[tokio::test]
+    async fn completion_claim_needs_verification_after_changes() {
+        let (exec, dir) = test_executor();
+        let mut mgr = SessionManager::new(exec.clone());
+        mgr.start("project", "general").await.unwrap();
+        mgr.enter_goal("add a greeting to notes.txt").await.unwrap();
+
+        let path = dir.path().join("notes.txt").to_string_lossy().to_string();
+        let write = exec.execute(Command::new("main", CommandOp::FileWrite { path, content: "hi".into() })).await;
+        assert_eq!(write.status, CommandStatus::Ok);
+
+        let err = mgr.complete_goal().await.unwrap_err();
+        assert!(err.contains("verification"), "{}", err);
+        assert!(mgr.mode().is_goal(), "a rejected claim keeps Goal Mode");
+
+        let failing = Command::new(VERIFIER_AGENT, shell_op("exit 3"));
+        exec.execute(failing).await;
+        assert!(mgr.complete_goal().await.is_err(), "a failing verification does not count");
+
+        exec.execute(Command::new(VERIFIER_AGENT, shell_op("true"))).await;
+        assert!(mgr.complete_goal().await.is_ok());
+        assert!(mgr.mode().is_conversation());
+
+        let claims: Vec<CommandStatus> = exec.audit().entries().into_iter()
+            .filter(|e| matches!(e.command.op, CommandOp::ClaimComplete { .. }))
+            .map(|e| e.result.unwrap().status)
+            .collect();
+        assert_eq!(claims, vec![
+            CommandStatus::PermissionDenied, CommandStatus::PermissionDenied, CommandStatus::Ok,
+        ]);
+    }
+
+    #[tokio::test]
+    async fn completion_claim_without_changes_is_allowed() {
+        let (exec, _dir) = test_executor();
+        let mut mgr = SessionManager::new(exec);
+        mgr.start("project", "general").await.unwrap();
+        mgr.enter_goal("explain the auth flow").await.unwrap();
+        assert_eq!(mgr.verification(), Some(Verification::NoChanges));
+        assert!(mgr.complete_goal().await.is_ok());
+        assert!(mgr.complete_goal().await.is_err(), "no goal left to claim");
+    }
+
+    #[tokio::test]
+    async fn abandon_leaves_goal_mode_without_a_claim() {
+        let (exec, dir) = test_executor();
+        let mut mgr = SessionManager::new(exec.clone());
+        mgr.start("project", "general").await.unwrap();
+        mgr.enter_goal("rewrite notes.txt").await.unwrap();
+        let path = dir.path().join("notes.txt").to_string_lossy().to_string();
+        exec.execute(Command::new("main", CommandOp::FileWrite { path, content: "x".into() })).await;
+
+        assert!(mgr.abandon_goal().await.is_ok());
+        assert!(mgr.mode().is_conversation());
+        assert!(!exec.audit().entries().iter().any(|e| matches!(e.command.op, CommandOp::ClaimComplete { .. })));
+        assert!(mgr.abandon_goal().await.is_err(), "nothing to abandon outside Goal Mode");
     }
 
     // T-DM-001: default_is_conversation

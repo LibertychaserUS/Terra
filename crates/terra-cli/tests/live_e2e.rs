@@ -246,7 +246,7 @@ async fn full_pipeline_live() {
     core.register(Box::new(AlgorithmModule));
     let orch = terra_agents::Orchestrator::new(exec, Arc::new(core));
 
-    let result = orch.run("What is 2+2? Reply with just the number.").await.unwrap();
+    let result = orch.run("In one sentence, say what a README.md is for.").await.unwrap();
 
     eprintln!("Full pipeline result: response={:?}", safe_truncate(&result.worker_response, 100));
 
@@ -275,7 +275,11 @@ async fn full_pipeline_plan_proposal() {
     let orch = terra_agents::Orchestrator::new(exec, Arc::new(core));
 
     // Step 1: Propose plan
-    let plan = orch.propose_plan("add a hello world function to main.rs").await.unwrap();
+    let spec = terra_compile::SpecIR::compile(
+        "add a hello world function to main.rs",
+        &terra_compile::TermTable::default_coding(),
+    );
+    let plan = orch.propose_plan(&spec).await.unwrap();
     eprintln!("Proposed plan:\n{}", plan.display());
     assert!(!plan.steps.is_empty(), "plan should have steps");
 

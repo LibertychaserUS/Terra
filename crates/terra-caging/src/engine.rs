@@ -1,5 +1,8 @@
+use std::ffi::OsStr;
+use std::path::Path;
+
 use crate::cage::{Cage, CageAction, CageCheckResult, CageContext, KnowledgeSource};
-use crate::sandbox::SandboxGuard;
+use crate::sandbox::{resolve_path, SandboxGuard};
 
 /// Specification Cage — blocks execution when spec is incomplete.
 pub struct SpecificationCage;
@@ -219,8 +222,25 @@ impl Cage for KnowledgeCage {
     }
 }
 
-/// Meta-Cage — blocks attempts to modify protected rules.
+/// Meta-Cage — the agent cannot change the rules that cage it.
+///
+/// Blocks `ModifyRule`, and any write or delete that resolves to the project
+/// constitution (`.terra/constitution.toml`) or a path beneath it. This holds
+/// whether or not the constitution lists itself as a protected path, so an
+/// agent cannot create one with a wider sandbox for the next session.
 pub struct MetaCage;
+
+impl MetaCage {
+    /// Whether `path`, once `..` and symlinks are resolved, is the constitution
+    /// or lies beneath it. Case is ignored: macOS file systems usually do.
+    fn is_rule_file(path: &Path) -> bool {
+        let resolved = resolve_path(path);
+        let names: Vec<&OsStr> = resolved.components().map(|c| c.as_os_str()).collect();
+        names.windows(2).any(|pair| {
+            pair[0].eq_ignore_ascii_case(".terra") && pair[1].eq_ignore_ascii_case("constitution.toml")
+        })
+    }
+}
 
 impl Cage for MetaCage {
     fn name(&self) -> &str {
@@ -228,13 +248,21 @@ impl Cage for MetaCage {
     }
 
     fn check(&self, context: &CageContext) -> CageCheckResult {
-        if let CageAction::ModifyRule { rule_name } = &context.action {
-            return CageCheckResult::Block(format!(
+        match &context.action {
+            CageAction::ModifyRule { rule_name } => CageCheckResult::Block(format!(
                 "cannot modify protected rule: {}",
                 rule_name
-            ));
+            )),
+            CageAction::FileWrite { path } | CageAction::FileDelete { path }
+                if Self::is_rule_file(path) =>
+            {
+                CageCheckResult::Block(format!(
+                    "cannot modify protected rule file: {}",
+                    path.display()
+                ))
+            }
+            _ => CageCheckResult::Pass,
         }
-        CageCheckResult::Pass
     }
 }
 
@@ -787,6 +815,58 @@ mod tests {
         let result = engine.check(&ctx);
         assert!(!result.allowed);
         assert!(result.block.is_some());
+    }
+
+    fn meta_check(action: CageAction) -> CageCheckResult {
+        MetaCage.check(&CageContext { agent: "main".into(), action, goal_mode: false })
+    }
+
+    // Writes and deletes that land on the constitution are rule changes, even
+    // when the sandbox does not list the constitution as protected.
+    #[test]
+    fn meta_cage_blocks_writes_and_deletes_of_the_constitution() {
+        for path in [
+            "/projects/myapp/.terra/constitution.toml",
+            "/projects/myapp/.terra/../.terra/constitution.toml",
+            "/projects/myapp/src/../.terra/./constitution.toml",
+            "/projects/myapp/.TERRA/Constitution.toml",
+            "/projects/myapp/.terra/constitution.toml/shadow",
+            ".terra/constitution.toml",
+        ] {
+            let path = PathBuf::from(path);
+            let write = meta_check(CageAction::FileWrite { path: path.clone() });
+            assert!(write.is_blocked(), "write to {} should be blocked: {:?}", path.display(), write);
+            let delete = meta_check(CageAction::FileDelete { path: path.clone() });
+            assert!(delete.is_blocked(), "delete of {} should be blocked: {:?}", path.display(), delete);
+        }
+    }
+
+    #[test]
+    fn meta_cage_allows_other_files() {
+        for path in [
+            "/projects/myapp/.terra/prompt.md",
+            "/projects/myapp/.terra/constitution.toml.bak",
+            "/projects/myapp/src/constitution.toml",
+            "/projects/myapp/terra/constitution.toml",
+        ] {
+            let result = meta_check(CageAction::FileWrite { path: PathBuf::from(path) });
+            assert!(result.is_pass(), "{} should pass: {:?}", path, result);
+        }
+        assert!(meta_check(CageAction::FileRead {
+            path: PathBuf::from("/projects/myapp/.terra/constitution.toml"),
+        }).is_pass(), "reading the constitution is not a rule change");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn meta_cage_follows_symlinks_to_the_constitution() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".terra")).unwrap();
+        std::fs::write(dir.path().join(".terra/constitution.toml"), "[meta]\nversion = 1\n").unwrap();
+        let link = dir.path().join("rules.toml");
+        std::os::unix::fs::symlink(dir.path().join(".terra/constitution.toml"), &link).unwrap();
+
+        assert!(meta_check(CageAction::FileWrite { path: link }).is_blocked());
     }
 
     // T-CG-019: meta_cage_rule_change_blocks

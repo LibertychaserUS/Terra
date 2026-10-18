@@ -26,7 +26,7 @@
   <a href="https://github.com/LibertychaserUS/Terra/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/LibertychaserUS/Terra/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <a href="https://www.rust-lang.org/"><img alt="Rust 1.89+" src="https://img.shields.io/badge/rust-1.89%2B-orange.svg"></a>
-  <img alt="Tests: 601 passing" src="https://img.shields.io/badge/tests-601%20passing-brightgreen.svg">
+  <img alt="Tests: 620 passing" src="https://img.shields.io/badge/tests-620%20passing-brightgreen.svg">
   <img alt="Crates: 12" src="https://img.shields.io/badge/crates-12-informational.svg">
   <img alt="Binary: ~10 MB" src="https://img.shields.io/badge/binary-~10%20MB-lightgrey.svg">
   <img alt="Platform: macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg">
@@ -75,11 +75,11 @@ Terra is an early-stage project (v0.1). [Project status](#project-status) lists 
 |------|-------------|
 | Interactive chat (`terra chat`) | Works end to end: LLM tool calling (files, memory, shell, artifacts, pointer queries), y/N confirmation for shell and delete, session auto-save, context compaction |
 | Full-screen TUI (`terra chat --tui`) | Works, with the same confirmations; simpler than the readline UI (Ctrl+C cannot cancel a running request) |
-| One-shot tasks (`terra run`) | Works: spec compilation, Intelligence Core rules, caged provider call, audit |
+| One-shot tasks (`terra run`) | Works: spec compilation, Intelligence Core rules, specification gate, caged provider call, audit. The task has to name what it changes (a file, for example), or the Specification cage stops it |
 | MCP server (`terra mcp`) | Works over stdio: 13 tools routed through the same executor and cages; approving shell and delete calls is left to the MCP client |
 | Audit trail (`terra trace`) | Works: persistent SQLite log of every executed command |
-| Cages enforced at runtime | **Action** (sandboxed writes/deletes, destructive shell patterns), **Memory** (L0 read-only, L1 user-only), **Output** (prompt-injection patterns in LLM answers) |
-| Cages implemented, not yet triggered | **Specification**, **Verification**, **Meta** are registered, but the runtime never emits the actions they block; **Knowledge** and **Convergence** are not registered |
+| Cages enforced at runtime | **Action** (sandboxed writes/deletes, destructive shell patterns), **Memory** (L0 read-only, L1 user-only), **Output** (prompt-injection patterns in LLM answers), **Specification** (`terra run` and `/execute` do not start while the spec has open questions), **Verification** (`/done` needs a passing `/verify` after the goal's changes), **Meta** (no writes or deletes of `.terra/constitution.toml`) |
+| Cages not registered | **Knowledge** and **Convergence** are implemented and unit-tested, but nothing in the runtime produces the knowledge claims or accepted-path events they judge |
 | Multi-agent roles | Worker, Explorer, Cage Monitor and SubAgent profiles exist as tested library types; the CLI runs a single main agent |
 | Embeddings | `EmbeddingBackend` trait with a TF-IDF implementation; no neural embedding backend ships yet |
 
@@ -94,13 +94,15 @@ Cages run in sequence on every operation the executor receives; the first `Block
 | Cage | Purpose | Mode | Enforced at runtime |
 |------|---------|:----:|:-------------------:|
 | **Action** | Writes/deletes must resolve inside the sandbox root; protected paths are read-only; `rm -rf /`, `mkfs`, `> /dev/` are blocked | Always | Yes |
-| **Memory** | L0 is read-only; L1 accepts only user commands (`/remember`, `/accept`); L3 needs Goal Mode + verification | Always | Yes |
+| **Memory** | L0 is read-only; L1 accepts only user commands (`/remember`, `/accept`); L3 is meant for Goal Mode + verification | Always | L0, L1: yes. L3: not yet |
 | **Output** | Withholds LLM answers containing prompt-injection or privilege-escalation phrases | Always | Yes (chat answers and provider calls) |
-| **Specification** | Blocks task execution while the spec has open questions | Goal | Registered, not triggered |
-| **Verification** | Blocks completion claims without verification | Goal | Registered, not triggered |
-| **Meta** | Blocks attempts to modify protected rules | Always | Registered, not triggered |
+| **Specification** | Stops a task while its spec has open questions (no target file named, for example) | `terra run`, Goal | Yes (`terra run`, `/execute`) |
+| **Verification** | Stops `/done` while the goal's writes, deletes or shell commands are not followed by a passing `/verify` | Goal | Yes (`/done`) |
+| **Meta** | Blocks rule changes: any write or delete that resolves to `.terra/constitution.toml` | Always | Yes |
 | **Knowledge** | Authority ranking: Code > Docs > Memory > Assumption | Always | Library only |
 | **Convergence** | Warns about exploring after an accepted path exists | Goal | Library only |
+
+The constitution's `require_spec_complete` and `require_verification` settings (both `true` by default) turn the Specification and Verification cages off for a project.
 
 Shell commands are not sandboxed: once you approve one, it runs with your user's permissions. The confirmation prompt is the control for shell access.
 
@@ -112,7 +114,7 @@ Semantic memory organized from most authoritative to least, with write permissio
 L0  Authoritative     Constitution, Intelligence Core, Soul Templates     (read-only)
 L1  Project           Architecture decisions, user-saved knowledge        (user-only writes)
 L2  Task              Current hypotheses, active attempts                 (read-write)
-L3  Accepted Paths    Verified successful routes                          (Goal Mode + verified)
+L3  Accepted Paths    Verified successful routes                          (meant: Goal Mode + verified)
 L4  Failed Paths      Compressed failure records                          (read-write)
 L5  Dormant Ideas     Archived, low priority, auto-compacted              (read-write)
 L6  Candidates        Agent nominations awaiting human review             (read-write)
@@ -223,7 +225,7 @@ User Input --> TermTable --> SpecIR --> ExecutionPlan --> Steps
 | `terra-compile` | 2 | protocol | SpecIR, ExecutionPlan, terminology table |
 | `terra-caging` | 2 | core, protocol | Cage trait, 8 cages, sandbox guard, constitution |
 | `terra-executor` | 3 | types, protocol, memory, trace, caging, providers | Command pipeline and router, event bus |
-| `terra-agents` | 4 | core, types, protocol, compile, executor, memory, providers, caging | REPL, tools, orchestrator, sessions, roles |
+| `terra-agents` | 4 | core, types, protocol, compile, executor, memory, providers, caging, trace | REPL, tools, orchestrator, sessions, roles |
 | `terra-mcp` | 5 | types, executor, memory, caging, core, providers, trace, agents | MCP server |
 | `terra-cli` | 6 | agents, types, core, executor, memory, caging, trace, providers, mcp | `terra` binary |
 
@@ -294,7 +296,9 @@ Commands available inside `terra chat`:
 | Command | Alias | Description |
 |---------|:-----:|-------------|
 | `/goal "description"` | `/g` | Enter Goal Mode: the goal is tracked and answers are checked for drift |
-| `/done` | `/d` | Leave Goal Mode and run sleep consolidation |
+| `/done` | `/d` | Claim the goal is done; blocked until the goal's changes pass `/verify`. Then runs sleep consolidation |
+| `/verify [command]` | | Run a check (default: the project's test command, such as `cargo test`) that verifies the goal's changes |
+| `/abandon` | | Leave Goal Mode without claiming the goal is done |
 | `/accept N` / `/reject N` | | Keep or drop a consolidation candidate (kept ones go to L1 memory) |
 | `/status` | `/s` | Mode, goal alignment, token usage |
 | `/plan` | `/p` | Ask the LLM for an execution plan for the current goal |
@@ -358,7 +362,7 @@ The design borrows from Rust's ownership model:
 | L0 | Authoritative | Constitution, Soul Templates, Intelligence Core | Blocked (read-only) | Yes |
 | L1 | Project | Architecture decisions, user-saved knowledge | User `/remember` only | Yes |
 | L2 | Task | Current hypotheses, active attempts | Both modes | No |
-| L3 | Accepted Paths | Verified successful solution routes | Goal Mode + verified | No |
+| L3 | Accepted Paths | Verified successful solution routes | Meant for Goal Mode + verified; not enforced yet | No |
 | L4 | Failed Paths | Compressed failure records | Both modes | No |
 | L5 | Dormant | Archived ideas, auto-compacted | Both modes | No |
 | L6 | Candidates | Agent nominations, awaiting human review | Both modes | No |
@@ -424,7 +428,7 @@ Shell commands matching `rm -rf /`, `mkfs` or `> /dev/` are blocked; other shell
 | L0 | **Blocked always** -- read-only |
 | L1 | **Blocked for agents** -- only user `/remember` or `/accept` |
 | L2 | Allowed in both modes |
-| L3 | Allowed in Goal Mode with verification only |
+| L3 | Meant for Goal Mode with verification; not enforced yet (see [Known limitations](#known-limitations)) |
 | L4-L6 | Allowed in both modes |
 
 </details>
@@ -443,13 +447,38 @@ This is phrase matching, a cheap first filter rather than a complete defense.
 </details>
 
 <details>
-<summary><strong>Specification, Verification, Meta</strong> -- registered, not yet triggered</summary>
+<summary><strong>Specification Cage</strong> -- enforced on tasks</summary>
 
-- **Specification** blocks task execution when the SpecIR has open questions.
-- **Verification** blocks completion claims without verification.
-- **Meta** blocks attempts to modify protected rules.
+`terra run` compiles the task into a SpecIR (lexical and terminology passes) and asks the cages before the worker is called; in Goal Mode, `/execute` does the same with the goal's spec. A spec with open questions is blocked: the task does not run, `terra run` exits with code 1, and the audit log records a denied `ExecuteTask`. Without an LLM in the compilation step the open question is usually "Target file not specified", so a task has to name what it changes:
 
-All three are in the engine and unit-tested, but the runtime does not yet emit the actions they react to (`terra run` reports the spec as complete).
+```bash
+terra run --task "explain the project"                 # blocked: Target file not specified
+terra run --task "add input validation to src/api.rs"  # runs
+```
+
+Chat is not gated, in Conversation or Goal Mode. `/goal` lists the goal's open questions when it starts.
+
+</details>
+
+<details>
+<summary><strong>Verification Cage</strong> -- enforced on /done</summary>
+
+In Goal Mode, `/done` is a completion claim, recorded in the audit log as `ClaimComplete`. Terra reads the audit log since `/goal`: each successful file write or delete, and each shell command the agent ran, is a change. Only a command started by `/verify` that exits with 0 verifies the changes before it; the agent running `cargo test` itself counts as a change. While changes are unverified, or the last `/verify` failed, the claim is blocked and Goal Mode stays on. `/abandon` leaves Goal Mode without a claim.
+
+```
+/goal add a greeting to notes.txt
+  ... the agent writes notes.txt ...
+/done     -> Goal not closed: 1 write, delete or shell command is not followed by a passing /verify
+/verify   -> runs the project's test command (cargo test, npm test, pytest, go test ./...)
+/done     -> Goal complete (verified by `cargo test`)
+```
+
+</details>
+
+<details>
+<summary><strong>Meta Cage</strong> -- enforced</summary>
+
+Blocks writes and deletes that resolve to `.terra/constitution.toml` or a path beneath it (`..` and symlinks are resolved, case is ignored). It does not rely on the constitution listing itself as a protected path, so the agent cannot create a constitution with a wider sandbox for the next session. It runs before the Action cage, whose protected paths still apply. Shell commands are not covered.
 
 </details>
 
@@ -459,7 +488,7 @@ All three are in the engine and unit-tested, but the runtime does not yet emit t
 - **Knowledge** enforces Code > Documentation > Memory > Assumption: lower-authority claims that contradict higher ones are blocked.
 - **Convergence** warns about further exploration once a verified path was accepted.
 
-Both are implemented and unit-tested but not registered in the runtime engine.
+Both are implemented and unit-tested but not registered in the runtime engine: nothing in the runtime produces knowledge claims or accepted-path events yet, so they would never fire.
 
 </details>
 
@@ -468,7 +497,7 @@ Both are implemented and unit-tested but not registered in the runtime engine.
 ## Testing
 
 ```bash
-cargo test --workspace                                  # 601 tests, no network or API key needed
+cargo test --workspace                                  # 620 tests, no network or API key needed
 cargo test --workspace -- --ignored                     # 17 live tests against a real LLM (needs an API key)
 cargo clippy --workspace --all-targets -- -D warnings   # clean
 ```
@@ -476,6 +505,7 @@ cargo clippy --workspace --all-targets -- -D warnings   # clean
 The default suite covers:
 
 - Cage checks (pass/warn/block) and sandbox path resolution (`..`, symlinks, cycles)
+- The Specification, Verification and Meta gates in use: `terra run`, `/execute`, `/done` with `/verify`, and MCP writes to the constitution
 - Memory database CRUD, ownership, GC, cache; pointer table DSL and salience scoring
 - SpecIR compilation, term normalization, ExecutionPlan versioning
 - Provider retry against a mock HTTP server; OpenAI request building with multi-round tool calls
@@ -510,7 +540,10 @@ CI (`.github/workflows/ci.yml`) runs build, tests and clippy on Linux and macOS,
 - `terra mcp` has no y/N prompt of its own: the MCP client decides whether a shell or delete call runs.
 - Chat prints an answer after it has fully arrived (word by word); the provider's SSE streaming is not used by the chat loop yet.
 - From the second turn on, the system prompt is reduced to Terra's identity to save tokens; `prompt.md` guidance and the memory index are sent on the first turn only.
-- Five of the eight cages are not triggered by runtime events yet (see [Project status](#project-status)).
+- Knowledge and Convergence are not registered (see [Project status](#project-status)).
+- The executor does not pass the session mode to the cages yet; it reports Goal Mode for every command. Goal-only cages are therefore scoped by where their actions come from (`terra run`, `/execute`, `/done`), and the Memory cage's L3 rule is not enforced.
+- Spec compilation does not use the LLM yet, so `terra run` blocks questions and open-ended tasks that name no file, unless `require_spec_complete = false`.
+- Shell commands can still change `.terra/constitution.toml`: the Meta cage, like the sandbox, covers Terra's file tools.
 - Multi-agent roles, memory GC and session resume exist in the libraries but are not exposed by the CLI.
 - `/execute` runs plan steps as LLM calls without tools.
 - Similarity scoring is TF-IDF; there is no neural embedding backend.
@@ -586,11 +619,11 @@ Terra 目前处于早期阶段（v0.1）。[项目状态](#项目状态) 列出�
 |------|----------|
 | 交互式对话（`terra chat`） | 端到端可用：LLM 工具调用（文件、记忆、shell、制品、指针查询），shell 与删除操作需 y/N 确认，会话自动保存，上下文压缩 |
 | 全屏 TUI（`terra chat --tui`） | 可用，确认机制相同；比 readline 界面简单（Ctrl+C 无法取消进行中的请求） |
-| 单次任务（`terra run`） | 可用：规格编译、智能核心规则、经笼检查的模型调用、审计 |
+| 单次任务（`terra run`） | 可用：规格编译、智能核心规则、规格闸门、经笼检查的模型调用、审计。任务需写明要改动的对象（例如文件），否则会被规格笼拦下 |
 | MCP 服务（`terra mcp`） | 通过 stdio 可用：13 个工具，经过同一套执行器和笼；shell 与删除操作由 MCP 客户端负责确认 |
 | 审计日志（`terra trace`） | 可用：每条已执行命令都持久化在 SQLite 中 |
-| 运行时生效的笼 | **Action**（沙箱化写入/删除、破坏性 shell 模式）、**Memory**（L0 只读、L1 仅用户可写）、**Output**（LLM 回答中的提示注入短语） |
-| 已实现但尚未被触发的笼 | **Specification**、**Verification**、**Meta** 已注册，但运行时不会产生它们拦截的动作；**Knowledge**、**Convergence** 未注册 |
+| 运行时生效的笼 | **Action**（沙箱化写入/删除、破坏性 shell 模式）、**Memory**（L0 只读、L1 仅用户可写）、**Output**（LLM 回答中的提示注入短语）、**Specification**（规格有未解决问题时 `terra run` 与 `/execute` 不会开始）、**Verification**（目标期间的改动通过 `/verify` 后 `/done` 才能完成）、**Meta**（禁止写入或删除 `.terra/constitution.toml`） |
+| 未注册的笼 | **Knowledge**、**Convergence** 已实现并有单元测试，但运行时尚无组件产生它们所判断的知识声明或"已接受路径"事件 |
 | 多 Agent 角色 | Worker、Explorer、Cage Monitor 与 SubAgent 配置是经过测试的库类型；CLI 目前只运行一个主 Agent |
 | 向量嵌入 | 提供 `EmbeddingBackend` trait 与 TF-IDF 实现，暂无神经网络嵌入后端 |
 
@@ -669,7 +702,9 @@ terra mcp                     # stdio 上的 MCP 服务
 | 命令 | 别名 | 说明 |
 |------|:----:|------|
 | `/goal "描述"` | `/g` | 进入目标模式：跟踪目标并检查回答是否偏离 |
-| `/done` | `/d` | 退出目标模式，触发 sleep 沉淀 |
+| `/done` | `/d` | 声明目标完成；目标期间的改动需先通过 `/verify`，随后触发 sleep 沉淀 |
+| `/verify [命令]` | | 运行检查命令（默认为项目的测试命令，例如 `cargo test`），验证目标期间的改动 |
+| `/abandon` | | 退出目标模式，不声明完成 |
 | `/accept N` / `/reject N` | | 保留或丢弃沉淀候选（保留的写入 L1 记忆） |
 | `/status` | `/s` | 显示模式、目标对齐度、token 用量 |
 | `/plan` | `/p` | 让 LLM 为当前目标生成执行计划 |
@@ -725,7 +760,7 @@ terra mcp                     # stdio 上的 MCP 服务
 | L0 | 权威层 | 宪法、Soul 模板、智能核心 | 完全禁止（只读） | 是 |
 | L1 | 项目层 | 架构决策、用户保存的知识 | 仅用户 `/remember`、`/accept` | 是 |
 | L2 | 任务层 | 当前假设、活跃尝试 | 双模式均可 | 否 |
-| L3 | 已验证路径 | 经验证的成功方案 | 仅目标模式 + 已验证 | 否 |
+| L3 | 已验证路径 | 经验证的成功方案 | 设计为仅目标模式 + 已验证，尚未生效 | 否 |
 | L4 | 失败路径 | 压缩的失败记录 | 双模式均可 | 否 |
 | L5 | 休眠层 | 已归档、低优先级 | 双模式均可 | 否 |
 | L6 | 候选层 | Agent 提名，等待人工审核 | 双模式均可 | 否 |
@@ -753,13 +788,15 @@ Caging Engineering（笼化工程）是一种行为约束方法论。与提示�
 | 笼 | 功能 | 模式 | 运行时生效 |
 |----|------|:----:|:----------:|
 | **Action（动作笼）** | 写入/删除必须解析到沙箱根目录内；受保护路径只读；拦截 `rm -rf /`、`mkfs`、`> /dev/` | 始终 | 是 |
-| **Memory（记忆笼）** | L0 只读；L1 仅接受用户命令；L3 需目标模式 + 验证 | 始终 | 是 |
+| **Memory（记忆笼）** | L0 只读；L1 仅接受用户命令；L3 设计为需目标模式 + 验证 | 始终 | L0、L1 是；L3 尚未生效 |
 | **Output（输出笼）** | 扣留含提示注入或权限提升短语的 LLM 回答 | 始终 | 是（对话回答与模型调用） |
-| **Specification（规格笼）** | 规格有未解决问题时阻止执行 | 目标 | 已注册，未触发 |
-| **Verification（验证笼）** | 阻止未经验证的完成声明 | 目标 | 已注册，未触发 |
-| **Meta（元笼）** | 阻止修改受保护规则 | 始终 | 已注册，未触发 |
+| **Specification（规格笼）** | 规格有未解决问题（例如未写明目标文件）时阻止任务执行 | `terra run`、目标 | 是（`terra run`、`/execute`） |
+| **Verification（验证笼）** | 目标期间的写入、删除或 shell 命令之后没有通过的 `/verify` 时，阻止 `/done` | 目标 | 是（`/done`） |
+| **Meta（元笼）** | 阻止修改规则：解析后指向 `.terra/constitution.toml` 的写入或删除 | 始终 | 是 |
 | **Knowledge（知识笼）** | 权威排序：代码 > 文档 > 记忆 > 假设 | 始终 | 仅库代码 |
 | **Convergence（收敛笼）** | 已接受方案后继续探索时发出警告 | 目标 | 仅库代码 |
+
+宪法中的 `require_spec_complete` 与 `require_verification`（默认均为 `true`）可以为单个项目关闭规格笼与验证笼。
 
 shell 命令不在沙箱内：一旦你批准，它以你的用户权限运行，确认提示就是 shell 访问的控制点。文件读取不受项目目录限制。
 
@@ -768,7 +805,7 @@ shell 命令不在沙箱内：一旦你批准，它以你的用户权限运行�
 ## 测试
 
 ```bash
-cargo test --workspace                                  # 601 个测试，无需网络和 API key
+cargo test --workspace                                  # 620 个测试，无需网络和 API key
 cargo test --workspace -- --ignored                     # 17 个连接真实 LLM 的测试（需要 API key）
 cargo clippy --workspace --all-targets -- -D warnings   # 无警告
 ```
@@ -798,7 +835,10 @@ CI（`.github/workflows/ci.yml`）在 Linux 和 macOS 上运行构建、测试�
 - `terra mcp` 没有自己的 y/N 确认，shell 与删除调用是否执行由 MCP 客户端决定。
 - 对话回答在完整返回后才逐词打印；对话循环尚未使用供应商的 SSE 流式输出。
 - 从第二轮起系统提示词精简为身份声明以节省 token；`prompt.md` 与记忆索引只在第一轮发送。
-- 8 个笼中有 5 个尚未被运行时事件触发（见 [项目状态](#项目状态)）。
+- Knowledge 与 Convergence 尚未注册（见 [项目状态](#项目状态)）。
+- 执行器尚未把会话模式传给笼，对每条命令都报告为目标模式。因此仅目标模式生效的笼由其动作的来源（`terra run`、`/execute`、`/done`）限定范围，记忆笼的 L3 规则尚未生效。
+- 规格编译尚未使用 LLM，所以没有写明文件的提问式或开放式任务会被 `terra run` 拦下，除非设置 `require_spec_complete = false`。
+- shell 命令仍可修改 `.terra/constitution.toml`：元笼与沙箱一样，只约束 Terra 自己的文件工具。
 - 多 Agent 角色、记忆 GC、会话恢复已在库中实现，但 CLI 尚未开放。
 - `/execute` 以不带工具的 LLM 调用执行计划步骤。
 - 相似度计算基于 TF-IDF，暂无神经网络嵌入。

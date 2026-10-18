@@ -77,6 +77,20 @@ pub enum CommandOp {
         workdir: Option<String>,
         timeout_ms: Option<u64>,
     },
+    /// Gate before a task runs: the Specification cage blocks it while the
+    /// spec has open questions.
+    ExecuteTask {
+        spec_id: String,
+        intent: String,
+        open_questions: Vec<String>,
+    },
+    /// Claim that the active goal is complete: the Verification cage blocks
+    /// the claim unless `verified`. `evidence` says what the claim rests on.
+    ClaimComplete {
+        goal: String,
+        verified: bool,
+        evidence: String,
+    },
 }
 
 /// Result of executing a command.
