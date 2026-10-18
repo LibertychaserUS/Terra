@@ -128,12 +128,18 @@ pub struct CompletionRequest {
     /// Tool definitions for function calling (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDef>>,
-    /// Previous tool results to include in the conversation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_results: Option<Vec<ToolResult>>,
-    /// Previous tool calls (for multi-turn tool conversations).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_tool_calls: Option<Vec<ToolCall>>,
+    /// Earlier tool calls and their results in this turn, oldest first.
+    /// Each round is replayed after the user message so the model sees the
+    /// whole chain, not just the latest result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_rounds: Vec<ToolRound>,
+}
+
+/// One assistant tool-call message and the results sent back for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRound {
+    pub calls: Vec<ToolCall>,
+    pub results: Vec<ToolResult>,
 }
 
 /// A completion response from an LLM.

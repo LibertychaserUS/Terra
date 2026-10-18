@@ -184,8 +184,7 @@ pub async fn route(
                 max_tokens: *max_tokens,
                 temperature: *temperature,
                 tools: None,
-                tool_results: None,
-                pending_tool_calls: None,
+                tool_rounds: vec![],
             };
 
             match provider.complete(request).await {

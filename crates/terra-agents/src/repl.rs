@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_providers::adapter::{
-    CompletionRequest, ToolCall, ToolDef as ProviderToolDef, ToolResult,
+    CompletionRequest, ToolDef as ProviderToolDef, ToolResult, ToolRound,
 };
 use terra_types::command::{Command, CommandOp};
 use terra_types::event::{StreamEvent, TokenTracker};
@@ -762,7 +762,8 @@ impl Repl {
     ///
     /// System prompt strategy:
     /// - Turn 1: full context (identity + tools docs + project memory + pointer DSL)
-    /// - Turn 2+: minimal (identity only; model retains context from turn 1)
+    /// - Turn 2+: identity only, to save tokens. The conversation history and tool
+    ///   schemas are still sent each turn; prompt.md guidance and the memory index are not.
     /// - /goal entry: adds goal intent + relevant IC rules (once)
     /// Tool descriptions are NOT in the prompt — they're in the API tools field.
     async fn handle_conversation(&mut self, input: &str) -> Vec<ReplOutput> {
@@ -843,22 +844,20 @@ impl Repl {
         let mut completion_tokens: u32 = 0;
         let mut response = String::new();
 
-        let mut pending_tool_calls: Option<Vec<ToolCall>> = None;
-        let mut tool_results: Option<Vec<ToolResult>> = None;
+        // Tool calls made so far in this turn, replayed on every iteration so
+        // the model keeps the user's request and all earlier results in view.
+        let mut tool_rounds: Vec<ToolRound> = Vec::new();
 
         let provider = self.executor.provider().clone();
 
         for iteration in 1..=MAX_AGENT_LOOP_ITERATIONS {
-            // Build request: first iteration sends history, subsequent iterations
-            // send empty user_prompt (tool results carry the conversation forward).
             let request = CompletionRequest {
                 system_prompt: system_prompt.clone(),
-                user_prompt: if iteration == 1 { history.clone() } else { String::new() },
+                user_prompt: history.clone(),
                 max_tokens: Some(2000),
                 temperature: Some(0.3),
                 tools: Some(tool_defs.clone()),
-                pending_tool_calls: pending_tool_calls.take(),
-                tool_results: tool_results.take(),
+                tool_rounds: tool_rounds.clone(),
             };
 
             let completion = match provider.complete(request).await {
@@ -916,10 +915,8 @@ impl Repl {
                     });
                 }
 
-                // Store for next iteration
-                pending_tool_calls = Some(calls);
-                tool_results = Some(results);
-                continue; // Loop: call LLM again with results
+                tool_rounds.push(ToolRound { calls, results });
+                continue; // Loop: call LLM again with all results so far
             }
 
             // --- No tool calls: final text response ---
@@ -1609,5 +1606,88 @@ mod tests {
         let log = std::process::Command::new("git").args(["rev-list", "--count", "HEAD"])
             .current_dir(repo.path()).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "1");
+    }
+    /// Provider that returns scripted responses and records every request.
+    struct ScriptedProvider {
+        responses: std::sync::Mutex<std::collections::VecDeque<terra_providers::adapter::CompletionResponse>>,
+        requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+        capability: terra_providers::adapter::ProviderCapability,
+    }
+
+    #[async_trait::async_trait]
+    impl terra_providers::adapter::ProviderAdapter for ScriptedProvider {
+        async fn complete(&self, request: CompletionRequest) -> anyhow::Result<terra_providers::adapter::CompletionResponse> {
+            self.requests.lock().unwrap().push(request);
+            Ok(self.responses.lock().unwrap().pop_front().expect("unexpected extra LLM call"))
+        }
+        fn capabilities(&self) -> &terra_providers::adapter::ProviderCapability {
+            &self.capability
+        }
+    }
+
+    fn reply(content: &str, tool_calls: Vec<terra_providers::adapter::ToolCall>) -> terra_providers::adapter::CompletionResponse {
+        terra_providers::adapter::CompletionResponse {
+            content: content.into(),
+            usage_prompt_tokens: 10,
+            usage_completion_tokens: 5,
+            model: "scripted".into(),
+            tool_calls,
+        }
+    }
+
+    // Regression: after the first tool call the request used to carry an empty
+    // user message and only the latest tool round.
+    #[tokio::test]
+    async fn agent_loop_keeps_question_and_all_tool_rounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "alpha").unwrap();
+        std::fs::write(&b, "beta").unwrap();
+        let read = |id: &str, path: &std::path::Path| terra_providers::adapter::ToolCall {
+            id: id.into(),
+            name: "FileRead".into(),
+            arguments: serde_json::json!({"path": path.to_str().unwrap()}),
+        };
+
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(ScriptedProvider {
+            responses: std::sync::Mutex::new(vec![
+                reply("", vec![read("call_a", &a)]),
+                reply("", vec![read("call_b", &b)]),
+                reply("a says alpha, b says beta", vec![]),
+            ].into()),
+            requests: requests.clone(),
+            capability: terra_providers::adapter::ProviderCapability {
+                provider_id: "scripted".into(),
+                model_id: "scripted".into(),
+                supports_structured_output: false,
+                supports_streaming: false,
+                supports_function_calling: true,
+                max_context_tokens: 128_000,
+                latency_class: terra_providers::adapter::LatencyClass::Fast,
+            },
+        });
+        let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
+        let artifacts = Arc::new(ArtifactStore::new(dir.path().to_path_buf()));
+        let caging = Arc::new(CagingEngine::new(vec![
+            Box::new(ActionCage::new(SandboxGuard::new(dir.path().to_path_buf(), vec![]))),
+        ]));
+        let exec = Arc::new(CommandExecutor::new(memory, artifacts, Arc::new(AuditLog::new()), caging, provider));
+        let mut repl = Repl::new(exec, Arc::new(IntelligenceCore::new()));
+
+        let out = repl.process_input("compare a.txt and b.txt").await;
+        let text: String = out.iter().filter_map(|o| match o { ReplOutput::Token(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(text, "a says alpha, b says beta");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for (i, req) in requests.iter().enumerate() {
+            assert!(req.user_prompt.contains("compare a.txt and b.txt"), "request {} lost the question", i);
+            assert_eq!(req.tool_rounds.len(), i, "request {} should replay {} rounds", i, i);
+        }
+        let last = &requests[2];
+        assert!(last.tool_rounds[0].results[0].content.contains("alpha"));
+        assert!(last.tool_rounds[1].results[0].content.contains("beta"));
     }
 }

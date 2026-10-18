@@ -210,71 +210,7 @@ impl OpenAICompatibleAdapter {
 
     /// Execute a request with retry and exponential backoff.
     async fn complete_with_retry(&self, request: &CompletionRequest) -> Result<CompletionResponse> {
-        // Build messages
-        let mut messages = vec![
-            ChatMessage {
-                role: "system".into(),
-                content: Some(request.system_prompt.clone()),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: Some(request.user_prompt.clone()),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
-
-        // Append tool call results if present (multi-turn tool conversation)
-        if let (Some(pending_calls), Some(results)) = (&request.pending_tool_calls, &request.tool_results) {
-            // Add the assistant message with tool_calls
-            let chat_tool_calls: Vec<ChatToolCall> = pending_calls.iter().map(|tc| ChatToolCall {
-                id: tc.id.clone(),
-                call_type: "function".into(),
-                function: ChatFunctionCall {
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.to_string(),
-                },
-            }).collect();
-            messages.push(ChatMessage {
-                role: "assistant".into(),
-                content: None,
-                tool_calls: Some(chat_tool_calls),
-                tool_call_id: None,
-            });
-
-            // Add tool results
-            for result in results {
-                messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: Some(result.content.clone()),
-                    tool_calls: None,
-                    tool_call_id: Some(result.tool_call_id.clone()),
-                });
-            }
-        }
-
-        // Convert ToolDef to ChatTool format
-        let tools: Option<Vec<ChatTool>> = request.tools.as_ref().map(|defs| {
-            defs.iter().map(|d| ChatTool {
-                tool_type: "function".into(),
-                function: ChatFunction {
-                    name: d.name.clone(),
-                    description: d.description.clone(),
-                    parameters: d.parameters.clone(),
-                },
-            }).collect()
-        });
-
-        let chat_request = ChatRequest {
-            model: self.model.clone(),
-            messages,
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            tools,
-            stream: None,
-        };
+        let chat_request = self.build_chat_request(request, false);
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let mut last_error = None;
@@ -406,11 +342,10 @@ impl OpenAICompatibleAdapter {
             },
         ];
 
-        // Append tool call results if present (multi-turn tool conversation)
-        if let (Some(pending_calls), Some(results)) =
-            (&request.pending_tool_calls, &request.tool_results)
-        {
-            let chat_tool_calls: Vec<ChatToolCall> = pending_calls
+        // Replay every earlier tool round in order (multi-step tool conversation)
+        for round in &request.tool_rounds {
+            let chat_tool_calls: Vec<ChatToolCall> = round
+                .calls
                 .iter()
                 .map(|tc| ChatToolCall {
                     id: tc.id.clone(),
@@ -428,7 +363,7 @@ impl OpenAICompatibleAdapter {
                 tool_call_id: None,
             });
 
-            for result in results {
+            for result in &round.results {
                 messages.push(ChatMessage {
                     role: "tool".into(),
                     content: Some(result.content.clone()),
@@ -655,8 +590,7 @@ mod tests {
             max_tokens: Some(50),
             temperature: Some(0.0),
             tools: None,
-            tool_results: None,
-            pending_tool_calls: None,
+            tool_rounds: vec![],
         };
 
         let response = adapter.complete(request).await.unwrap();
@@ -777,6 +711,38 @@ data: [DONE]\n";
         assert!(json2.get("stream").is_none());
     }
 
+    // Regression: every earlier tool round must be replayed after the user message.
+    #[test]
+    fn build_chat_request_replays_all_tool_rounds() {
+        use crate::adapter::{ToolCall, ToolResult, ToolRound};
+        let adapter = OpenAICompatibleAdapter::new(
+            "test-key".into(),
+            "http://localhost".into(),
+            "test-model".into(),
+            10,
+        )
+        .unwrap();
+        let round = |id: &str| ToolRound {
+            calls: vec![ToolCall { id: id.into(), name: "FileRead".into(), arguments: serde_json::json!({"path": id}) }],
+            results: vec![ToolResult { tool_call_id: id.into(), content: format!("contents of {}", id) }],
+        };
+        let request = CompletionRequest {
+            system_prompt: "system".into(),
+            user_prompt: "user: summarize a and b".into(),
+            max_tokens: None,
+            temperature: None,
+            tools: None,
+            tool_rounds: vec![round("a"), round("b")],
+        };
+
+        let messages = adapter.build_chat_request(&request, false).messages;
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "tool", "assistant", "tool"]);
+        assert_eq!(messages[1].content.as_deref(), Some("user: summarize a and b"));
+        assert_eq!(messages[3].tool_call_id.as_deref(), Some("a"));
+        assert_eq!(messages[5].tool_call_id.as_deref(), Some("b"));
+    }
+
     // T-SSE-006: build_chat_request sets stream field
     #[test]
     fn build_chat_request_stream() {
@@ -794,8 +760,7 @@ data: [DONE]\n";
             max_tokens: None,
             temperature: None,
             tools: None,
-            tool_results: None,
-            pending_tool_calls: None,
+            tool_rounds: vec![],
         };
 
         let chat_req_stream = adapter.build_chat_request(&request, true);
