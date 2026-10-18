@@ -39,11 +39,7 @@ pub async fn route(
 
                     // Auto-record notification for L5/L6 writes
                     let notification = if level_str == "L5" || level_str == "L6" {
-                        let summary = if content.len() > 60 {
-                            format!("{}...", &content[..57])
-                        } else {
-                            content.clone()
-                        };
+                        let summary = terra_types::text::truncate_ellipsis(content, 60);
                         Some(format!("[Terra] Recorded → {}: \"{}\"", level_str, summary))
                     } else {
                         None

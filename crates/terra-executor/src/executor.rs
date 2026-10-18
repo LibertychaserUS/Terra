@@ -18,7 +18,7 @@ fn status_text(op: &CommandOp) -> String {
         CommandOp::FileWrite { path, .. } => format!("Writing {}", path.rsplit('/').next().unwrap_or(path)),
         CommandOp::FileDelete { path } => format!("Deleting {}", path.rsplit('/').next().unwrap_or(path)),
         CommandOp::ShellExec { command, .. } => {
-            if command.len() > 30 { format!("Running: {}...", &command[..27]) } else { format!("Running: {}", command) }
+            format!("Running: {}", terra_types::text::truncate_ellipsis(command, 30))
         }
         CommandOp::ProviderCall { .. } => "Thinking...".into(),
         CommandOp::MemRead { key } => format!("Reading memory '{}'", key),

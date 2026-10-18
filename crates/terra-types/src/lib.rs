@@ -7,6 +7,7 @@
 pub mod command;
 pub mod contract;
 pub mod event;
+pub mod text;
 
 pub use command::{Command, CommandOp, CommandResult, CommandStatus};
 pub use contract::{OutputContract, ContractParseResult};

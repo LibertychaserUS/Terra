@@ -175,7 +175,7 @@ impl ProviderAdapter for DryRunAdapter {
         Ok(CompletionResponse {
             content: format!(
                 "DRY_RUN response to: {}",
-                &request.user_prompt[..request.user_prompt.len().min(100)]
+                request.user_prompt.chars().take(100).collect::<String>()
             ),
             usage_prompt_tokens: 0,
             usage_completion_tokens: 0,
@@ -187,7 +187,7 @@ impl ProviderAdapter for DryRunAdapter {
     async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<Vec<StreamChunk>> {
         let full = format!(
             "DRY_RUN response to: {}",
-            &request.user_prompt[..request.user_prompt.len().min(100)]
+            request.user_prompt.chars().take(100).collect::<String>()
         );
         // Emit word by word to simulate streaming
         let words: Vec<&str> = full.split_whitespace().collect();

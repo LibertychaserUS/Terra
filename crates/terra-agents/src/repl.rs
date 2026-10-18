@@ -21,6 +21,7 @@ use terra_providers::adapter::{
 };
 use terra_types::command::{Command, CommandOp};
 use terra_types::event::{StreamEvent, TokenTracker};
+use terra_types::text::{prefix_chars, truncate_ellipsis};
 
 use terra_compile::ExecutionPlan;
 
@@ -326,11 +327,7 @@ impl Repl {
                 let result = self.executor.execute(cmd).await;
                 let msg = if result.status == terra_types::CommandStatus::Ok {
                     // Register pointer for the newly written memory entry
-                    let annotation = if arg.len() > 60 {
-                        format!("{}...", &arg[..57])
-                    } else {
-                        arg.to_string()
-                    };
+                    let annotation = truncate_ellipsis(arg, 60);
                     self.orchestrator.register_pointer(
                         &mem_key,
                         terra_memory::types::Level::L1,
@@ -607,11 +604,7 @@ impl Repl {
                 self.executor.execute(cmd).await;
                 self.session.record_verdict(idx, true).await;
                 // Register pointer
-                let annotation = if principle.len() > 60 {
-                    format!("{}...", &principle[..57])
-                } else {
-                    principle.clone()
-                };
+                let annotation = truncate_ellipsis(&principle, 60);
                 self.orchestrator.register_pointer(
                     &key,
                     terra_memory::types::Level::L1,
@@ -1117,9 +1110,7 @@ impl Repl {
 
         // Build summary of old turns
         let summary: String = old_turns.iter()
-            .map(|t| format!("{}: {}", t.role,
-                if t.content.len() > 100 { format!("{}...", &t.content[..97]) } else { t.content.clone() }
-            ))
+            .map(|t| format!("{}: {}", t.role, truncate_ellipsis(&t.content, 100)))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1134,11 +1125,7 @@ impl Repl {
         self.executor.execute(cmd).await;
 
         // Register pointer for the compaction memory entry
-        let annotation = if summary.len() > 60 {
-            format!("{}...", &summary[..57])
-        } else {
-            summary.clone()
-        };
+        let annotation = truncate_ellipsis(&summary, 60);
         self.orchestrator.register_pointer(
             &compaction_key,
             terra_memory::types::Level::L5,
@@ -1151,7 +1138,7 @@ impl Repl {
             role: "system".into(),
             content: format!("[Compacted {} earlier turns. Key topics: {}]",
                 old_turns.len(),
-                &summary[..summary.len().min(200)]
+                prefix_chars(&summary, 200)
             ),
         }];
         new_context.extend(recent_turns);
@@ -1486,5 +1473,25 @@ mod tests {
             _ => false,
         });
         assert!(has_error, "should show usage for non-numeric input");
+    }
+    // Regression: long non-ASCII input used to panic on byte slicing.
+    #[tokio::test]
+    async fn remember_long_cjk_does_not_panic() {
+        let (mut repl, _dir) = test_repl();
+        let note = "这个项目使用Rust编写，内存系统有七层，每一层都有不同的写权限和垃圾回收策略";
+        let out = repl.process_input(&format!("/remember {}", note)).await;
+        assert!(out.iter().any(|o| matches!(o, ReplOutput::Notification(n) if n.starts_with("Remembered"))));
+    }
+
+    #[tokio::test]
+    async fn long_cjk_conversation_and_compaction_do_not_panic() {
+        let (mut repl, _dir) = test_repl();
+        let line = "请解释一下这个项目的架构，包括内存系统、行为笼子、多智能体运行时以及语言编译管线的设计。".repeat(3);
+        for _ in 0..4 {
+            let out = repl.process_input(&line).await;
+            assert!(out.iter().any(|o| matches!(o, ReplOutput::Token(_))));
+        }
+        let out = repl.process_input("/compact").await;
+        assert!(out.iter().any(|o| matches!(o, ReplOutput::Notification(n) if n.starts_with("Compacted"))));
     }
 }
