@@ -536,8 +536,6 @@ CI (`.github/workflows/ci.yml`) runs build, tests and clippy on Linux and macOS,
 - **New providers** implement `ProviderAdapter`
 - **Text previews**: use `terra_types::text` helpers instead of byte slicing
 
-Design documents written during development live in [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/) (Chinese); figures in them reflect the state when they were written.
-
 ---
 
 ## License
@@ -805,8 +803,6 @@ CI（`.github/workflows/ci.yml`）在 Linux 和 macOS 上运行构建、测试�
 - `/execute` 以不带工具的 LLM 调用执行计划步骤。
 - 相似度计算基于 TF-IDF，暂无神经网络嵌入。
 - TUI 无法取消进行中的请求。
-
-开发过程中的设计文档见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [docs/](docs/)，其中的数字反映的是撰写时的状态。
 
 ---
 
