@@ -348,11 +348,18 @@ impl Orchestrator {
         let search_result = self.executor.execute(search_cmd).await;
 
         // 6. Prepare worker task with IC rules and context
+        let memory_keys: Vec<String> = search_result.data.as_ref()
+            .and_then(|d| d.get("results"))
+            .and_then(|r| r.as_array())
+            .map(|hits| hits.iter()
+                .filter_map(|h| h.get("key").and_then(|k| k.as_str()).map(String::from))
+                .collect())
+            .unwrap_or_default();
         let user_prompt = format!(
-            "Task: {}\nConstraints: {:?}\nContext from memory: {:?}",
+            "Task: {}\nConstraints: {}\nRelated memory keys: {}",
             spec.intent,
-            spec.constraints,
-            search_result.data,
+            list_or_none(&spec.constraints),
+            list_or_none(&memory_keys),
         );
 
         // 7. Record worker dispatch (via Executor)
@@ -455,6 +462,11 @@ fn extract_json_array(text: &str) -> String {
         }
     }
     "[]".to_string()
+}
+
+/// Comma-separated list for prompts, or "(none)".
+pub(crate) fn list_or_none(items: &[String]) -> String {
+    if items.is_empty() { "(none)".into() } else { items.join(", ") }
 }
 
 #[cfg(test)]

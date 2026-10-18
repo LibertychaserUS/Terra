@@ -91,8 +91,10 @@ impl WorkerAgent {
     /// Execute a task. Returns the response content.
     pub async fn execute(&self, spec: &SpecIR, system_prompt: &str) -> Result<WorkerResult> {
         let user_prompt = format!(
-            "Task: {}\nTarget: {:?}\nConstraints: {:?}",
-            spec.intent, spec.target.file, spec.constraints
+            "Task: {}\nTarget: {}\nConstraints: {}",
+            spec.intent,
+            spec.target.file.as_deref().unwrap_or("(none)"),
+            crate::orchestrator::list_or_none(&spec.constraints)
         );
 
         let cmd = Command::new(

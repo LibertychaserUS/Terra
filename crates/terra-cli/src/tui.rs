@@ -41,6 +41,8 @@ struct TuiState {
     greeter_lines: Vec<String>,
     input_history: Vec<String>,
     history_pos: Option<usize>,
+    /// True while response tokens are being appended to the last message.
+    streaming: bool,
 }
 
 impl TuiState {
@@ -56,6 +58,7 @@ impl TuiState {
             greeter_lines,
             input_history: Vec::new(),
             history_pos: None,
+            streaming: false,
         }
     }
 
@@ -110,6 +113,9 @@ impl TuiState {
     fn process_outputs(&mut self, outputs: Vec<ReplOutput>) {
         self.thinking = false;
         for output in outputs {
+            if !matches!(output, ReplOutput::Token(_)) {
+                self.streaming = false;
+            }
             match output {
                 ReplOutput::Text(t) => self.add_msg("", &t, Style::default()),
                 ReplOutput::Notification(n) => {
@@ -123,6 +129,11 @@ impl TuiState {
                 }
                 ReplOutput::Prompt(_) => {}
                 ReplOutput::Token(t) => {
+                    // A response starts on its own line, not after the last notification.
+                    if !self.streaming {
+                        self.add_msg("", "", Style::default());
+                        self.streaming = true;
+                    }
                     if let Some(last) = self.messages.last_mut() { last.1.push_str(&t); }
                 }
                 ReplOutput::Event(_) => {}
@@ -394,6 +405,19 @@ mod tests {
     fn cursor_columns_count_wide_chars() {
         let state = typed("a中");
         assert_eq!(state.cursor_columns(), 3);
+    }
+
+    #[test]
+    fn response_tokens_start_a_new_line() {
+        let mut state = TuiState::new("test", vec![]);
+        state.process_outputs(vec![
+            ReplOutput::Notification("  << ShellExec complete".into()),
+            ReplOutput::Token("tool ".into()),
+            ReplOutput::Token("said".into()),
+            ReplOutput::Text(String::new()),
+        ]);
+        let contents: Vec<&str> = state.messages.iter().map(|m| m.1.as_str()).collect();
+        assert_eq!(contents, ["  << ShellExec complete", "tool said", ""]);
     }
 
     #[test]

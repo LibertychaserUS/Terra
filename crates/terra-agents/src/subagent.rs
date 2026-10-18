@@ -98,11 +98,11 @@ impl SubAgentRunner {
         // 3. Execute (via ProviderCall through executor with soul prompt)
         let system_prompt = self.build_prompt();
         let user_prompt = format!(
-            "Task: {}\nTarget: {}\nConstraints: {:?}\nExpected: {:?}",
+            "Task: {}\nTarget: {}\nConstraints: {}\nExpected: {}",
             task.op,
             task.target,
-            task.constraints,
-            task.expected_outputs,
+            crate::orchestrator::list_or_none(&task.constraints),
+            crate::orchestrator::list_or_none(&task.expected_outputs),
         );
 
         let cmd = terra_types::Command::new(

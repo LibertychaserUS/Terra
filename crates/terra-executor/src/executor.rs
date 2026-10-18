@@ -84,6 +84,11 @@ impl CommandExecutor {
 
     /// Clean up memory entries for a given scope (lifecycle boundary).
     /// Called by SessionManager when a goal/session ends.
+    /// The audit trail this executor records into.
+    pub fn audit(&self) -> &Arc<AuditLog> {
+        &self.audit
+    }
+
     pub fn cleanup_memory_scope(&self, scope: terra_memory::types::Scope) -> usize {
         self.memory.cleanup_scope(scope).unwrap_or(0)
     }
@@ -135,7 +140,8 @@ impl CommandExecutor {
 
         // Log any warnings
         for (cage_name, warning) in &cage_result.warnings {
-            warn!(cage = %cage_name, warning = %warning, "cage warning");
+            // Expected for every shell call; logged, not shown in the chat.
+            info!(cage = %cage_name, warning = %warning, "cage warning");
         }
 
         // 3. Emit start event

@@ -55,7 +55,8 @@ fn doctor_shows_status() {
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("OK"));
+        .stdout(predicate::str::contains("Status:       dry-run only"))
+        .stdout(predicate::str::contains("not initialized"));
 }
 
 // T-CLI-003: doctor --as-json outputs valid JSON
@@ -194,4 +195,105 @@ fn chat_auto_init_keeps_runtime_data_out_of_git() {
     let visible = terra_files_visible_to_git(&env);
     assert!(visible.iter().any(|p| p.ends_with(".gitignore")), "{:?}", visible);
     assert_only_shareable_terra_files(&visible);
+}
+
+/// Serve canned OpenAI-style chat completions on a local port.
+fn spawn_stub_llm(reply: &'static str) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).ok();
+            let json = serde_json::json!({
+                "id": "stub", "model": "stub-model",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }).to_string();
+            let mut stream = reader.into_inner();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", json.len(), json).ok();
+        }
+    });
+    format!("http://{}", addr)
+}
+
+// `terra config set` used to write a file nothing read; the runtime now uses it.
+#[test]
+fn project_config_drives_the_provider() {
+    let env = TestEnv::new();
+    let url = spawn_stub_llm("reply from the configured provider");
+    env.terra().arg("init").assert().success();
+    for (key, value) in [("provider.base_url", url.as_str()), ("provider.model", "stub-model"), ("provider.api_key", "test-key")] {
+        env.terra().args(["config", "set", key, value, "--project"]).assert().success();
+    }
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&env.terra().args(["doctor", "--as-json"]).output().unwrap().stdout).unwrap();
+    assert_eq!(report["provider_configured"], true);
+    assert_eq!(report["provider_source"], ".terra/config.toml");
+    assert_eq!(report["model"], "stub-model");
+    assert_eq!(report["project_initialized"], true);
+
+    let out = env.terra().args(["run", "--task", "say hi", "--as-json"]).output().unwrap();
+    let run: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(run["provider"], "stub-model", "dry-run would report dry_run");
+    assert!(run["worker_response"].as_str().unwrap().contains("reply from the configured provider"));
+}
+
+#[test]
+fn config_set_rejects_keys_the_runtime_ignores() {
+    TestEnv::new().terra()
+        .args(["config", "set", "memory.cache_capacity", "5"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Supported: provider.base_url"));
+}
+
+#[test]
+fn config_set_does_not_echo_api_key() {
+    TestEnv::new().terra()
+        .args(["config", "set", "provider.api_key", "sk-very-secret"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sk-very-secret").not());
+}
+
+#[test]
+fn trace_reports_missing_log_then_lists_entries() {
+    let env = TestEnv::new();
+    env.terra().arg("trace").assert().success().stdout(predicate::str::contains("No audit log here yet"));
+    env.terra().arg("init").assert().success();
+    env.terra().args(["run", "--task", "list files"]).assert().success();
+    env.terra()
+        .arg("trace")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("entries, showing"))
+        .stdout(predicate::str::contains("ProviderCall"));
+    let out = env.terra().args(["trace", "--as-json", "-n", "2"]).output().unwrap();
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(entries.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn piped_output_has_no_color_codes() {
+    let env = TestEnv::new();
+    let out = env.terra().arg("init").output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains('\x1b'));
+    let out = env.terra().arg("chat").write_stdin("/help\nhello\n/quit\n").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains('\x1b'), "escape codes in piped chat output");
+    assert!(!text.contains("Thinking"), "spinner in piped chat output");
 }

@@ -23,9 +23,13 @@ pub struct Spinner {
 
 impl Spinner {
     /// Start a thinking spinner with live elapsed timer.
+    /// Does nothing when stdout is not a terminal (piped output stays clean).
     pub fn start() -> Self {
         use std::io::Write;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if !color_enabled() {
+            return Self { handle: None, stop };
+        }
         let stop_clone = stop.clone();
 
         let handle = tokio::spawn(async move {
@@ -89,6 +93,10 @@ fn format_markdown_line(line: &str) -> String {
 /// Render a multi-line text block with code block state tracking.
 /// Handles ``` fenced code blocks with box-drawing borders.
 pub fn render_text_block(text: &str) {
+    if !color_enabled() {
+        println!("{}", text);
+        return;
+    }
     let mut in_code_block = false;
 
     for line in text.lines() {
@@ -300,11 +308,52 @@ pub fn is_terminal() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
+/// Colors, spinners and typing effects only on an interactive terminal,
+/// and never when `NO_COLOR` is set (https://no-color.org).
+pub fn color_enabled() -> bool {
+    is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Remove ANSI SGR escape sequences (`ESC [ ... m`).
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Text for stdout: unchanged on a color terminal, escape codes removed otherwise.
+pub fn paint(s: &str) -> std::borrow::Cow<'_, str> {
+    if color_enabled() { s.into() } else { strip_ansi(s).into() }
+}
+
 /// Create the appropriate renderer based on environment.
 pub fn auto_renderer(provider_name: &str) -> Box<dyn OutputRenderer> {
-    if is_terminal() {
+    if color_enabled() {
         Box::new(TermRenderer::new(provider_name))
     } else {
         Box::new(PlainRenderer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_sgr_codes_only() {
+        assert_eq!(strip_ansi("\x1b[1m\x1b[35mTerra\x1b[0m ok"), "Terra ok");
+        assert_eq!(strip_ansi("plain 中文 ✓"), "plain 中文 ✓");
+        assert_eq!(strip_ansi("\x1b[2m  ● Running\x1b[0m"), "  ● Running");
     }
 }

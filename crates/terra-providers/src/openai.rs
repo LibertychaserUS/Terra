@@ -22,7 +22,8 @@ const ENV_DASHSCOPE_KEY: &str = "DASHSCOPE_API_KEY";
 
 const DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_MODEL: &str = "qwen-plus";
-const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// HTTP timeout for provider requests.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_RETRIES: u32 = 3;
 
 /// OpenAI-compatible provider adapter.
