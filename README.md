@@ -36,7 +36,7 @@
 
 Terra is an AI agent runtime written in Rust and built on **Caging Engineering**: instead of only telling a model what to do, it limits what the agent *can* do. Every file, memory and shell operation the agent requests passes through a caging pipeline and an audit log before it runs. Knowledge lives in a 7-level memory database with a compact pointer index, and any OpenAI-compatible LLM can drive it.
 
-Terra is an early-stage project (v0.1). [Project status](#project-status) lists what works end to end today and what exists only as tested library code.
+Terra is an early-stage project (v0.2). [Project status](#project-status) lists what works end to end today and what exists only as tested library code.
 
 ### Why Terra?
 
@@ -609,7 +609,7 @@ CI (`.github/workflows/ci.yml`) runs build, tests and clippy on Linux and macOS,
 
 Terra 是一个用 Rust 编写的 **AI Agent 运行时**，以 **Caging Engineering（笼化工程）** 为核心方法论：不只是告诉模型"做什么"，而是限定 Agent "能做什么"。Agent 请求的每一个文件、记忆和 shell 操作，都要先经过笼化检查和审计日志才会执行。知识存放在带指针索引的 7 层记忆数据库中，可接入任意 OpenAI 兼容的 LLM。
 
-Terra 目前处于早期阶段（v0.1）。[项目状态](#项目状态) 列出了哪些功能已端到端可用，哪些目前只是经过测试的库代码。
+Terra 目前处于早期阶段（v0.2）。[项目状态](#项目状态) 列出了哪些功能已端到端可用，哪些目前只是经过测试的库代码。
 
 ---
 
