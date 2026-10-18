@@ -110,10 +110,14 @@ pub fn resolve_config(project_root: Option<&Path>) -> TerraConfig {
     }
 
     // Layer 3: environment variables (highest precedence)
-    if let Ok(key) = env::var("TERRA_PROVIDER_API_KEY") {
+    if let Some(key) = non_empty_env("TERRA_PROVIDER_API_KEY").or_else(|| non_empty_env("DASHSCOPE_API_KEY")) {
         config.provider.api_key = Some(key);
-    } else if let Ok(key) = env::var("DASHSCOPE_API_KEY") {
-        config.provider.api_key = Some(key);
+    }
+
+    // An empty key means "not configured": use dry-run instead of sending
+    // requests with a blank bearer token.
+    if config.provider.api_key.as_deref().is_some_and(|k| k.trim().is_empty()) {
+        config.provider.api_key = None;
     }
     if let Ok(url) = env::var("TERRA_PROVIDER_BASE_URL") {
         config.provider.base_url = url;
@@ -123,6 +127,10 @@ pub fn resolve_config(project_root: Option<&Path>) -> TerraConfig {
     }
 
     config
+}
+
+fn non_empty_env(var: &str) -> Option<String> {
+    env::var(var).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// Apply TOML values onto config (partial override).
@@ -243,12 +251,16 @@ pub struct EnvironmentReport {
 /// `resolve_config`: env vars, then project config, then global config.
 pub fn api_key_source(project_root: Option<&Path>) -> String {
     for var in ["TERRA_PROVIDER_API_KEY", "DASHSCOPE_API_KEY"] {
-        if env::var(var).is_ok() {
+        if non_empty_env(var).is_some() {
             return var.into();
         }
     }
     let has_key = |path: &Path| {
-        matches!(load_toml(path), Ok(Some(t)) if t.get("provider").and_then(|p| p.get("api_key")).is_some())
+        matches!(load_toml(path), Ok(Some(t)) if t
+            .get("provider")
+            .and_then(|p| p.get("api_key"))
+            .and_then(|k| k.as_str())
+            .is_some_and(|k| !k.trim().is_empty()))
     };
     if let Some(root) = project_root {
         if has_key(&project_config_path(root)) {
@@ -269,7 +281,7 @@ pub fn env_override_for(key: &str) -> Option<&'static str> {
         "provider.model" => &["TERRA_PROVIDER_MODEL"],
         _ => &[],
     };
-    candidates.iter().copied().find(|var| env::var(var).is_ok())
+    candidates.iter().copied().find(|var| non_empty_env(var).is_some())
 }
 
 pub fn detect_environment(project_root: Option<&Path>) -> EnvironmentReport {

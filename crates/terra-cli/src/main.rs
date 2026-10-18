@@ -195,12 +195,12 @@ fn build_runtime(project_root: &Path, event_bus: Option<Arc<dyn terra_types::Eve
 /// audit log, history, sessions, artifacts and the local config stay private.
 const TERRA_GITIGNORE: &str = "# Terra runtime data (databases, history, sessions, artifacts, local config).\n# Only the project rules and the system prompt are meant to be shared.\n*\n!.gitignore\n!constitution.toml\n!prompt.md\n";
 
-const DEFAULT_PROJECT_CONFIG: &str = r#"# Provider settings for this project.
+const DEFAULT_PROJECT_CONFIG: &str = r#"# Provider settings for this project; unset keys fall back to ~/.terra/config.toml.
 # Environment variables (TERRA_PROVIDER_API_KEY, TERRA_PROVIDER_BASE_URL,
 # TERRA_PROVIDER_MODEL) take precedence. This file is git-ignored.
 [provider]
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-model = "qwen-plus"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "qwen-plus"
 # api_key = "..."
 "#;
 
@@ -245,6 +245,13 @@ fn current_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Exit quietly when the reader goes away (`terra trace | head`) instead of
+    // panicking on a broken pipe, like other command-line tools.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
 
     // Warnings only by default: the interactive UI already shows progress.

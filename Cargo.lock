@@ -2112,6 +2112,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "predicates",
  "ratatui",
  "rustyline",

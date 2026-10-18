@@ -13,63 +13,75 @@
 <p align="center"><strong>Efficiency is Intelligence.</strong></p>
 
 <p align="center">
+  <a href="#project-status">Status</a> &nbsp;&bull;&nbsp;
   <a href="#features">Features</a> &nbsp;&bull;&nbsp;
   <a href="#architecture">Architecture</a> &nbsp;&bull;&nbsp;
   <a href="#quick-start">Quick Start</a> &nbsp;&bull;&nbsp;
   <a href="#commands">Commands</a> &nbsp;&bull;&nbsp;
-  <a href="#memory-system">Memory</a> &nbsp;&bull;&nbsp;
   <a href="#caging-engineering">Caging</a> &nbsp;&bull;&nbsp;
   <a href="#中文文档">中文文档</a>
 </p>
 
 <p align="center">
+  <a href="https://github.com/LibertychaserUS/Terra/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/LibertychaserUS/Terra/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <a href="https://www.rust-lang.org/"><img alt="Rust 1.75+" src="https://img.shields.io/badge/rust-1.75%2B-orange.svg"></a>
-  <img alt="Tests: 517 passing" src="https://img.shields.io/badge/tests-517%20passing-brightgreen.svg">
-  <img alt="Crates: 11" src="https://img.shields.io/badge/crates-11-informational.svg">
-  <img alt="Binary: ~12MB" src="https://img.shields.io/badge/binary-~12MB-lightgrey.svg">
+  <a href="https://www.rust-lang.org/"><img alt="Rust 1.89+" src="https://img.shields.io/badge/rust-1.89%2B-orange.svg"></a>
+  <img alt="Tests: 601 passing" src="https://img.shields.io/badge/tests-601%20passing-brightgreen.svg">
+  <img alt="Crates: 12" src="https://img.shields.io/badge/crates-12-informational.svg">
+  <img alt="Binary: ~10 MB" src="https://img.shields.io/badge/binary-~10%20MB-lightgrey.svg">
   <img alt="Platform: macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg">
 </p>
 
 ---
 
-Terra is a Rust-based AI Agent Operating System built on **Caging Engineering** principles. It constrains AI agent behavior through 8 behavioral cages, manages knowledge through a 7-layer memory database with DSL pointer indexing, and connects to any OpenAI-compatible LLM provider.
+Terra is an AI agent runtime written in Rust and built on **Caging Engineering**: instead of only telling a model what to do, it limits what the agent *can* do. Every file, memory and shell operation the agent requests passes through a caging pipeline and an audit log before it runs. Knowledge lives in a 7-level memory database with a compact pointer index, and any OpenAI-compatible LLM can drive it.
 
-Terra is not a framework or library. It is a standalone operating system for AI agents -- it runs agents, enforces behavioral boundaries, manages memory lifecycle, and provides a complete interactive environment.
+Terra is an early-stage project (v0.1). [Project status](#project-status) lists what works end to end today and what exists only as tested library code.
 
 ### Why Terra?
 
-- **Behavioral safety by design** -- 8 cages constrain the agent's reachable state space *before* any action executes, not after
-- **Structured memory with ownership** -- 7 semantic layers (L0-L6) with Rust-inspired ownership, borrowing, lifetime, and garbage collection
-- **Zero-cost drift detection** -- TF-IDF/embedding similarity checks goal alignment without consuming LLM tokens
-- **Single ~12MB binary** -- no runtime dependencies, no Docker, no Python; SQLite bundled
-- **Pluggable LLM backend** -- any OpenAI-compatible API works out of the box
+- **Checks before execution, not after** -- file writes and deletes must resolve inside the project (`..` and symlinks are resolved first), the constitution is write-protected, and shell commands and deletes run only after you answer `y`
+- **Structured memory with ownership** -- 7 semantic levels (L0-L6) with owners and level-based write permissions, inspired by Rust's ownership model
+- **Zero-cost drift detection** -- in Goal Mode, TF-IDF similarity between the goal and each answer flags drift without spending LLM tokens
+- **Auditable** -- every executed operation is stored in `.terra/audit.db`; `terra trace` prints it
+- **Single ~10 MB binary** -- no runtime dependencies, no Docker, no Python; SQLite is bundled
+- **Any OpenAI-compatible LLM** -- DashScope (default), OpenAI, Ollama, vLLM, LiteLLM, ...
+- **MCP server** -- `terra mcp` exposes the same caged tools to any Model Context Protocol client
 
 ---
 
 ## Table of Contents
 
+- [Project Status](#project-status)
 - [Features](#features)
-  - [Behavioral Caging](#behavioral-caging)
-  - [7-Layer Memory Database](#7-layer-memory-database)
-  - [DSL Pointer Memory Index](#dsl-pointer-memory-index)
-  - [Dual Mode Operation](#dual-mode-operation)
-  - [Multi-Agent Runtime](#multi-agent-runtime)
-  - [Language Compilation](#language-compilation)
-  - [Additional Features](#additional-features)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
 - [Commands](#commands)
-- [Environment Variables](#environment-variables)
-- [Project Structure](#project-structure)
+- [Configuration](#configuration)
 - [Memory System](#memory-system)
 - [Caging Engineering](#caging-engineering)
 - [Testing](#testing)
 - [System Requirements](#system-requirements)
+- [Known Limitations](#known-limitations)
 - [Contributing](#contributing)
 - [License](#license)
-- [Acknowledgments](#acknowledgments)
 - [中文文档](#中文文档)
+
+---
+
+## Project Status
+
+| Area | State today |
+|------|-------------|
+| Interactive chat (`terra chat`) | Works end to end: LLM tool calling (files, memory, shell, artifacts, pointer queries), y/N confirmation for shell and delete, session auto-save, context compaction |
+| Full-screen TUI (`terra chat --tui`) | Works, with the same confirmations; simpler than the readline UI (Ctrl+C cannot cancel a running request) |
+| One-shot tasks (`terra run`) | Works: spec compilation, Intelligence Core rules, caged provider call, audit |
+| MCP server (`terra mcp`) | Works over stdio: 13 tools routed through the same executor and cages |
+| Audit trail (`terra trace`) | Works: persistent SQLite log of every executed command |
+| Cages enforced at runtime | **Action** (sandboxed writes/deletes, destructive shell patterns), **Memory** (L0 read-only, L1 user-only), **Output** (prompt-injection patterns in LLM answers) |
+| Cages implemented, not yet triggered | **Specification**, **Verification**, **Meta** are registered, but the runtime never emits the actions they block; **Knowledge** and **Convergence** are not registered |
+| Multi-agent roles | Worker, Explorer, Cage Monitor and SubAgent profiles exist as tested library types; the CLI runs a single main agent |
+| Embeddings | `EmbeddingBackend` trait with a TF-IDF implementation; no neural embedding backend ships yet |
 
 ---
 
@@ -77,22 +89,24 @@ Terra is not a framework or library. It is a standalone operating system for AI 
 
 ### Behavioral Caging
 
-Eight behavioral cages run in sequence on every agent action. The first `Block` result short-circuits and prevents the action. Cages operate at the OS level -- the agent cannot bypass them.
+Cages run in sequence on every operation the executor receives; the first `Block` stops it, and the block is written to the audit log. The agent cannot skip them: every tool call goes through the executor.
 
-| Cage | Purpose | Active Mode |
-|------|---------|:-----------:|
-| **Specification** | Blocks execution when task spec has open questions | Goal only |
-| **Knowledge** | Enforces authority ranking: Code > Docs > Memory > Assumption | Always |
-| **Memory** | Ownership + level-based write permissions (L0 read-only, L1 user-only) | Always |
-| **Action** | File system sandbox enforcement; blocks destructive shell commands | Always |
-| **Verification** | Blocks completion claims without external verification | Goal only |
-| **Convergence** | Warns/blocks exploration after an accepted path exists | Goal only |
-| **Meta** | Blocks attempts to modify protected rules or constitution | Always |
-| **Output** | Inspects LLM responses for prompt injection and privilege escalation | Always |
+| Cage | Purpose | Mode | Enforced at runtime |
+|------|---------|:----:|:-------------------:|
+| **Action** | Writes/deletes must resolve inside the sandbox root; protected paths are read-only; `rm -rf /`, `mkfs`, `> /dev/` are blocked | Always | Yes |
+| **Memory** | L0 is read-only; L1 accepts only user commands (`/remember`, `/accept`); L3 needs Goal Mode + verification | Always | Yes |
+| **Output** | Withholds LLM answers containing prompt-injection or privilege-escalation phrases | Always | Yes (chat answers and provider calls) |
+| **Specification** | Blocks task execution while the spec has open questions | Goal | Registered, not triggered |
+| **Verification** | Blocks completion claims without verification | Goal | Registered, not triggered |
+| **Meta** | Blocks attempts to modify protected rules | Always | Registered, not triggered |
+| **Knowledge** | Authority ranking: Code > Docs > Memory > Assumption | Always | Library only |
+| **Convergence** | Warns about exploring after an accepted path exists | Goal | Library only |
 
-### 7-Layer Memory Database
+Shell commands are not sandboxed: once you approve one, it runs with your user's permissions. The confirmation prompt is the control for shell access.
 
-Semantic memory organized from most authoritative to least, with configurable write permissions and garbage collection protection:
+### 7-Level Memory Database
+
+Semantic memory organized from most authoritative to least, with write permissions per level:
 
 ```
 L0  Authoritative     Constitution, Intelligence Core, Soul Templates     (read-only)
@@ -104,14 +118,14 @@ L5  Dormant Ideas     Archived, low priority, auto-compacted              (read-
 L6  Candidates        Agent nominations awaiting human review             (read-write)
 ```
 
-- **Rust-inspired safety**: ownership per entry, write requires ownership, optimistic concurrency
-- **Pluggable backend**: `StorageBackend` trait -- ships with SQLite + `InMemoryBackend`
-- **Garbage collection**: salience-aware, L0/L1 protected from deletion
-- **Moka cache**: in-memory read-through/write-through with configurable capacity and TTL
+- **Ownership**: each entry has an owner; writes check ownership and level
+- **Pluggable backend**: `StorageBackend` trait with SQLite (WAL) and in-memory implementations
+- **Cache**: moka read-through/write-through cache in front of the store
+- **Garbage collection**: salience-aware GC that protects L0/L1 is implemented in `terra-memory`; the CLI does not schedule it yet
 
 ### DSL Pointer Memory Index
 
-A lightweight pointer table that indexes memory entries with dynamic salience scoring. Compact enough to embed in LLM context windows. Serializes to TOML for disk persistence.
+A lightweight pointer table over the memory database, compact enough to put in an LLM context window. The agent queries it through the `PointerQuery` tool:
 
 ```
 @mem["project-arch"]       # Direct pointer lookup by key
@@ -121,43 +135,28 @@ A lightweight pointer table that indexes memory entries with dynamic salience sc
 @top(10)                   # Top 10 pointers by salience score
 ```
 
-**4-signal salience scoring:**
+Salience combines four signals:
 
-| Signal | Weight | Source | Description |
-|--------|:------:|--------|-------------|
-| Keyword match | 0.3 | TF-IDF (`VectorIndex`) | Term frequency relevance |
-| Semantic similarity | 0.4 | `EmbeddingBackend` | Vector similarity score |
-| Time decay | 0.2 | Automatic | Recency-weighted decay |
-| Access frequency | 0.1 | Access counter | Usage-based boost |
+| Signal | Weight | Source |
+|--------|:------:|--------|
+| Keyword match | 0.3 | TF-IDF (`VectorIndex`) |
+| Semantic similarity | 0.4 | `EmbeddingBackend` (TF-IDF today) |
+| Time decay | 0.2 | Recency weighting |
+| Access frequency | 0.1 | Usage counter |
 
 ### Dual Mode Operation
 
 | Mode | Behavior |
 |------|----------|
-| **Conversation** | Open-ended dialogue, full command set, relaxed constraints. Base state. |
-| **Goal** | Activated via `/goal`. Adds drift detection, spec gating, convergence enforcement. Consolidates memory on `/done`. |
-
-### Multi-Agent Runtime
-
-```
-Main Agent               Strongest model, full context, plans and audits
-  |-- Worker             Executes coding/modification tasks (reads L2/L3/L4)
-  |-- Explorer           Search and research, read-only (reads L1/L2/L5)
-  +-- Cage Monitor       Independent compliance checker (reads L0/L2)
-```
-
-Each SubAgent receives:
-- An immutable **AgentProfile** (identity + permissions + token budget)
-- An L0 **SoulTemplate** (system prompt prefix + behavioral constraints + allowed operations)
-
-Communication via **MessagePack** binary protocol.
+| **Conversation** | Open-ended dialogue with tools. Base state. |
+| **Goal** | Entered with `/goal`. Tracks the goal, scores each answer for drift, and runs sleep consolidation on `/done`. |
 
 ### Language Compilation
 
-Natural language input is compiled through a 5-pass pipeline into a standardized intermediate representation:
+`terra run` compiles natural language into a structured spec before calling the model:
 
 ```
-User Input --> TermTable --> SpecIR --> ExecutionPlan --> Steps --> Execution
+User Input --> TermTable --> SpecIR --> ExecutionPlan --> Steps
                   |             |            |
              Terminology    Structured    Versioned
              normalization  spec (IR)     step graph
@@ -165,18 +164,17 @@ User Input --> TermTable --> SpecIR --> ExecutionPlan --> Steps --> Execution
 
 - **TermTable**: maps informal terms to canonical forms (`"login bug"` -> `"authentication_failure"`)
 - **SpecIR**: intent, target (file/line/function/component), constraints, success predicates, open questions
-- **ExecutionPlan**: mutable, versioned step graph with dependency tracking and status per step
+- **ExecutionPlan**: versioned step graph with dependencies and per-step status (`/plan`, `/execute`)
 
 ### Additional Features
 
-- **Output Contract** -- JSON schema validation of LLM structured outputs
-- **Provider Dispatch** -- OpenAI-compatible adapter with retry, exponential backoff, capability detection
-- **Event Bus** -- `NullBus` (batch/silent), `CollectorBus` (test assertions), `ChannelBus` (TUI streaming)
-- **Constitution** -- TOML-based project rules (`.terra/constitution.toml`), immutable at runtime
-- **Audit Trail** -- persistent operation log via `terra-trace` for every agent action
-- **Smart Greeter** -- context-aware session startup with git status, session history, project detection
-- **Session Management** -- auto-save, resume, multi-session history
-- **Context Compaction** -- 70% threshold auto-trigger, key content externalized to L5 memory
+- **Output contracts** -- JSON schema validation of structured LLM outputs
+- **Provider dispatch** -- OpenAI-compatible adapter with retry and exponential backoff; dry-run adapter for keyless use
+- **Event bus** -- `NullBus`, `CollectorBus` (tests), `ChannelBus` (live operation lines in the REPL)
+- **Constitution** -- `.terra/constitution.toml` sets the sandbox root and protected paths
+- **Smart greeter** -- session start suggestions from git status, past sessions and project type
+- **Sessions** -- auto-saved to `.terra/sessions/`, listed with `/sessions`
+- **Context compaction** -- at 70% of the context budget older turns are summarized and the summary is stored in L5 memory
 - **Intelligence Core** -- pluggable domain modules (Coding, Algorithm) with ranked diagnostic rules
 
 ---
@@ -184,46 +182,50 @@ User Input --> TermTable --> SpecIR --> ExecutionPlan --> Steps --> Execution
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  terra-cli          CLI + TUI + Renderer                 │  L5
-│                     Clap commands, Ratatui TUI           │
-├──────────────────────────────────────────────────────────┤
-│  terra-agents       REPL + Orchestrator + SubAgents      │  L4
-│                     Drift detection, session management  │
-├──────────────────────────────────────────────────────────┤
-│  terra-executor     Command routing + EventBus           │
-│  terra-caging       8 Cages + Sandbox + Constitution     │  L3
-│  terra-compile      SpecIR + ExecutionPlan + TermTable   │
-├──────────────────────────────────────────────────────────┤
-│  terra-protocol     Command types + MessagePack codec    │  L2
-│  terra-memory       7-layer DB + Pointer Index + Cache   │
-├──────────────────────────────────────────────────────────┤
-│  terra-core         Intelligence Core + Soul Templates   │
-│  terra-trace        Persistent audit trail               │  L1
-│  terra-providers    OpenAI-compatible LLM adapter        │
-├──────────────────────────────────────────────────────────┤
-│  terra-types        Shared types + Events + Contracts    │  L0
-└──────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ 6  terra-cli        CLI (clap), readline REPL, ratatui TUI     │
+├────────────────────────────────────────────────────────────────┤
+│ 5  terra-mcp        MCP server (JSON-RPC over stdio)           │
+├────────────────────────────────────────────────────────────────┤
+│ 4  terra-agents     REPL loop + tool calling, orchestrator,    │
+│                     sessions, drift detector, agent roles      │
+├────────────────────────────────────────────────────────────────┤
+│ 3  terra-executor   Command pipeline: audit → cages → router   │
+├────────────────────────────────────────────────────────────────┤
+│ 2  terra-caging     8 cages, sandbox guard, constitution       │
+│    terra-compile    SpecIR, ExecutionPlan, term table          │
+│    terra-trace      Persistent audit trail                     │
+├────────────────────────────────────────────────────────────────┤
+│ 1  terra-protocol   Message types, MessagePack codec, render   │
+├────────────────────────────────────────────────────────────────┤
+│ 0  terra-types      Commands, events, contracts, text helpers  │
+│    terra-core       Intelligence Core, soul templates          │
+│    terra-memory     7-level memory DB, pointer index, cache    │
+│    terra-providers  OpenAI-compatible adapter, dry-run         │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-**Dependency rule**: a crate at layer N may only depend on crates at layer < N.
+**Dependency rule**: a crate only depends on crates in lower layers. `crates/terra-cli/tests/layering.rs` checks every `Cargo.toml` against this table.
+
+**How a tool call flows**: the REPL sends the conversation and the tool schemas to the LLM → the LLM asks for a tool → shell and delete calls ask you `y/N` → the executor records the command in the audit log, runs the cages, routes the operation, and records the result → the result goes back to the LLM with all earlier tool results of the turn → the final answer passes the output cage before you see it.
 
 <details>
-<summary><strong>Detailed layer assignments</strong></summary>
+<summary><strong>Crate summary</strong></summary>
 
-```
-L0  terra-types        Shared types, events, output contracts (zero internal deps)
-L1  terra-core         Intelligence Core, Soul Templates, diagnostics
-L1  terra-trace        Persistent audit trail
-L1  terra-providers    OpenAI-compatible LLM adapter, DryRun provider
-L2  terra-protocol     Command types, MessagePack codec, rendering
-L2  terra-memory       7-layer database, pointer index, artifacts, cache
-L3  terra-caging       8 behavioral cages, sandbox guard, constitution
-L3  terra-compile      SpecIR, ExecutionPlan, terminology normalization
-L3  terra-executor     Command routing, EventBus dispatch
-L4  terra-agents       REPL loop, orchestrator, SubAgent profiles, drift detector
-L5  terra-cli          CLI entry point (Clap), TUI (Ratatui), configuration
-```
+| Crate | Layer | Terra dependencies | Purpose |
+|-------|:-----:|--------------------|---------|
+| `terra-types` | 0 | -- | Commands, events, output contracts, UTF-8 safe text helpers |
+| `terra-core` | 0 | -- | Intelligence Core, soul templates, diagnostic signals |
+| `terra-memory` | 0 | -- | Memory DB, pointer index, cache, ownership checks |
+| `terra-providers` | 0 | -- | OpenAI-compatible adapter (retry/backoff, SSE), dry-run adapter |
+| `terra-protocol` | 1 | types | Message format, MessagePack codec, Markdown rendering |
+| `terra-trace` | 2 | types, protocol | Audit log with SQLite persistence |
+| `terra-compile` | 2 | protocol | SpecIR, ExecutionPlan, terminology table |
+| `terra-caging` | 2 | core, protocol | Cage trait, 8 cages, sandbox guard, constitution |
+| `terra-executor` | 3 | types, protocol, memory, trace, caging, providers | Command pipeline and router, event bus |
+| `terra-agents` | 4 | core, types, protocol, compile, executor, memory, providers, caging | REPL, tools, orchestrator, sessions, roles |
+| `terra-mcp` | 5 | types, executor, memory, caging, core, providers, trace, agents | MCP server |
+| `terra-cli` | 6 | agents, types, core, executor, memory, caging, trace, providers, mcp | `terra` binary |
 
 </details>
 
@@ -233,56 +235,54 @@ L5  terra-cli          CLI entry point (Clap), TUI (Ratatui), configuration
 
 ### Prerequisites
 
-- **Rust 1.75+** (install via [rustup](https://rustup.rs))
+- **Rust 1.89+** (install via [rustup](https://rustup.rs))
 - **macOS** (ARM64/x86_64) or **Linux** (x86_64)
-- **API key** for any OpenAI-compatible LLM provider
+- An **API key** for any OpenAI-compatible LLM provider (optional: without one Terra runs in dry-run mode)
 
 SQLite is bundled via `rusqlite` -- no external database required.
 
 ### Install
 
-**From source:**
-
 ```bash
 git clone https://github.com/LibertychaserUS/Terra.git
 cd Terra
-
-# Build release binary (~12MB on ARM64 macOS)
-cargo build --release
-
-# Binary at target/release/terra
-# Optionally copy to PATH:
-cp target/release/terra /usr/local/bin/
+cargo build --release          # binary at target/release/terra (~10 MB on arm64 macOS)
 ```
 
-**Via cargo install:**
+Or install it on your `PATH`:
 
 ```bash
-cargo install --path crates/terra-cli
+cargo install --path crates/terra-cli --locked
 ```
 
 ### Configure
 
 ```bash
-# Option 1: DashScope (Alibaba Cloud / Qwen) -- default provider
+# DashScope (Alibaba Cloud / Qwen) -- default provider
 export DASHSCOPE_API_KEY="your-key-here"
 
-# Option 2: Any OpenAI-compatible endpoint
+# Any OpenAI-compatible endpoint
 export TERRA_PROVIDER_API_KEY="your-key-here"
-export TERRA_PROVIDER_BASE_URL="https://api.openai.com/v1"   # optional
-export TERRA_PROVIDER_MODEL="gpt-4"                           # optional
+export TERRA_PROVIDER_BASE_URL="https://api.openai.com/v1"
+export TERRA_PROVIDER_MODEL="gpt-4o"
+
+# Or store settings in a config file instead of the environment
+terra config set provider.model gpt-4o            # ~/.terra/config.toml
+terra config set provider.api_key "..." --project # .terra/config.toml (git-ignored)
 ```
 
-Default provider: DashScope with `qwen-plus`. Any OpenAI-compatible API works (OpenAI, Ollama, vLLM, LiteLLM, etc.).
+**No API key?** Everything still runs: the dry-run provider echoes your prompt, which is enough to try commands, memory, confirmations and the audit trail.
 
 ### Run
 
 ```bash
-terra init                    # Initialize project (.terra/ directory)
-terra chat                    # Start interactive session
-terra                         # Same as terra chat
+terra init                    # Create .terra/ (constitution, config, prompt, .gitignore)
+terra chat                    # Interactive session (also: just `terra`)
+terra chat --tui              # Full-screen terminal UI
 terra run --task "Explain this project's architecture"
-terra doctor --as-json        # Environment diagnostics
+terra doctor                  # Environment and provider check
+terra trace -n 20             # Last 20 audit entries for this project
+terra mcp                     # MCP server on stdio
 ```
 
 ---
@@ -293,153 +293,65 @@ Commands available inside `terra chat`:
 
 | Command | Alias | Description |
 |---------|:-----:|-------------|
-| `/goal "description"` | `/g` | Enter Goal Mode with drift detection and spec gating |
-| `/done` | `/d` | Exit Goal Mode, trigger sleep consolidation |
-| `/status` | `/s` | Show current mode, drift score, token usage |
-| `/plan` | `/p` | Show or propose an execution plan |
-| `/commit` | `/c` | Stage changes and commit with LLM-generated message |
-| `/undo` | | Revert all uncommitted changes |
+| `/goal "description"` | `/g` | Enter Goal Mode: the goal is tracked and answers are checked for drift |
+| `/done` | `/d` | Leave Goal Mode and run sleep consolidation |
+| `/accept N` / `/reject N` | | Keep or drop a consolidation candidate (kept ones go to L1 memory) |
+| `/status` | `/s` | Mode, goal alignment, token usage |
+| `/plan` | `/p` | Ask the LLM for an execution plan for the current goal |
+| `/execute` | | Run the proposed plan step by step (each step is an LLM call without tools) |
+| `/skill [name]` | | List or run a built-in skill (`code_editor`, `test_runner`, `memory_inspector`) |
+| `/commit` | `/c` | Stage all changes and commit with an LLM-written message (asks first) |
+| `/undo` | | Discard unstaged edits to tracked files (lists them, asks first) |
 | `/remember "text"` | | Save text to L1 project memory |
-| `/sessions` | | List past sessions |
-| `/compact` | | Compact context to free memory |
-| `/sleep` | | Manual sleep consolidation |
-| `/clear` | | Clear screen and context |
+| `/trace` | | Show the last 10 audit entries |
+| `/sessions` | | List saved sessions |
+| `/compact` | | Summarize older turns to free context |
+| `/sleep` | | Run sleep consolidation manually |
+| `/clear` | | Clear screen and conversation context |
 | `/help` | `/h` | Show command list |
-| `/quit` | `/q` | Exit Terra |
+| `/quit` | `/q` | Exit (also `/exit` or Ctrl+D) |
 
 ---
 
-## Environment Variables
+## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TERRA_PROVIDER_API_KEY` | -- | LLM provider API key |
-| `DASHSCOPE_API_KEY` | -- | Fallback API key (DashScope) |
-| `TERRA_PROVIDER_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | API endpoint URL |
-| `TERRA_PROVIDER_MODEL` | `qwen-plus` | Model name |
-| `RUST_LOG` | `terra=warn` (chat) / `terra=info` (other) | Log level filter |
+Settings are resolved in this order: environment variables > `.terra/config.toml` > `~/.terra/config.toml` > defaults. `terra config show` prints the result; `terra doctor` shows where the API key comes from.
 
----
+| Variable | Config key | Default | Description |
+|----------|------------|---------|-------------|
+| `TERRA_PROVIDER_API_KEY` | `provider.api_key` | -- | LLM provider API key |
+| `DASHSCOPE_API_KEY` | -- | -- | Fallback API key (DashScope) |
+| `TERRA_PROVIDER_BASE_URL` | `provider.base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | API endpoint |
+| `TERRA_PROVIDER_MODEL` | `provider.model` | `qwen-plus` | Model name |
+| `RUST_LOG` | -- | `terra=warn` | Log level (logs go to stderr) |
+| `NO_COLOR` | -- | -- | Disable colors (they are also off when output is not a terminal) |
 
-## Project Structure
+`.terra/` layout after `terra init` and a first session:
 
 ```
-Terra/
-├── Cargo.toml                    Workspace root (11 members)
-├── LICENSE                       MIT
-├── crates/
-│   ├── terra-types/              L0: Shared types, events, output contracts
-│   │   └── src/
-│   │       ├── command.rs            Command type definitions
-│   │       ├── contract.rs           Output contract validation
-│   │       ├── event.rs              Streaming event types (Token, Step, Drift, ...)
-│   │       └── lib.rs
-│   ├── terra-core/               L1: Intelligence Core, Soul Templates
-│   │   └── src/
-│   │       ├── soul.rs               L0 soul definitions (Worker, Explorer, CageMonitor)
-│   │       ├── diagnostic.rs         Goal drift detection signals
-│   │       ├── domain.rs             Domain module framework
-│   │       └── framework.rs          Pluggable module registration
-│   ├── terra-trace/              L1: Audit trail
-│   │   └── src/
-│   │       ├── audit.rs              Audit entry types
-│   │       └── persistent.rs         Persistent audit storage
-│   ├── terra-providers/          L1: LLM provider adapter
-│   │   └── src/
-│   │       ├── openai.rs             OpenAI-compatible client
-│   │       ├── adapter.rs            Provider abstraction trait
-│   │       └── dispatch.rs           Retry, backoff, capability detection
-│   ├── terra-protocol/           L2: Command protocol
-│   │   └── src/
-│   │       ├── command.rs            Command routing types
-│   │       ├── codec.rs              MessagePack serialization
-│   │       ├── message.rs            Inter-agent message format
-│   │       └── render.rs             Output rendering
-│   ├── terra-memory/             L2: Memory database
-│   │   └── src/
-│   │       ├── db.rs                 MemoryDatabase (cache + safety + store)
-│   │       ├── pointer.rs            DSL pointer table + salience scoring
-│   │       ├── backend.rs            StorageBackend trait
-│   │       ├── store.rs              SQLite implementation
-│   │       ├── cache.rs              Moka in-memory cache
-│   │       ├── safety.rs             Ownership + permission enforcer
-│   │       ├── search.rs             Memory search operations
-│   │       ├── artifact.rs           Artifact storage
-│   │       └── types.rs              Level (L0-L6), Scope, MemoryEntry
-│   ├── terra-caging/             L3: Behavioral cages
-│   │   └── src/
-│   │       ├── cage.rs               Cage trait, CageAction, CageContext
-│   │       ├── engine.rs             CagingEngine + 7 cage implementations
-│   │       ├── output.rs             Output Cage (prompt injection detection)
-│   │       ├── sandbox.rs            SandboxGuard (filesystem permissions)
-│   │       └── constitution.rs       TOML constitution loader
-│   ├── terra-compile/            L3: Language compilation
-│   │   └── src/
-│   │       ├── spec_ir.rs            SpecIR + TermTable + TermMapping
-│   │       └── plan.rs               ExecutionPlan + PlanStep + dependencies
-│   ├── terra-executor/           L3: Command execution
-│   │   └── src/
-│   │       ├── executor.rs           Command executor with caging pipeline
-│   │       ├── router.rs             Command routing logic
-│   │       └── error.rs              Execution errors
-│   ├── terra-agents/             L4: Agent layer
-│   │   └── src/
-│   │       ├── repl.rs               Interactive REPL loop
-│   │       ├── orchestrator.rs       Multi-agent orchestrator
-│   │       ├── greeter.rs            Context-aware session startup
-│   │       ├── drift.rs              Goal drift detector (zero LLM cost)
-│   │       ├── profile.rs            AgentProfile + MemoryView
-│   │       ├── subagent.rs           SubAgent lifecycle
-│   │       ├── session.rs            Session state management
-│   │       ├── session_store.rs      Session persistence
-│   │       ├── skill.rs              Skill definitions
-│   │       ├── dispatch.rs           Task dispatch logic
-│   │       ├── roles.rs              Agent role definitions
-│   │       ├── status.rs             Status reporting
-│   │       └── codebase.rs           Project codebase analysis
-│   └── terra-cli/                L5: User interface
-│       └── src/
-│           ├── main.rs               Entry point + Clap CLI
-│           ├── tui.rs                Ratatui terminal UI
-│           ├── ui.rs                 UI rendering helpers
-│           └── config.rs             Configuration loading
-└── .terra/                       Per-project data (created by `terra init`)
-    ├── constitution.toml             Immutable project rules
-    ├── memory.db                     SQLite memory database
-    └── sessions/                     Session history
+.terra/
+├── .gitignore          Keeps everything below out of git except the shareable files
+├── constitution.toml   Sandbox root and protected paths            (shareable)
+├── prompt.md           System prompt, editable                     (shareable)
+├── config.toml         Provider settings                           (git-ignored)
+├── memory.db           Memory database                             (git-ignored)
+├── audit.db            Audit trail                                 (git-ignored)
+├── history.txt         Input history                               (git-ignored)
+└── sessions/           Saved sessions                              (git-ignored)
 ```
-
-<details>
-<summary><strong>Crate summary table</strong></summary>
-
-| Crate | Layer | Key External Dependencies | Purpose |
-|-------|:-----:|--------------------------|---------|
-| `terra-types` | L0 | `serde`, `chrono`, `serde_json` | Shared types, events, contracts. Zero internal deps. |
-| `terra-core` | L1 | `terra-types` | Soul templates, diagnostic signals, domain framework |
-| `terra-trace` | L1 | `terra-types`, `rusqlite` | Persistent audit trail |
-| `terra-providers` | L1 | `terra-types`, `reqwest`, `async-openai` | LLM adapter with retry and backoff |
-| `terra-protocol` | L2 | `terra-types`, `rmp-serde` | Command protocol, MessagePack codec |
-| `terra-memory` | L2 | `terra-types`, `rusqlite`, `moka` | Memory DB, pointer index, cache, safety |
-| `terra-caging` | L3 | `terra-types` | Cage trait, 8 implementations, sandbox, constitution |
-| `terra-compile` | L3 | `terra-types`, `uuid` | SpecIR, ExecutionPlan, terminology table |
-| `terra-executor` | L3 | `terra-protocol`, `terra-types` | Command routing, EventBus integration |
-| `terra-agents` | L4 | `terra-core`, `terra-memory`, `terra-caging`, ... | REPL, orchestrator, SubAgent profiles |
-| `terra-cli` | L5 | `terra-agents`, `clap`, `ratatui`, `crossterm` | CLI entry point, TUI, configuration |
-
-</details>
 
 ---
 
 ## Memory System
 
-### 7-Layer Database
+### 7-Level Database
 
-Terra's memory is organized into 7 semantic layers. The design draws from Rust's ownership model:
+The design borrows from Rust's ownership model:
 
 - **Ownership**: each memory entry has a single owner (agent or user)
-- **Borrowing**: SubAgents receive read-only `MemoryView` filtered by their profile's access levels
-- **Lifetime**: entries carry creation time, last access, and access count for GC decisions
-- **Garbage Collection**: periodic cleanup of low-salience entries in unprotected layers (L2-L6)
+- **Borrowing**: SubAgents receive a read-only `MemoryView` filtered by their profile's levels
+- **Lifetime**: entries carry creation time, last access, access count and a reference count
+- **Garbage collection**: removes low-salience entries in L2-L6 (library; not scheduled by the CLI yet)
 
 | Level | Name | Description | Write Permission | GC Protected |
 |:-----:|------|-------------|------------------|:------------:|
@@ -451,27 +363,6 @@ Terra's memory is organized into 7 semantic layers. The design draws from Rust's
 | L5 | Dormant | Archived ideas, auto-compacted | Both modes | No |
 | L6 | Candidates | Agent nominations, awaiting human review | Both modes | No |
 
-### DSL Pointer Index
-
-The pointer table is a compact index over the memory database. Instead of storing full content, pointers hold metadata and salience scores. The table serializes to compact text for LLM context windows and to TOML for disk persistence.
-
-```
-@mem["project-arch"]       Direct pointer lookup by key
-@L1[*]                     All pointers at level L1
-@scope["project"]          Filter by scope (global/project/session/task)
-@search("auth bug", 5)     Salience-ranked search, top 5
-@top(10)                   Top 10 by salience score
-```
-
-**Salience** is dynamically recalculated from four signals:
-
-| Signal | Weight | Source |
-|--------|:------:|--------|
-| Keyword match | 0.3 | TF-IDF via `VectorIndex` |
-| Semantic similarity | 0.4 | `EmbeddingBackend` |
-| Time decay | 0.2 | Automatic recency weighting |
-| Access frequency | 0.1 | Usage counter |
-
 ### Storage Architecture
 
 ```
@@ -479,20 +370,16 @@ Read path:   request --> Cache (moka) --> StorageBackend (SQLite)    [read-throu
 Write path:  request --> SafetyEnforcer --> StorageBackend --> Cache  [write-through]
 ```
 
-The `StorageBackend` trait abstracts persistence:
-
 | Backend | Use Case |
 |---------|----------|
-| `SqliteStore` | Default. Production-ready, WAL mode. |
-| `InMemoryBackend` | Testing. No persistence. |
-
-The trait is designed for extension to PostgreSQL, RocksDB, or other storage engines.
+| `SqliteStore` | Default, WAL mode |
+| `InMemoryBackend` | Tests, no persistence |
 
 ---
 
 ## Caging Engineering
 
-Caging Engineering is a behavioral constraint methodology. Instead of telling an AI what to do (prompting), caging defines the boundaries of what it *can* do. The agent's reachable state space is shaped by programmatic constraints that run before any action executes.
+Caging Engineering is a behavioral constraint methodology. Instead of telling an AI what to do (prompting), caging defines the boundaries of what it *can* do, with programmatic checks that run before an action executes.
 
 ### How It Works
 
@@ -518,94 +405,61 @@ Execute      Block action
 action       + audit log
 ```
 
-### The 8 Cages
+### Cage Details
 
 <details>
-<summary><strong>1. Specification Cage</strong> -- Goal Mode only</summary>
+<summary><strong>Action Cage</strong> -- enforced</summary>
 
-Blocks task execution when the SpecIR has unresolved open questions. Forces the agent to clarify requirements before acting. Ensures no code is written against an ambiguous or incomplete specification.
+Validates file writes and deletes with `SandboxGuard`. Paths are resolved the way the OS would open them (`.`/`..` applied, symlinks in existing ancestors followed) before checking that they are inside the sandbox root and not under a protected path. Regression tests cover `../` escapes, `.terra/../.terra/constitution.toml`, symlinked directories and symlink cycles. File reads are not restricted.
 
-```rust
-CageAction::ExecuteTask { spec_complete: false }  // -> Block
-```
+Shell commands matching `rm -rf /`, `mkfs` or `> /dev/` are blocked; other shell commands are logged and, in chat, need your confirmation.
 
 </details>
 
 <details>
-<summary><strong>2. Knowledge Cage</strong> -- Always active</summary>
-
-Enforces an authority hierarchy for knowledge claims:
-
-```
-Code  >  Documentation  >  Memory  >  Assumption
-```
-
-Claims from a lower-authority source that contradict a higher-authority source are blocked. Assumption-based claims are warned even without contradiction.
-
-</details>
-
-<details>
-<summary><strong>3. Memory Cage</strong> -- Always active</summary>
-
-Enforces ownership and level-based write permissions:
+<summary><strong>Memory Cage</strong> -- enforced</summary>
 
 | Level | Permission |
 |-------|-----------|
-| L0 | **Blocked always** -- read-only constitution |
-| L1 | **Blocked for agents** -- only user `/remember` or promotion chain |
+| L0 | **Blocked always** -- read-only |
+| L1 | **Blocked for agents** -- only user `/remember` or `/accept` |
 | L2 | Allowed in both modes |
-| L3 | Allowed in Goal Mode with verification pass only |
+| L3 | Allowed in Goal Mode with verification only |
 | L4-L6 | Allowed in both modes |
 
-Ownership check: an agent cannot write to entries owned by another agent (unless via user command).
+</details>
+
+<details>
+<summary><strong>Output Cage</strong> -- enforced</summary>
+
+Inspects LLM answers before you or the agent see them.
+
+**Blocked** (answer withheld): prompt-injection phrases such as `"ignore all previous"` or `"disregard the above"`, and escalation phrases such as `"disable caging"`, `"write to L0"`, `"bypass sandbox"`.
+
+**Warned** (logged): `"rm -rf"`, `"drop table"`, `"delete all"`.
+
+This is phrase matching, a cheap first filter rather than a complete defense.
 
 </details>
 
 <details>
-<summary><strong>4. Action Cage</strong> -- Always active</summary>
+<summary><strong>Specification, Verification, Meta</strong> -- registered, not yet triggered</summary>
 
-File system sandbox enforcement via `SandboxGuard`. Validates read/write/delete operations against the project sandbox root. Blocks destructive shell commands:
+- **Specification** blocks task execution when the SpecIR has open questions.
+- **Verification** blocks completion claims without verification.
+- **Meta** blocks attempts to modify protected rules.
 
-- `rm -rf /` -- blocked
-- `mkfs` -- blocked
-- `> /dev/*` -- blocked
-
-Non-destructive shell execution is warned (logged) but allowed.
+All three are in the engine and unit-tested, but the runtime does not yet emit the actions they react to (`terra run` reports the spec as complete).
 
 </details>
 
 <details>
-<summary><strong>5. Verification Cage</strong> -- Goal Mode only</summary>
+<summary><strong>Knowledge, Convergence</strong> -- library only</summary>
 
-Blocks completion claims that lack external verification. The agent cannot declare a task "done" without evidence. This prevents premature task closure and ensures quality gates are met.
+- **Knowledge** enforces Code > Documentation > Memory > Assumption: lower-authority claims that contradict higher ones are blocked.
+- **Convergence** warns about further exploration once a verified path was accepted.
 
-</details>
-
-<details>
-<summary><strong>6. Convergence Cage</strong> -- Goal Mode only</summary>
-
-When a verified and accepted solution path exists, further exploration is warned. Prevents wasted token budget and scope drift by nudging the agent to commit to the proven path.
-
-</details>
-
-<details>
-<summary><strong>7. Meta-Cage</strong> -- Always active</summary>
-
-Blocks any runtime attempt to modify protected rules. The constitution, cage configurations, and core rules are immutable once loaded at startup.
-
-</details>
-
-<details>
-<summary><strong>8. Output Cage</strong> -- Always active</summary>
-
-Inspects LLM responses before delivery to the agent. Runs pattern matching against two categories:
-
-**Blocked patterns** (action denied):
-- Prompt injection: `"ignore all previous"`, `"disregard the above"`
-- Privilege escalation: `"disable caging"`, `"write to L0"`, `"bypass sandbox"`
-
-**Warned patterns** (action allowed, logged):
-- Suspicious operations: `"rm -rf"`, `"drop table"`, `"delete all"`
+Both are implemented and unit-tested but not registered in the runtime engine.
 
 </details>
 
@@ -614,22 +468,24 @@ Inspects LLM responses before delivery to the agent. Runs pattern matching again
 ## Testing
 
 ```bash
-cargo test --workspace
+cargo test --workspace                                  # 601 tests, no network or API key needed
+cargo test --workspace -- --ignored                     # 17 live tests against a real LLM (needs an API key)
+cargo clippy --workspace --all-targets -- -D warnings   # clean
 ```
 
-517 tests across all 11 crates, covering:
+The default suite covers:
 
-- Cage check logic (pass/warn/block for each of the 8 cages)
-- Memory database CRUD, ownership enforcement, GC, cache behavior
-- Pointer table operations, DSL parsing, salience scoring
-- SpecIR compilation and term normalization
-- ExecutionPlan versioning and step dependencies
-- Provider dispatch, retry logic, DryRun provider
-- Protocol serialization/deserialization (MessagePack round-trip)
-- Event bus behavior (NullBus, CollectorBus, ChannelBus)
-- Sandbox permission enforcement
-- Constitution loading and validation
-- Output cage pattern matching (block and warn categories)
+- Cage checks (pass/warn/block) and sandbox path resolution (`..`, symlinks, cycles)
+- Memory database CRUD, ownership, GC, cache; pointer table DSL and salience scoring
+- SpecIR compilation, term normalization, ExecutionPlan versioning
+- Provider retry against a mock HTTP server; OpenAI request building with multi-round tool calls
+- The REPL agent loop with a scripted provider (what each request contains), confirmations, `/undo`, `/commit`
+- Non-ASCII input (CJK, emoji) in previews and the TUI line editor
+- The `terra` binary in an isolated project and HOME: init, run, trace, config, doctor, piped output
+- MCP JSON-RPC handling, including sandbox escapes through `FileWrite`
+- Crate layering (`tests/layering.rs`)
+
+CI (`.github/workflows/ci.yml`) runs build, tests and clippy on Linux and macOS, plus `cargo check` on Rust 1.89.
 
 ---
 
@@ -637,34 +493,49 @@ cargo test --workspace
 
 | Requirement | Details |
 |-------------|---------|
-| **OS** | macOS (ARM64 / x86_64), Linux (x86_64) |
-| **Rust** | 1.75+ (edition 2021) |
-| **Disk** | ~200MB (build artifacts), ~12MB (release binary) |
-| **Memory** | ~50MB runtime |
-| **Network** | Required for LLM API calls only |
-| **SQLite** | Bundled via `rusqlite` (no install needed) |
+| **OS** | macOS (tested on ARM64), Linux x86_64 (CI) |
+| **Rust** | 1.89+ (floor set by locked dependencies; edition 2021) |
+| **Disk** | ~475 MB of build artifacts for a release build; ~10 MB binary |
+| **Memory** | ~12 MB resident for an idle chat session |
+| **Network** | Only for LLM API calls |
+| **SQLite** | Bundled via `rusqlite` |
 | **Windows** | Untested; may work under WSL |
+
+---
+
+## Known Limitations
+
+- Approved shell commands run with your user's permissions; the sandbox covers Terra's own file tools, not what a shell command does.
+- File reads are not limited to the project directory.
+- Chat prints an answer after it has fully arrived (word by word); the provider's SSE streaming is not used by the chat loop yet.
+- From the second turn on, the system prompt is reduced to Terra's identity to save tokens; `prompt.md` guidance and the memory index are sent on the first turn only.
+- Five of the eight cages are not triggered by runtime events yet (see [Project status](#project-status)).
+- Multi-agent roles, memory GC and session resume exist in the libraries but are not exposed by the CLI.
+- `/execute` runs plan steps as LLM calls without tools.
+- Similarity scoring is TF-IDF; there is no neural embedding backend.
+- The TUI cannot cancel a request in flight.
 
 ---
 
 ## Contributing
 
-Contributions are welcome.
-
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
 3. Write tests for new functionality
-4. Ensure all tests pass: `cargo test --workspace`
-5. Ensure no warnings: `cargo clippy --workspace`
+4. Make sure `cargo test --workspace` passes
+5. Make sure `cargo clippy --workspace --all-targets -- -D warnings` passes
 6. Submit a pull request
 
 ### Development Guidelines
 
-- **Layer hierarchy**: a crate at layer N may only depend on crates at layer < N
-- **Doc comments**: all public APIs require documentation
-- **New cages**: implement the `Cage` trait and register in `CagingEngine`
-- **Memory operations**: go through `MemoryDatabase`, never direct SQLite access
-- **New providers**: implement `ProviderAdapter` trait
+- **Layering**: a crate only depends on lower layers; add new crates to `crates/terra-cli/tests/layering.rs`
+- **Doc comments** on public APIs
+- **New cages**: implement the `Cage` trait and register it in `CagingEngine`
+- **Memory operations** go through `MemoryDatabase`, never direct SQLite access
+- **New providers** implement `ProviderAdapter`
+- **Text previews**: use `terra_types::text` helpers instead of byte slicing
+
+Design documents written during development live in [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/) (Chinese); figures in them reflect the state when they were written.
 
 ---
 
@@ -678,7 +549,7 @@ Contributions are welcome.
 
 - **Caging Engineering** -- the behavioral constraint methodology that grounds Terra's safety model
 - **Rust** -- ownership and borrowing semantics that inspired the memory system design
-- The Rust ecosystem: `tokio`, `serde`, `rusqlite`, `moka`, `ratatui`, `clap`, `async-openai`, `rmp-serde`, and the broader community
+- The Rust ecosystem: `tokio`, `serde`, `rusqlite`, `moka`, `ratatui`, `clap`, `reqwest`, `rmp-serde`, and the broader community
 
 ---
 
@@ -704,25 +575,37 @@ Contributions are welcome.
 
 ## 项目简介
 
-Terra 是一个基于 Rust 构建的 **AI Agent 操作系统**，以 **Caging Engineering（笼化工程）** 为核心方法论。它通过 8 个行为笼约束 Agent 的可达状态空间，通过 7 层记忆数据库管理知识生命周期，并支持任意 OpenAI 兼容的 LLM 供应商。
+Terra 是一个用 Rust 编写的 **AI Agent 运行时**，以 **Caging Engineering（笼化工程）** 为核心方法论：不只是告诉模型"做什么"，而是限定 Agent "能做什么"。Agent 请求的每一个文件、记忆和 shell 操作，都要先经过笼化检查和审计日志才会执行。知识存放在带指针索引的 7 层记忆数据库中，可接入任意 OpenAI 兼容的 LLM。
 
-Terra 不是框架，不是库，不是 chatbot wrapper。它是一个运行 AI Agent 的操作系统 -- 运行 Agent、执行行为边界、管理记忆生命周期、提供完整的交互环境。
+Terra 目前处于早期阶段（v0.1）。[项目状态](#项目状态) 列出了哪些功能已端到端可用，哪些目前只是经过测试的库代码。
+
+---
+
+## 项目状态
+
+| 模块 | 当前状态 |
+|------|----------|
+| 交互式对话（`terra chat`） | 端到端可用：LLM 工具调用（文件、记忆、shell、制品、指针查询），shell 与删除操作需 y/N 确认，会话自动保存，上下文压缩 |
+| 全屏 TUI（`terra chat --tui`） | 可用，确认机制相同；比 readline 界面简单（Ctrl+C 无法取消进行中的请求） |
+| 单次任务（`terra run`） | 可用：规格编译、智能核心规则、经笼检查的模型调用、审计 |
+| MCP 服务（`terra mcp`） | 通过 stdio 可用：13 个工具，经过同一套执行器和笼 |
+| 审计日志（`terra trace`） | 可用：每条已执行命令都持久化在 SQLite 中 |
+| 运行时生效的笼 | **Action**（沙箱化写入/删除、破坏性 shell 模式）、**Memory**（L0 只读、L1 仅用户可写）、**Output**（LLM 回答中的提示注入短语） |
+| 已实现但尚未被触发的笼 | **Specification**、**Verification**、**Meta** 已注册，但运行时不会产生它们拦截的动作；**Knowledge**、**Convergence** 未注册 |
+| 多 Agent 角色 | Worker、Explorer、Cage Monitor 与 SubAgent 配置是经过测试的库类型；CLI 目前只运行一个主 Agent |
+| 向量嵌入 | 提供 `EmbeddingBackend` trait 与 TF-IDF 实现，暂无神经网络嵌入后端 |
 
 ---
 
 ## 核心特性
 
-- **行为安全内建** -- 8 个笼在每个动作执行前进行约束检查，而非事后审计
-- **结构化记忆 + 所有权** -- 7 层语义级别（L0-L6），借鉴 Rust 所有权模型实现借用、生命周期和垃圾回收
-- **零成本漂移检测** -- TF-IDF/嵌入相似度检查目标对齐，不消耗 LLM token
-- **单个 ~12MB 二进制** -- 无运行时依赖，无 Docker，无 Python，SQLite 内置
-- **可插拔 LLM 后端** -- 开箱支持任意 OpenAI 兼容 API（DashScope、OpenAI、Ollama、vLLM 等）
-- **对话 + 目标双模式** -- 对话模式（自由对话）+ 目标模式（漂移检测 + 规格门控 + 收敛约束）
-- **多 Agent 运行时** -- Main Agent + Worker + Explorer + Cage Monitor，MessagePack 二进制通信
-- **语言编译层** -- 自然语言 -> TermTable -> SpecIR -> ExecutionPlan，5 阶段编译流水线
-- **输出契约** -- JSON Schema 验证 LLM 结构化输出
-- **会话持久化** -- 自动保存、恢复、多会话历史
-- **上下文压缩** -- 70% 阈值自动触发，关键内容外化到 L5 记忆
+- **执行前检查，而非事后审计** -- 文件写入和删除必须解析到项目目录内（先解析 `..` 与符号链接），宪法文件写保护，shell 命令和删除需要你回答 `y` 才会执行
+- **结构化记忆 + 所有权** -- 7 层语义级别（L0-L6），借鉴 Rust 所有权模型的属主与分级写权限
+- **零成本漂移检测** -- 目标模式下用 TF-IDF 相似度比较目标与回答，不消耗 LLM token
+- **可审计** -- 每个已执行操作都写入 `.terra/audit.db`，`terra trace` 可查看
+- **单个约 10 MB 二进制** -- 无运行时依赖，无 Docker，无 Python，SQLite 内置
+- **任意 OpenAI 兼容 LLM** -- DashScope（默认）、OpenAI、Ollama、vLLM、LiteLLM 等
+- **MCP 服务** -- `terra mcp` 把同一套受笼约束的工具提供给任意 MCP 客户端
 
 ---
 
@@ -730,29 +613,22 @@ Terra 不是框架，不是库，不是 chatbot wrapper。它是一个运行 AI 
 
 ### 前置条件
 
-- **Rust 1.75+**（通过 [rustup](https://rustup.rs) 安装）
+- **Rust 1.89+**（通过 [rustup](https://rustup.rs) 安装）
 - **macOS**（ARM64/x86_64）或 **Linux**（x86_64）
-- 任意 OpenAI 兼容 LLM 提供商的 **API Key**
-
-SQLite 通过 `rusqlite` 内置，无需额外安装数据库。
+- 任意 OpenAI 兼容 LLM 提供商的 **API Key**（可选：没有 key 时以 dry-run 模式运行）
 
 ### 安装
 
 ```bash
 git clone https://github.com/LibertychaserUS/Terra.git
 cd Terra
-
-# 构建 release 版本（ARM64 macOS 约 12MB）
-cargo build --release
-
-# 二进制位于 target/release/terra
-cp target/release/terra /usr/local/bin/
+cargo build --release          # 二进制位于 target/release/terra（arm64 macOS 约 10 MB）
 ```
 
-或直接安装：
+或安装到 `PATH`：
 
 ```bash
-cargo install --path crates/terra-cli
+cargo install --path crates/terra-cli --locked
 ```
 
 ### 配置
@@ -761,20 +637,28 @@ cargo install --path crates/terra-cli
 # DashScope（阿里云 / 通义千问）-- 默认供应商
 export DASHSCOPE_API_KEY="your-key-here"
 
-# 或使用通用 Terra 环境变量（任意 OpenAI 兼容端点）
+# 任意 OpenAI 兼容端点
 export TERRA_PROVIDER_API_KEY="your-key-here"
 export TERRA_PROVIDER_BASE_URL="https://api.openai.com/v1"
-export TERRA_PROVIDER_MODEL="gpt-4"
+export TERRA_PROVIDER_MODEL="gpt-4o"
+
+# 也可以写入配置文件
+terra config set provider.model gpt-4o            # ~/.terra/config.toml
+terra config set provider.api_key "..." --project # .terra/config.toml（已被 git 忽略）
 ```
+
+优先级：环境变量 > `.terra/config.toml` > `~/.terra/config.toml` > 默认值。**没有 API key** 也能运行：dry-run 供应商会回显你的输入，足以体验命令、记忆、确认机制和审计日志。
 
 ### 运行
 
 ```bash
-terra init                                          # 初始化项目目录
-terra chat                                          # 启动交互式会话
-terra                                               # 同上（默认 chat）
-terra run --task "解释这个项目的架构"                   # 单次任务执行
-terra doctor --as-json                              # 环境诊断
+terra init                    # 创建 .terra/（宪法、配置、提示词、.gitignore）
+terra chat                    # 交互式会话（直接运行 `terra` 亦可）
+terra chat --tui              # 全屏终端界面
+terra run --task "解释这个项目的架构"
+terra doctor                  # 环境与供应商检查
+terra trace -n 20             # 本项目最近 20 条审计记录
+terra mcp                     # stdio 上的 MCP 服务
 ```
 
 ---
@@ -785,72 +669,71 @@ terra doctor --as-json                              # 环境诊断
 
 | 命令 | 别名 | 说明 |
 |------|:----:|------|
-| `/goal "描述"` | `/g` | 进入目标模式（开启漂移检测、规格门控、收敛约束） |
+| `/goal "描述"` | `/g` | 进入目标模式：跟踪目标并检查回答是否偏离 |
 | `/done` | `/d` | 退出目标模式，触发 sleep 沉淀 |
-| `/status` | `/s` | 显示当前模式、漂移评分、token 用量 |
-| `/plan` | `/p` | 显示/提议执行计划 |
-| `/commit` | `/c` | 暂存变更并生成 LLM 提交信息 |
-| `/undo` | | 撤销所有未提交变更 |
+| `/accept N` / `/reject N` | | 保留或丢弃沉淀候选（保留的写入 L1 记忆） |
+| `/status` | `/s` | 显示模式、目标对齐度、token 用量 |
+| `/plan` | `/p` | 让 LLM 为当前目标生成执行计划 |
+| `/execute` | | 逐步执行计划（每一步是一次不带工具的 LLM 调用） |
+| `/skill [名称]` | | 列出或运行内置技能（`code_editor`、`test_runner`、`memory_inspector`） |
+| `/commit` | `/c` | 暂存全部变更并用 LLM 生成的信息提交（先询问） |
+| `/undo` | | 丢弃已跟踪文件的未暂存修改（先列出文件并询问） |
 | `/remember "文本"` | | 保存到 L1 项目记忆 |
-| `/sessions` | | 列出历史会话 |
-| `/compact` | | 压缩上下文以释放记忆 |
+| `/trace` | | 显示最近 10 条审计记录 |
+| `/sessions` | | 列出已保存会话 |
+| `/compact` | | 压缩较早的对话以释放上下文 |
 | `/sleep` | | 手动触发 sleep 沉淀 |
-| `/clear` | | 清屏并重置上下文 |
+| `/clear` | | 清屏并重置对话上下文 |
 | `/help` | `/h` | 显示命令帮助 |
-| `/quit` | `/q` | 退出 Terra |
+| `/quit` | `/q` | 退出（也可 `/exit` 或 Ctrl+D） |
 
 ---
 
 ## 架构概述
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  terra-cli          CLI + TUI + 渲染层                   │  L5
-├──────────────────────────────────────────────────────────┤
-│  terra-agents       REPL + 编排器 + SubAgent             │  L4
-├──────────────────────────────────────────────────────────┤
-│  terra-executor     命令路由 + EventBus                   │
-│  terra-caging       8 个行为笼 + 沙箱 + 宪法              │  L3
-│  terra-compile      SpecIR + 执行计划 + 术语归一化          │
-├──────────────────────────────────────────────────────────┤
-│  terra-protocol     命令协议 + MessagePack 编解码          │  L2
-│  terra-memory       7 层数据库 + 指针索引 + 缓存            │
-├──────────────────────────────────────────────────────────┤
-│  terra-core         智能核心 + Soul 模板                   │
-│  terra-trace        持久化审计日志                         │  L1
-│  terra-providers    OpenAI 兼容 LLM 适配器                │
-├──────────────────────────────────────────────────────────┤
-│  terra-types        共享类型 + 事件 + 合约                  │  L0
-└──────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│ 6  terra-cli        命令行（clap）、readline REPL、ratatui TUI │
+├────────────────────────────────────────────────────────────────┤
+│ 5  terra-mcp        MCP 服务（stdio 上的 JSON-RPC）            │
+├────────────────────────────────────────────────────────────────┤
+│ 4  terra-agents     REPL 循环 + 工具调用、编排器、会话、       │
+│                     漂移检测、Agent 角色                       │
+├────────────────────────────────────────────────────────────────┤
+│ 3  terra-executor   命令管线：审计 → 笼检查 → 路由             │
+├────────────────────────────────────────────────────────────────┤
+│ 2  terra-caging     8 个笼、沙箱守卫、宪法                     │
+│    terra-compile    SpecIR、执行计划、术语表                   │
+│    terra-trace      持久化审计日志                             │
+├────────────────────────────────────────────────────────────────┤
+│ 1  terra-protocol   消息类型、MessagePack 编解码、渲染         │
+├────────────────────────────────────────────────────────────────┤
+│ 0  terra-types      命令、事件、契约、文本工具                 │
+│    terra-core       智能核心、Soul 模板                        │
+│    terra-memory     7 层记忆库、指针索引、缓存                 │
+│    terra-providers  OpenAI 兼容适配器、dry-run                 │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-**依赖规则**：第 N 层 crate 只能依赖第 < N 层的 crate。
+**依赖规则**：crate 只依赖更低层的 crate，由 `crates/terra-cli/tests/layering.rs` 对每个 `Cargo.toml` 自动检查。
 
 ---
 
 ## 记忆系统
 
-### 7 层数据库
-
 | 层级 | 名称 | 说明 | 写权限 | GC 保护 |
 |:----:|------|------|--------|:-------:|
 | L0 | 权威层 | 宪法、Soul 模板、智能核心 | 完全禁止（只读） | 是 |
-| L1 | 项目层 | 架构决策、用户保存的知识 | 仅用户 `/remember` | 是 |
+| L1 | 项目层 | 架构决策、用户保存的知识 | 仅用户 `/remember`、`/accept` | 是 |
 | L2 | 任务层 | 当前假设、活跃尝试 | 双模式均可 | 否 |
 | L3 | 已验证路径 | 经验证的成功方案 | 仅目标模式 + 已验证 | 否 |
-| L4 | 失败路径索引 | 压缩的失败记录 | 双模式均可 | 否 |
+| L4 | 失败路径 | 压缩的失败记录 | 双模式均可 | 否 |
 | L5 | 休眠层 | 已归档、低优先级 | 双模式均可 | 否 |
 | L6 | 候选层 | Agent 提名，等待人工审核 | 双模式均可 | 否 |
 
-设计借鉴 Rust 所有权模型：
-- **所有权**：每个记忆条目有唯一属主
-- **借用**：SubAgent 通过 `MemoryView` 获得只读、层级过滤的视图
-- **生命周期**：条目携带创建时间、最后访问时间、访问计数
-- **垃圾回收**：基于显著性评分清理低价值条目，L0/L1 受保护
+设计借鉴 Rust 所有权模型：每个条目有唯一属主；SubAgent 通过只读、按层过滤的 `MemoryView` 借用；条目记录创建时间、访问次数和引用计数；基于显著性的垃圾回收已在 `terra-memory` 中实现（CLI 尚未调度）。
 
-### DSL 指针索引
-
-指针表是记忆数据库之上的轻量级索引，存储元数据和显著性评分而非全文内容。可序列化为紧凑文本嵌入 LLM 上下文窗口，也可持久化为 TOML。
+指针表是记忆库之上的轻量索引，Agent 通过 `PointerQuery` 工具查询：
 
 ```
 @mem["project-arch"]       按 key 精确查找
@@ -860,60 +743,38 @@ terra doctor --as-json                              # 环境诊断
 @top(10)                   按显著性评分取前 10
 ```
 
-**显著性评分**由四个信号加权组合：
-
-| 信号 | 权重 | 来源 |
-|------|:----:|------|
-| 关键词匹配 | 0.3 | TF-IDF 词频相关性 |
-| 语义相似度 | 0.4 | 嵌入向量相似度 |
-| 时间衰减 | 0.2 | 自动近因加权 |
-| 访问频率 | 0.1 | 使用计数提升 |
-
-### 存储架构
-
-```
-读路径:  请求 --> Moka 缓存 --> StorageBackend (SQLite)    [读穿透]
-写路径:  请求 --> SafetyEnforcer --> StorageBackend --> 缓存  [写穿透]
-```
+显著性 = 关键词匹配 0.3（TF-IDF）+ 语义相似度 0.4（`EmbeddingBackend`，目前为 TF-IDF）+ 时间衰减 0.2 + 访问频率 0.1。
 
 ---
 
 ## Caging 工程概述
 
-Caging Engineering（笼化工程）是一种行为约束方法论。与提示工程（告诉 AI "做什么"）不同，Caging 定义 AI "能做什么" 的边界。Agent 的可达状态空间由程序化约束在每个动作执行前塑形。
+Caging Engineering（笼化工程）是一种行为约束方法论。与提示工程（告诉 AI "做什么"）不同，Caging 用在动作执行前运行的程序化检查来定义 AI "能做什么" 的边界。
 
-### 工作流程
+| 笼 | 功能 | 模式 | 运行时生效 |
+|----|------|:----:|:----------:|
+| **Action（动作笼）** | 写入/删除必须解析到沙箱根目录内；受保护路径只读；拦截 `rm -rf /`、`mkfs`、`> /dev/` | 始终 | 是 |
+| **Memory（记忆笼）** | L0 只读；L1 仅接受用户命令；L3 需目标模式 + 验证 | 始终 | 是 |
+| **Output（输出笼）** | 扣留含提示注入或权限提升短语的 LLM 回答 | 始终 | 是（对话回答与模型调用） |
+| **Specification（规格笼）** | 规格有未解决问题时阻止执行 | 目标 | 已注册，未触发 |
+| **Verification（验证笼）** | 阻止未经验证的完成声明 | 目标 | 已注册，未触发 |
+| **Meta（元笼）** | 阻止修改受保护规则 | 始终 | 已注册，未触发 |
+| **Knowledge（知识笼）** | 权威排序：代码 > 文档 > 记忆 > 假设 | 始终 | 仅库代码 |
+| **Convergence（收敛笼）** | 已接受方案后继续探索时发出警告 | 目标 | 仅库代码 |
 
+shell 命令不在沙箱内：一旦你批准，它以你的用户权限运行，确认提示就是 shell 访问的控制点。文件读取不受项目目录限制。
+
+---
+
+## 测试
+
+```bash
+cargo test --workspace                                  # 601 个测试，无需网络和 API key
+cargo test --workspace -- --ignored                     # 17 个连接真实 LLM 的测试（需要 API key）
+cargo clippy --workspace --all-targets -- -D warnings   # 无警告
 ```
-Agent 请求执行动作
-       |
-       v
-+----------------+
-| CagingEngine   |    依次运行所有笼
-|                |    目标模式专属笼在对话模式下跳过
-| 遇 Block 即    |
-| 短路中止并拒绝  |
-+-------+--------+
-        |
-   全部通过?
-   /       \
- 是         否
-  |          |
-执行动作   阻止动作 + 写入审计日志
-```
 
-### 8 个行为笼
-
-| # | 笼 | 功能 | 激活模式 |
-|:-:|-----|------|----------|
-| 1 | **Specification（规格笼）** | 任务规格有未解决问题时阻止执行 | 仅目标模式 |
-| 2 | **Knowledge（知识笼）** | 知识权威排序：代码 > 文档 > 记忆 > 假设 | 始终激活 |
-| 3 | **Memory（记忆笼）** | 所有权 + 基于层级的写权限控制 | 始终激活 |
-| 4 | **Action（动作笼）** | 文件系统沙箱，阻止破坏性 shell 命令 | 始终激活 |
-| 5 | **Verification（验证笼）** | 阻止未经外部验证的完成声明 | 仅目标模式 |
-| 6 | **Convergence（收敛笼）** | 已验证方案存在时警告/阻止继续探索 | 仅目标模式 |
-| 7 | **Meta（元笼）** | 阻止运行时修改受保护规则和宪法 | 始终激活 |
-| 8 | **Output（输出笼）** | 检查 LLM 响应中的提示注入和权限提升 | 始终激活 |
+CI（`.github/workflows/ci.yml`）在 Linux 和 macOS 上运行构建、测试和 clippy，并用 Rust 1.89 执行 `cargo check`。
 
 ---
 
@@ -921,13 +782,29 @@ Agent 请求执行动作
 
 | 项目 | 详情 |
 |------|------|
-| **操作系统** | macOS (ARM64/x86_64), Linux (x86_64) |
-| **Rust** | 1.75+（edition 2021） |
-| **磁盘** | ~200MB（构建产物），~12MB（release 二进制） |
-| **内存** | ~50MB 运行时 |
+| **操作系统** | macOS（已在 ARM64 上测试）、Linux x86_64（CI） |
+| **Rust** | 1.89+（由锁定的依赖决定；edition 2021） |
+| **磁盘** | release 构建产物约 475 MB，二进制约 10 MB |
+| **内存** | 空闲对话会话常驻内存约 12 MB |
 | **网络** | 仅 LLM API 调用时需要 |
-| **SQLite** | 内置，无需安装 |
+| **SQLite** | 通过 `rusqlite` 内置 |
 | **Windows** | 未测试，可能在 WSL 下工作 |
+
+---
+
+## 已知限制
+
+- 已批准的 shell 命令以你的用户权限运行；沙箱只约束 Terra 自己的文件工具。
+- 文件读取不限于项目目录。
+- 对话回答在完整返回后才逐词打印；对话循环尚未使用供应商的 SSE 流式输出。
+- 从第二轮起系统提示词精简为身份声明以节省 token；`prompt.md` 与记忆索引只在第一轮发送。
+- 8 个笼中有 5 个尚未被运行时事件触发（见 [项目状态](#项目状态)）。
+- 多 Agent 角色、记忆 GC、会话恢复已在库中实现，但 CLI 尚未开放。
+- `/execute` 以不带工具的 LLM 调用执行计划步骤。
+- 相似度计算基于 TF-IDF，暂无神经网络嵌入。
+- TUI 无法取消进行中的请求。
+
+开发过程中的设计文档见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [docs/](docs/)，其中的数字反映的是撰写时的状态。
 
 ---
 

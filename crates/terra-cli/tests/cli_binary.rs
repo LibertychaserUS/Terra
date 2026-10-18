@@ -297,3 +297,50 @@ fn piped_output_has_no_color_codes() {
     assert!(!text.contains('\x1b'), "escape codes in piped chat output");
     assert!(!text.contains("Thinking"), "spinner in piped chat output");
 }
+
+// `terra init` used to write explicit defaults that shadowed ~/.terra/config.toml.
+#[test]
+fn global_settings_apply_after_init() {
+    let env = TestEnv::new();
+    env.terra().arg("init").assert().success();
+    env.terra().args(["config", "set", "provider.model", "gpt-4o"]).assert().success();
+    env.terra()
+        .args(["config", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("model = \"gpt-4o\""));
+}
+
+#[test]
+fn empty_api_key_means_dry_run() {
+    let env = TestEnv::new();
+    env.terra().arg("init").assert().success();
+    env.terra().args(["config", "set", "provider.api_key", "", "--project"]).assert().success();
+    env.terra()
+        .arg("doctor")
+        .env("TERRA_PROVIDER_API_KEY", "")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run only"));
+}
+
+// `terra trace | head -1` used to panic with "failed printing to stdout: Broken pipe".
+#[cfg(unix)]
+#[test]
+fn closed_stdout_does_not_panic() {
+    let env = TestEnv::new();
+    env.terra().arg("init").assert().success();
+    env.terra().args(["run", "--task", "fill the audit log"]).assert().success();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("terra"))
+        .arg("trace")
+        .current_dir(env.project.path())
+        .env("HOME", env.home.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take()); // reader goes away before terra writes
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{}", stderr);
+}

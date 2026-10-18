@@ -19,7 +19,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.75"
+rust-version = "1.89"
 description = "Terra Agent OS — Efficiency is Intelligence"
 repository = "https://github.com/LibertychaserUS/terra"
 homepage = "https://github.com/LibertychaserUS/terra"
@@ -49,3 +49,7 @@ tempfile = "3"
 rustyline = "15"
 ratatui = "0.29"
 crossterm = "0.28"
+
+[profile.release]
+# Drop symbols from the shipped binary (about 10 MB instead of 13.7 MB on arm64 macOS).
+strip = true
