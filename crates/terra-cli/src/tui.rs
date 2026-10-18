@@ -23,7 +23,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use terra_agents::repl::{Repl, ReplOutput};
+use terra_agents::repl::{ConfirmCallback, Repl, ReplOutput};
+use terra_agents::session_store::SessionStore;
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 
@@ -140,11 +141,12 @@ pub async fn run_tui_async(
     core: Arc<IntelligenceCore>,
     model_name: &str,
     greeter_lines: Vec<String>,
+    terra_dir: &std::path::Path,
 ) -> io::Result<()> {
-    // REPL lives in the SAME task — no Send requirement.
-    // No confirm callback here: dangerous tools (shell, delete) are declined
-    // in the TUI until it has its own confirmation prompt.
-    let mut repl = Repl::new(executor, core);
+    // REPL lives in the SAME task — no Send requirement
+    let mut repl = Repl::new(executor, core)
+        .with_store(SessionStore::new(terra_dir))
+        .with_confirm_callback(tui_confirm_callback());
 
     // Restore the terminal before a panic message is printed, otherwise the
     // message is lost in the alternate screen and the shell stays in raw mode.
@@ -236,6 +238,36 @@ pub async fn run_tui_async(
 
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Ask y/N on the bottom row of the screen for dangerous operations.
+///
+/// The REPL runs inline in the TUI loop, so while it waits here no other key
+/// handling happens; the next frame redraws over the prompt.
+fn tui_confirm_callback() -> ConfirmCallback {
+    Arc::new(|prompt: &str| {
+        use crossterm::style::{Print, Stylize};
+        use crossterm::terminal::{Clear, ClearType};
+        let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let _ = execute!(
+            io::stdout(),
+            crossterm::cursor::MoveTo(0, rows.saturating_sub(1)),
+            Clear(ClearType::CurrentLine),
+            Print(format!(" {} ", prompt).black().on_yellow()),
+        );
+        loop {
+            match event::read() {
+                Ok(Event::Key(key)) => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => return true,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => return false,
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    })
 }
 
 /// Leaves raw mode and the alternate screen when the TUI exits for any reason.

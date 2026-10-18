@@ -70,7 +70,7 @@ pub struct Repl {
     /// Last sleep consolidation report (for /accept and /reject).
     last_consolidation: Option<crate::session::SleepConsolidationReport>,
     /// Optional callback for L2 dangerous tool confirmation.
-    /// If None, L2 tools execute without confirmation (non-interactive / test mode).
+    /// If None, L2 tools are declined unless the matching auto-approve flag is set.
     confirm_callback: Option<ConfirmCallback>,
     /// Skip confirmation for ShellExec when true.
     pub auto_approve_shell: bool,
@@ -78,6 +78,8 @@ pub struct Repl {
     pub auto_approve_delete: bool,
     /// Turn count for system prompt strategy (first turn = full, subsequent = minimal).
     turn_count: u32,
+    /// Project directory used by git commands and `.terra/prompt.md` lookup.
+    project_root: std::path::PathBuf,
 }
 
 /// Approximate token count from text (chars / 4 is a rough heuristic).
@@ -89,7 +91,7 @@ fn approx_tokens(text: &str) -> u32 {
 ///
 /// Returns true if the operation should proceed, false if declined.
 /// - Auto-approve flags bypass the callback for their respective tool.
-/// - If no callback is set, the operation is allowed (non-interactive mode).
+/// - If no callback is set, the operation is declined: nobody can approve it.
 fn check_l2_confirmation(
     op_name: &str,
     parsed_args: &Value,
@@ -103,19 +105,22 @@ fn check_l2_confirmation(
         "ShellExec" => {
             let cmd = parsed_args.get("command").and_then(|c| c.as_str()).unwrap_or("?");
             let prompt = format!("[Terra] Execute: `{}`? (y/N)", cmd);
-            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(true)
+            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(false)
         }
         "FileDelete" => {
             let path = parsed_args.get("path").and_then(|p| p.as_str()).unwrap_or("?");
             let prompt = format!("[Terra] Delete {}? (y/N)", path);
-            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(true)
+            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(false)
         }
         _ => {
             let prompt = format!("[Terra] Execute {} (dangerous)? (y/N)", op_name);
-            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(true)
+            confirm_callback.as_ref().map(|cb| cb(&prompt)).unwrap_or(false)
         }
     }
 }
+
+/// Prefix of the tool result sent back to the LLM when the user declines a tool.
+const DECLINED_PREFIX: &str = "UserDeclined";
 
 /// Compaction threshold: 70% of max.
 const COMPACTION_THRESHOLD: f32 = 0.70;
@@ -154,7 +159,14 @@ impl Repl {
             auto_approve_shell: false,
             auto_approve_delete: false,
             turn_count: 0,
+            project_root: std::env::current_dir().unwrap_or_default(),
         }
+    }
+
+    /// Set the project directory (defaults to the current working directory).
+    pub fn with_project_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.project_root = root.into();
+        self
     }
 
     /// Set max context tokens (from provider capability).
@@ -389,7 +401,7 @@ impl Repl {
                 ]
             }
             "/commit" => {
-                let project_root = std::env::current_dir().unwrap_or_default();
+                let project_root = self.project_root.clone();
                 let git_info = crate::codebase::detect_git(&project_root);
                 if !git_info.is_repo {
                     return vec![
@@ -423,10 +435,25 @@ impl Repl {
                     output_contract: None,
                 });
                 let msg_result = self.executor.execute(msg_cmd).await;
+                let is_dry_run = self.executor.provider().capabilities().provider_id == "dry_run";
+                let fallback_msg = format!("Update {} file(s)", git_info.changed_files);
                 let commit_msg = msg_result.data.as_ref()
                     .and_then(|d| d.get("content"))
                     .and_then(|c| c.as_str())
-                    .unwrap_or("Terra: auto-commit");
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty() && !is_dry_run)
+                    .unwrap_or(&fallback_msg);
+
+                if let Some(cb) = &self.confirm_callback {
+                    let prompt = format!(
+                        "[Terra] Stage all {} changed file(s) and commit as \"{}\"? (y/N)",
+                        git_info.changed_files,
+                        commit_msg.lines().next().unwrap_or(commit_msg),
+                    );
+                    if !cb(&prompt) {
+                        return vec![ReplOutput::Text("Commit cancelled.".into()), self.prompt()];
+                    }
+                }
 
                 // Stage all + commit
                 match crate::codebase::git_commit(&project_root, &["."], commit_msg) {
@@ -656,8 +683,8 @@ impl Repl {
                     ReplOutput::Text("  /skill [name]   — List or run a registered Skill".into()),
                     ReplOutput::Text("  /accept N       — Accept sleep promotion candidate".into()),
                     ReplOutput::Text("  /reject N       — Reject sleep promotion candidate".into()),
-                    ReplOutput::Text("  /commit         — Stage + commit with LLM message (/c)".into()),
-                    ReplOutput::Text("  /undo           — Revert all uncommitted changes".into()),
+                    ReplOutput::Text("  /commit         — Stage all + commit with LLM message (/c)".into()),
+                    ReplOutput::Text("  /undo           — Discard unstaged edits (asks first)".into()),
                     ReplOutput::Text("  /remember \"x\"  — Save to L1 memory".into()),
                     ReplOutput::Text("  /sessions       — List past sessions".into()),
                     ReplOutput::Text("  /compact        — Compact context (free memory)".into()),
@@ -674,14 +701,42 @@ impl Repl {
                 vec![ReplOutput::Text("Goodbye.".into())]
             }
             "/undo" => {
-                let project_root = std::env::current_dir().unwrap_or_default();
+                let project_root = self.project_root.clone();
+                let files = match crate::codebase::git_unstaged_files(&project_root) {
+                    Ok(files) => files,
+                    Err(e) => return vec![
+                        ReplOutput::Text(format!("Undo failed: {}", e)),
+                        self.prompt(),
+                    ],
+                };
+                if files.is_empty() {
+                    return vec![
+                        ReplOutput::Text("Nothing to undo: no unstaged changes to tracked files.".into()),
+                        self.prompt(),
+                    ];
+                }
+                let Some(cb) = &self.confirm_callback else {
+                    return vec![
+                        ReplOutput::Text("/undo needs an interactive confirmation; run `git checkout -- .` yourself.".into()),
+                        self.prompt(),
+                    ];
+                };
+                let shown: Vec<&str> = files.iter().take(5).map(String::as_str).collect();
+                let more = if files.len() > shown.len() { format!(", +{} more", files.len() - shown.len()) } else { String::new() };
+                let prompt = format!(
+                    "[Terra] Discard unstaged changes to {} file(s) ({}{})? This cannot be undone. (y/N)",
+                    files.len(), shown.join(", "), more,
+                );
+                if !cb(&prompt) {
+                    return vec![ReplOutput::Text("Undo cancelled.".into()), self.prompt()];
+                }
                 let output = std::process::Command::new("git")
-                    .args(["checkout", "."])
+                    .args(["checkout", "--", "."])
                     .current_dir(&project_root)
                     .output();
                 match output {
                     Ok(o) if o.status.success() => vec![
-                        ReplOutput::Notification("  ✓ Reverted all uncommitted changes".into()),
+                        ReplOutput::Notification(format!("  ✓ Reverted {} file(s)", files.len())),
                         self.prompt(),
                     ],
                     Ok(o) => vec![
@@ -739,8 +794,7 @@ impl Repl {
         // --- 2. System prompt: first turn full, subsequent minimal ---
         let system_prompt = if self.turn_count == 1 {
             // First turn: load prompt from .terra/prompt.md (user-editable) or fallback to embedded
-            let project_root = std::env::current_dir().unwrap_or_default();
-            let prompt_path = project_root.join(".terra").join("prompt.md");
+            let prompt_path = self.project_root.join(".terra").join("prompt.md");
             let mut prompt = if prompt_path.exists() {
                 std::fs::read_to_string(&prompt_path)
                     .unwrap_or_else(|_| include_str!("prompt.md").to_string())
@@ -851,8 +905,9 @@ impl Repl {
                         &tool_registry, &call.name, &call.arguments,
                     ).await;
 
+                    let verb = if result_content.starts_with(DECLINED_PREFIX) { "declined" } else { "complete" };
                     out.push(ReplOutput::Notification(
-                        format!("  << {} complete", call.name)
+                        format!("  << {} {}", call.name, verb)
                     ));
 
                     results.push(ToolResult {
@@ -973,7 +1028,7 @@ impl Repl {
             );
             if !approved {
                 info!(tool_name, "L2 tool declined by user");
-                return "UserDeclined: operation cancelled by user".to_string();
+                return format!("{}: operation cancelled by user", DECLINED_PREFIX);
             }
         }
 
@@ -1348,12 +1403,15 @@ mod tests {
         assert!(!approved, "FileDelete should be declined when callback returns false");
     }
 
-    // T-CONF-004: No callback = allowed (non-interactive mode)
+    // T-CONF-004: No callback = declined (nobody can approve it)
     #[test]
-    fn l2_no_callback_allows_execution() {
+    fn l2_no_callback_declines_execution() {
         let args = serde_json::json!({"command": "echo hello"});
-        let approved = check_l2_confirmation("ShellExec", &args, false, false, &None);
-        assert!(approved, "should allow execution when no callback is set");
+        assert!(!check_l2_confirmation("ShellExec", &args, false, false, &None));
+        let args = serde_json::json!({"path": "a.txt"});
+        assert!(!check_l2_confirmation("FileDelete", &args, false, false, &None));
+        assert!(check_l2_confirmation("ShellExec", &serde_json::json!({}), true, false, &None),
+            "explicit auto-approve still works without a callback");
     }
 
     // T-CONF-005: Prompt includes the command for ShellExec
@@ -1493,5 +1551,63 @@ mod tests {
         }
         let out = repl.process_input("/compact").await;
         assert!(out.iter().any(|o| matches!(o, ReplOutput::Notification(n) if n.starts_with("Compacted"))));
+    }
+    fn git_repo_with_edit() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir.path()).output().unwrap();
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("work.txt"), "committed").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+        std::fs::write(dir.path().join("work.txt"), "precious edit").unwrap();
+        dir
+    }
+
+    // /undo used to run `git checkout .` without asking.
+    #[tokio::test]
+    async fn undo_without_confirmation_keeps_changes() {
+        let repo = git_repo_with_edit();
+        let (repl, _dir) = test_repl();
+        let mut repl = repl.with_project_root(repo.path());
+        let out = repl.process_input("/undo").await;
+        assert!(out.iter().any(|o| matches!(o, ReplOutput::Text(t) if t.contains("needs an interactive confirmation"))));
+        assert_eq!(std::fs::read_to_string(repo.path().join("work.txt")).unwrap(), "precious edit");
+    }
+
+    #[tokio::test]
+    async fn undo_declined_keeps_changes_and_accepted_reverts() {
+        let repo = git_repo_with_edit();
+        let (repl, _dir) = test_repl();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let answer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (asked_cb, answer_cb) = (asked.clone(), answer.clone());
+        let cb: ConfirmCallback = Arc::new(move |prompt: &str| {
+            asked_cb.lock().unwrap().push(prompt.to_string());
+            answer_cb.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        let mut repl = repl.with_project_root(repo.path()).with_confirm_callback(cb);
+
+        repl.process_input("/undo").await;
+        assert_eq!(std::fs::read_to_string(repo.path().join("work.txt")).unwrap(), "precious edit");
+        assert!(asked.lock().unwrap()[0].contains("work.txt"), "prompt should name the files");
+
+        answer.store(true, std::sync::atomic::Ordering::SeqCst);
+        repl.process_input("/undo").await;
+        assert_eq!(std::fs::read_to_string(repo.path().join("work.txt")).unwrap(), "committed");
+    }
+
+    #[tokio::test]
+    async fn commit_declined_creates_no_commit() {
+        let repo = git_repo_with_edit();
+        let (repl, _dir) = test_repl();
+        let cb: ConfirmCallback = Arc::new(|_| false);
+        let mut repl = repl.with_project_root(repo.path()).with_confirm_callback(cb);
+        let out = repl.process_input("/commit").await;
+        assert!(out.iter().any(|o| matches!(o, ReplOutput::Text(t) if t == "Commit cancelled.")));
+        let log = std::process::Command::new("git").args(["rev-list", "--count", "HEAD"])
+            .current_dir(repo.path()).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "1");
     }
 }

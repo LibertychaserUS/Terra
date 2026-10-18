@@ -163,6 +163,14 @@ fn bootstrap() -> Orchestrator {
     Orchestrator::new(executor, core)
 }
 
+/// `.terra/.gitignore`: only the shareable project files are tracked; memory,
+/// audit log, history, sessions, artifacts and the local config stay private.
+const TERRA_GITIGNORE: &str = "# Terra runtime data (databases, history, sessions, artifacts, local config).\n# Only the project rules and the system prompt are meant to be shared.\n*\n!.gitignore\n!constitution.toml\n!prompt.md\n";
+
+fn write_terra_gitignore(terra_dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(terra_dir.join(".gitignore"), TERRA_GITIGNORE)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -250,6 +258,9 @@ max_candidates = 10
             std::fs::write(terra_dir.join("config.toml"), config_content)?;
             println!("  \x1b[32m✓\x1b[0m Config written");
 
+            write_terra_gitignore(&terra_dir)?;
+            println!("  \x1b[32m✓\x1b[0m .gitignore written (runtime data stays out of git)");
+
             // Generate prompt.md (user-editable system prompt)
             let prompt_content = include_str!("../../terra-agents/src/prompt.md");
             std::fs::write(terra_dir.join("prompt.md"), prompt_content)?;
@@ -303,6 +314,11 @@ max_candidates = 10
                 std::fs::write(terra_dir.join("config.toml"),
                     "[provider]\nbase_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\nmodel = \"qwen-plus\"\n\n[memory]\ncache_capacity = 1000\n\n[sleep]\ntrigger = \"session_end\"\ninterval_hours = 24\nmax_candidates = 10\n"
                 ).ok();
+            }
+            // Keep databases, history and sessions out of the user's git repo,
+            // including for projects initialized before this file existed.
+            if !terra_dir.join(".gitignore").exists() {
+                write_terra_gitignore(&terra_dir).ok();
             }
 
             // First launch declaration
@@ -434,7 +450,7 @@ max_candidates = 10
                 let greeter_lines: Vec<String> = suggestions.iter()
                     .map(|s| format!("  {} — {}", s.label, s.hint))
                     .collect();
-                tui::run_tui_async(executor, core, &provider_name, greeter_lines).await?;
+                tui::run_tui_async(executor, core, &provider_name, greeter_lines, &terra_dir).await?;
                 return Ok(());
             }
 
