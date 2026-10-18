@@ -76,7 +76,7 @@ Terra is an early-stage project (v0.1). [Project status](#project-status) lists 
 | Interactive chat (`terra chat`) | Works end to end: LLM tool calling (files, memory, shell, artifacts, pointer queries), y/N confirmation for shell and delete, session auto-save, context compaction |
 | Full-screen TUI (`terra chat --tui`) | Works, with the same confirmations; simpler than the readline UI (Ctrl+C cannot cancel a running request) |
 | One-shot tasks (`terra run`) | Works: spec compilation, Intelligence Core rules, caged provider call, audit |
-| MCP server (`terra mcp`) | Works over stdio: 13 tools routed through the same executor and cages |
+| MCP server (`terra mcp`) | Works over stdio: 13 tools routed through the same executor and cages; approving shell and delete calls is left to the MCP client |
 | Audit trail (`terra trace`) | Works: persistent SQLite log of every executed command |
 | Cages enforced at runtime | **Action** (sandboxed writes/deletes, destructive shell patterns), **Memory** (L0 read-only, L1 user-only), **Output** (prompt-injection patterns in LLM answers) |
 | Cages implemented, not yet triggered | **Specification**, **Verification**, **Meta** are registered, but the runtime never emits the actions they block; **Knowledge** and **Convergence** are not registered |
@@ -507,6 +507,7 @@ CI (`.github/workflows/ci.yml`) runs build, tests and clippy on Linux and macOS,
 
 - Approved shell commands run with your user's permissions; the sandbox covers Terra's own file tools, not what a shell command does.
 - File reads are not limited to the project directory.
+- `terra mcp` has no y/N prompt of its own: the MCP client decides whether a shell or delete call runs.
 - Chat prints an answer after it has fully arrived (word by word); the provider's SSE streaming is not used by the chat loop yet.
 - From the second turn on, the system prompt is reduced to Terra's identity to save tokens; `prompt.md` guidance and the memory index are sent on the first turn only.
 - Five of the eight cages are not triggered by runtime events yet (see [Project status](#project-status)).
@@ -588,7 +589,7 @@ Terra 目前处于早期阶段（v0.1）。[项目状态](#项目状态) 列出�
 | 交互式对话（`terra chat`） | 端到端可用：LLM 工具调用（文件、记忆、shell、制品、指针查询），shell 与删除操作需 y/N 确认，会话自动保存，上下文压缩 |
 | 全屏 TUI（`terra chat --tui`） | 可用，确认机制相同；比 readline 界面简单（Ctrl+C 无法取消进行中的请求） |
 | 单次任务（`terra run`） | 可用：规格编译、智能核心规则、经笼检查的模型调用、审计 |
-| MCP 服务（`terra mcp`） | 通过 stdio 可用：13 个工具，经过同一套执行器和笼 |
+| MCP 服务（`terra mcp`） | 通过 stdio 可用：13 个工具，经过同一套执行器和笼；shell 与删除操作由 MCP 客户端负责确认 |
 | 审计日志（`terra trace`） | 可用：每条已执行命令都持久化在 SQLite 中 |
 | 运行时生效的笼 | **Action**（沙箱化写入/删除、破坏性 shell 模式）、**Memory**（L0 只读、L1 仅用户可写）、**Output**（LLM 回答中的提示注入短语） |
 | 已实现但尚未被触发的笼 | **Specification**、**Verification**、**Meta** 已注册，但运行时不会产生它们拦截的动作；**Knowledge**、**Convergence** 未注册 |
@@ -796,6 +797,7 @@ CI（`.github/workflows/ci.yml`）在 Linux 和 macOS 上运行构建、测试�
 
 - 已批准的 shell 命令以你的用户权限运行；沙箱只约束 Terra 自己的文件工具。
 - 文件读取不限于项目目录。
+- `terra mcp` 没有自己的 y/N 确认，shell 与删除调用是否执行由 MCP 客户端决定。
 - 对话回答在完整返回后才逐词打印；对话循环尚未使用供应商的 SSE 流式输出。
 - 从第二轮起系统提示词精简为身份声明以节省 token；`prompt.md` 与记忆索引只在第一轮发送。
 - 8 个笼中有 5 个尚未被运行时事件触发（见 [项目状态](#项目状态)）。
