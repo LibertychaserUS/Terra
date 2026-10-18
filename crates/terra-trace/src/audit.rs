@@ -71,6 +71,12 @@ pub struct AuditLog {
     persistent: Option<Mutex<PersistentAuditLog>>,
 }
 
+impl Default for AuditLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuditLog {
     /// Create an in-memory-only audit log (no persistence).
     pub fn new() -> Self {
@@ -261,7 +267,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..100 {
                     let cmd = Command::new(
-                        &format!("agent-{}", thread_id),
+                        format!("agent-{}", thread_id),
                         CommandOp::MemRead {
                             key: format!("key-{}-{}", thread_id, i),
                         },

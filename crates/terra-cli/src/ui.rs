@@ -71,10 +71,10 @@ const BLUE: &str = "\x1b[34m";
 /// Format a single markdown line with ANSI codes.
 /// Returns the formatted string (does not print).
 fn format_markdown_line(line: &str) -> String {
-    if line.starts_with("## ") {
-        format!("{BOLD}{BLUE}{}{RESET}", &line[3..])
-    } else if line.starts_with("# ") {
-        format!("{BOLD}{MAGENTA}{}{RESET}", &line[2..])
+    if let Some(heading) = line.strip_prefix("## ") {
+        format!("{BOLD}{BLUE}{}{RESET}", heading)
+    } else if let Some(title) = line.strip_prefix("# ") {
+        format!("{BOLD}{MAGENTA}{}{RESET}", title)
     } else if line.starts_with("- ") || line.starts_with("  -") {
         format!("{CYAN}{}{RESET}", line)
     } else if line.starts_with("  /") {
@@ -100,10 +100,10 @@ pub fn render_text_block(text: &str) {
     let mut in_code_block = false;
 
     for line in text.lines() {
-        if line.starts_with("```") {
+        if let Some(fence_rest) = line.strip_prefix("```") {
             if !in_code_block {
                 // Opening fence — extract language tag
-                let lang = line[3..].trim();
+                let lang = fence_rest.trim();
                 if lang.is_empty() {
                     println!("{DIM}  ┌──────────────────────────────────{RESET}");
                 } else {
@@ -136,9 +136,9 @@ pub async fn typewriter_print(text: &str) {
 
     for line in text.lines() {
         // Handle code fence transitions
-        if line.starts_with("```") {
+        if let Some(fence_rest) = line.strip_prefix("```") {
             if !in_code_block {
-                let lang = line[3..].trim();
+                let lang = fence_rest.trim();
                 let fence = if lang.is_empty() {
                     format!("{DIM}  ┌──────────────────────────────────{RESET}")
                 } else {

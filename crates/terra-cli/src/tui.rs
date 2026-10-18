@@ -199,17 +199,16 @@ pub async fn run_tui_async(
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if state.thinking {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && state.thinking => {
                             state.thinking = false;
                             state.add_msg("", "[interrupted]", Style::default().fg(Color::Yellow));
                         }
-                    }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         running = false;
                     }
-                    KeyCode::Enter => {
-                        if !state.input.is_empty() {
+                    KeyCode::Enter
+                        if !state.input.is_empty() => {
                             let input = std::mem::take(&mut state.input);
                             state.input_history.push(input.clone());
                             state.history_pos = None;
@@ -218,18 +217,16 @@ pub async fn run_tui_async(
                             state.thinking = true;
                             pending_input = Some(input);
                         }
-                    }
                     KeyCode::Char(c) => state.insert_char(c),
                     KeyCode::Backspace => state.backspace(),
                     KeyCode::Left => state.move_left(),
                     KeyCode::Right => state.move_right(),
-                    KeyCode::Up => {
-                        if !state.input_history.is_empty() {
+                    KeyCode::Up
+                        if !state.input_history.is_empty() => {
                             let pos = state.history_pos.map(|p| p.saturating_sub(1)).unwrap_or(state.input_history.len() - 1);
                             state.history_pos = Some(pos);
                             state.set_input(state.input_history[pos].clone());
                         }
-                    }
                     KeyCode::Down => {
                         if let Some(pos) = state.history_pos {
                             if pos + 1 < state.input_history.len() {

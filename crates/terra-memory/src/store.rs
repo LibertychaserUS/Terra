@@ -110,8 +110,8 @@ impl SqliteStore {
                     Ok(MemoryEntry {
                         id: row.get(0)?,
                         key: row.get(1)?,
-                        scope: Scope::from_str(&row.get::<_, String>(2)?).unwrap_or(Scope::Task),
-                        level: Level::from_str(&row.get::<_, String>(3)?).unwrap_or(Level::L2),
+                        scope: Scope::parse(&row.get::<_, String>(2)?).unwrap_or(Scope::Task),
+                        level: Level::parse(&row.get::<_, String>(3)?).unwrap_or(Level::L2),
                         owner: row.get(4)?,
                         content: row.get(5)?,
                         version: row.get(6)?,
@@ -157,8 +157,8 @@ impl SqliteStore {
                         Ok(MemoryEntry {
                             id: row.get(0)?,
                             key: row.get(1)?,
-                            scope: Scope::from_str(&row.get::<_, String>(2)?).unwrap_or(Scope::Task),
-                            level: Level::from_str(&row.get::<_, String>(3)?).unwrap_or(Level::L2),
+                            scope: Scope::parse(&row.get::<_, String>(2)?).unwrap_or(Scope::Task),
+                            level: Level::parse(&row.get::<_, String>(3)?).unwrap_or(Level::L2),
                             owner: row.get(4)?,
                             content: row.get(5)?,
                             version: row.get(6)?,

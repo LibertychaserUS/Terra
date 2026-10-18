@@ -22,11 +22,11 @@ pub async fn route(
     match op {
         CommandOp::MemWrite { key, content, scope, level } => {
             let level_str = level.clone();
-            let scope = match Scope::from_str(scope) {
+            let scope = match Scope::parse(scope) {
                 Some(s) => s,
                 None => return CommandResult::err("", format!("invalid scope: {}", scope)),
             };
-            let level = match Level::from_str(level) {
+            let level = match Level::parse(level) {
                 Some(l) => l,
                 None => return CommandResult::err("", format!("invalid level: {}", level)),
             };
@@ -79,8 +79,7 @@ pub async fn route(
 
         CommandOp::MemSearch { query, top_k } => {
             // Multi-head mode: if query starts with "multi:", split into sub-queries
-            if query.starts_with("multi:") {
-                let raw = &query["multi:".len()..];
+            if let Some(raw) = query.strip_prefix("multi:") {
                 let sub_queries: Vec<String> = raw.split('|')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
@@ -125,7 +124,7 @@ pub async fn route(
         }
 
         CommandOp::ArtifactSave { artifact_type, content: _ } => {
-            let art_type = match ArtifactType::from_str(artifact_type) {
+            let art_type = match ArtifactType::parse(artifact_type) {
                 Some(t) => t,
                 None => return CommandResult::err("", format!("invalid artifact type: {}", artifact_type)),
             };
@@ -145,7 +144,7 @@ pub async fn route(
         }
 
         CommandOp::ArtifactLoad { artifact_type, version } => {
-            let art_type = match ArtifactType::from_str(artifact_type) {
+            let art_type = match ArtifactType::parse(artifact_type) {
                 Some(t) => t,
                 None => return CommandResult::err("", format!("invalid artifact type: {}", artifact_type)),
             };

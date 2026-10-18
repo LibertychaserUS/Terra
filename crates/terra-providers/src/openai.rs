@@ -574,16 +574,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // T-PV-009: live completion (skippable)
+    // T-PV-009: live completion
     #[tokio::test]
+    #[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
     async fn openai_completion_live() {
-        let adapter = match OpenAICompatibleAdapter::from_env() {
-            Ok(a) => a,
-            Err(_) => {
-                eprintln!("SKIP: no provider API key set");
-                return;
-            }
-        };
+        let adapter = OpenAICompatibleAdapter::from_env()
+            .expect("live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
 
         let request = CompletionRequest {
             system_prompt: "You are a helpful assistant. Respond in one sentence.".into(),

@@ -350,7 +350,7 @@ mod tests {
         let config = resolve_config(None);
         // We can't easily test env override without side effects,
         // but we verify the precedence logic exists
-        assert!(config.provider.model.len() > 0);
+        assert!(!config.provider.model.is_empty());
     }
 
     // T-CF-004

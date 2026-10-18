@@ -51,6 +51,12 @@ struct IndexEntry {
     tokens: HashMap<String, f32>, // cached TF-IDF weights (for TfIdf backend)
 }
 
+impl Default for VectorIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VectorIndex {
     /// Create with default TF-IDF backend.
     pub fn new() -> Self {

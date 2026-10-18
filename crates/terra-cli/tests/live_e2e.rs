@@ -268,7 +268,7 @@ async fn full_pipeline_plan_proposal() {
         None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
-    let (exec, audit, dir) = live_executor(provider);
+    let (exec, audit, _dir) = live_executor(provider);
     let mut core = IntelligenceCore::new();
     core.register(Box::new(CodingModule));
     core.register(Box::new(AlgorithmModule));

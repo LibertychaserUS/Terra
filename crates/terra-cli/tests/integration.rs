@@ -159,39 +159,16 @@ async fn pipeline_audit_records_every_step() {
     }
 }
 
-/// T-PI-006: no direct provider call.
-/// Verified by import graph: terra-agents does NOT depend on terra-providers.
-#[test]
-fn pipeline_no_direct_provider_call() {
-    // Compile-time guarantee: terra-agents/Cargo.toml has no terra-providers dependency.
-    // Only terra-executor is in dependencies.
-    assert!(true);
-}
+// T-PI-008: executor audit before execute (tested in executor.rs).
+// T-PI-009: cage check before execute (tested in executor.rs).
+// T-PI-010: cage block prevents write (tested in executor.rs).
+// T-PI-015: result has duration (tested in executor.rs).
+// T-PI-016: permission denied on block (tested in executor.rs).
 
-/// T-PI-007: no direct memory access.
-/// Verified by import graph: terra-agents does NOT depend on terra-memory.
-#[test]
-fn pipeline_no_direct_memory_access() {
-    // Compile-time guarantee: terra-agents/Cargo.toml has no terra-memory dependency.
-    assert!(true);
-}
-
-/// T-PI-008: executor audit before execute (tested in executor.rs).
-/// T-PI-009: cage check before execute (tested in executor.rs).
-/// T-PI-010: cage block prevents write (tested in executor.rs).
-/// T-PI-015: result has duration (tested in executor.rs).
-/// T-PI-016: permission denied on block (tested in executor.rs).
-
-/// T-INT-005: live provider end-to-end (conditional).
+/// T-INT-005: live provider end-to-end.
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn live_provider_e2e() {
-    // Skip if no API key configured
-    if std::env::var("DASHSCOPE_API_KEY").is_err()
-        && std::env::var("TERRA_PROVIDER_API_KEY").is_err()
-    {
-        eprintln!("skipping live provider test (no API key)");
-        return;
-    }
 
     // Build with real provider
     let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
@@ -207,13 +184,10 @@ async fn live_provider_e2e() {
         Box::new(MetaCage),
     ]));
 
-    let provider: Arc<dyn ProviderAdapter> = match terra_providers::OpenAICompatibleAdapter::from_env() {
-        Ok(adapter) => Arc::new(adapter),
-        Err(_) => {
-            eprintln!("skipping live provider test (adapter creation failed)");
-            return;
-        }
-    };
+    let provider: Arc<dyn ProviderAdapter> = Arc::new(
+        terra_providers::OpenAICompatibleAdapter::from_env()
+            .expect("live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY"),
+    );
 
     let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
     let mut core = IntelligenceCore::new();

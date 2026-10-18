@@ -21,7 +21,7 @@ impl Scope {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "global" => Some(Scope::Global),
             "project" => Some(Scope::Project),
@@ -71,7 +71,7 @@ impl Level {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "L0" => Some(Level::L0),
             "L1" => Some(Level::L1),
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn scope_roundtrip() {
         for scope in [Scope::Global, Scope::Project, Scope::Session, Scope::Task] {
-            assert_eq!(Scope::from_str(scope.as_str()), Some(scope));
+            assert_eq!(Scope::parse(scope.as_str()), Some(scope));
         }
     }
 
@@ -123,7 +123,7 @@ mod tests {
             Level::L0, Level::L1, Level::L2, Level::L3,
             Level::L4, Level::L5, Level::L6,
         ] {
-            assert_eq!(Level::from_str(level.as_str()), Some(level));
+            assert_eq!(Level::parse(level.as_str()), Some(level));
         }
     }
 
@@ -143,12 +143,12 @@ mod tests {
 
     #[test]
     fn invalid_scope() {
-        assert_eq!(Scope::from_str("invalid"), None);
+        assert_eq!(Scope::parse("invalid"), None);
     }
 
     #[test]
     fn invalid_level() {
-        assert_eq!(Level::from_str("L9"), None);
+        assert_eq!(Level::parse("L9"), None);
     }
 
     #[test]

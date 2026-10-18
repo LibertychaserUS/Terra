@@ -26,7 +26,7 @@ impl ArtifactType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "plan" => Some(ArtifactType::Plan),
             "spec" => Some(ArtifactType::Spec),

@@ -8,6 +8,12 @@ pub struct UniversalFramework {
     rules: Vec<Rule>,
 }
 
+impl Default for UniversalFramework {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UniversalFramework {
     /// Create the universal framework with all built-in rules.
     pub fn new() -> Self {

@@ -565,14 +565,6 @@ mod tests {
         assert_eq!(result.provider_id, "dry_run");
     }
 
-    // FR-002: no direct subsystem imports
-    #[test]
-    fn no_direct_subsystem_imports() {
-        // terra-agents depends only on terra-core, terra-protocol,
-        // terra-compile, terra-executor — NOT terra-memory or terra-providers
-        assert!(true);
-    }
-
     // T-DP-001: goal generates plan
     #[tokio::test]
     async fn goal_generates_plan() {
@@ -581,7 +573,7 @@ mod tests {
         assert!(!plan.steps.is_empty(), "plan should have steps");
         assert_eq!(plan.spec.intent, "add logging to auth.rs");
         // DryRun won't produce real JSON, so fallback step expected
-        assert!(plan.steps.len() >= 1);
+        assert!(!plan.steps.is_empty());
     }
 
     // T-DP-005: plan versions trackable

@@ -311,7 +311,7 @@ impl CommandExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    
     use terra_caging::engine::*;
     use terra_caging::sandbox::SandboxGuard;
     use terra_providers::adapter::DryRunAdapter;
@@ -410,7 +410,7 @@ mod tests {
         );
         let result = exec.execute(cmd).await;
         assert_eq!(result.status, CommandStatus::Ok);
-        assert!(exec.audit.len() > 0);
+        assert!(!exec.audit.is_empty());
     }
 
     #[tokio::test]

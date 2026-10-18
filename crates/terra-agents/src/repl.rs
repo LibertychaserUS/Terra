@@ -339,7 +339,7 @@ impl Repl {
                         self.prompt(),
                     ];
                 }
-                let mem_key = format!("user:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+                let mem_key = format!("user:{}", &uuid::Uuid::new_v4().to_string()[..8]);
                 let cmd = Command::new("user", CommandOp::MemWrite {
                     key: mem_key.clone(),
                     content: arg.to_string(),
@@ -641,7 +641,7 @@ impl Repl {
                     ],
                 };
                 // Write the actual principle to L1 memory
-                let key = format!("promoted:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+                let key = format!("promoted:{}", &uuid::Uuid::new_v4().to_string()[..8]);
                 let cmd = Command::new("user", CommandOp::MemWrite {
                     key: key.clone(),
                     content: principle.clone(),
@@ -786,6 +786,7 @@ impl Repl {
     /// - Turn 2+: identity only, to save tokens. The conversation history and tool
     ///   schemas are still sent each turn; prompt.md guidance and the memory index are not.
     /// - /goal entry: adds goal intent + relevant IC rules (once)
+    ///
     /// Tool descriptions are NOT in the prompt — they're in the API tools field.
     async fn handle_conversation(&mut self, input: &str) -> Vec<ReplOutput> {
         // Add user turn to context
@@ -1201,7 +1202,7 @@ impl Repl {
             .join("\n");
 
         // Externalize summary to memory L5
-        let compaction_key = format!("compaction:{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let compaction_key = format!("compaction:{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let cmd = Command::new("session", CommandOp::MemWrite {
             key: compaction_key.clone(),
             content: summary.clone(),

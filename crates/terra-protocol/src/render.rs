@@ -48,42 +48,42 @@ pub fn render_command(cmd: &Command) -> String {
 
     match &cmd.op {
         CommandOp::MemWrite { key, content, scope, level } => {
-            lines.push(format!("- **Op**: mem_write"));
+            lines.push("- **Op**: mem_write".to_string());
             lines.push(format!("- **Key**: `{}`", key));
             lines.push(format!("- **Scope**: {} / **Level**: {}", scope, level));
             lines.push(format!("- **Content**: {}", content));
         }
         CommandOp::MemRead { key } => {
-            lines.push(format!("- **Op**: mem_read"));
+            lines.push("- **Op**: mem_read".to_string());
             lines.push(format!("- **Key**: `{}`", key));
         }
         CommandOp::MemSearch { query, top_k } => {
-            lines.push(format!("- **Op**: mem_search"));
+            lines.push("- **Op**: mem_search".to_string());
             lines.push(format!("- **Query**: {}", query));
             lines.push(format!("- **Top-K**: {}", top_k));
         }
         CommandOp::ArtifactSave { artifact_type, .. } => {
-            lines.push(format!("- **Op**: artifact_save"));
+            lines.push("- **Op**: artifact_save".to_string());
             lines.push(format!("- **Type**: {}", artifact_type));
         }
         CommandOp::ArtifactLoad { artifact_type, version } => {
-            lines.push(format!("- **Op**: artifact_load"));
+            lines.push("- **Op**: artifact_load".to_string());
             lines.push(format!("- **Type**: {}", artifact_type));
             if let Some(v) = version {
                 lines.push(format!("- **Version**: {}", v));
             }
         }
         CommandOp::TraceEvent { event_type, data: _ } => {
-            lines.push(format!("- **Op**: trace_event"));
+            lines.push("- **Op**: trace_event".to_string());
             lines.push(format!("- **Event**: {}", event_type));
         }
         CommandOp::TraceCheckpoint { title, summary } => {
-            lines.push(format!("- **Op**: trace_checkpoint"));
+            lines.push("- **Op**: trace_checkpoint".to_string());
             lines.push(format!("- **Title**: {}", title));
             lines.push(format!("- **Summary**: {}", summary));
         }
         CommandOp::ProviderCall { system_prompt: _, user_prompt, max_tokens, temperature, output_contract } => {
-            lines.push(format!("- **Op**: provider_call"));
+            lines.push("- **Op**: provider_call".to_string());
             let prompt_end = user_prompt.char_indices().nth(100).map(|(i, _)| i).unwrap_or(user_prompt.len());
             lines.push(format!("- **Prompt**: {}", &user_prompt[..prompt_end]));
             if let Some(mt) = max_tokens {
@@ -97,20 +97,20 @@ pub fn render_command(cmd: &Command) -> String {
             }
         }
         CommandOp::FileRead { path } => {
-            lines.push(format!("- **Op**: file_read"));
+            lines.push("- **Op**: file_read".to_string());
             lines.push(format!("- **Path**: `{}`", path));
         }
         CommandOp::FileWrite { path, content } => {
-            lines.push(format!("- **Op**: file_write"));
+            lines.push("- **Op**: file_write".to_string());
             lines.push(format!("- **Path**: `{}`", path));
             lines.push(format!("- **Bytes**: {}", content.len()));
         }
         CommandOp::FileDelete { path } => {
-            lines.push(format!("- **Op**: file_delete"));
+            lines.push("- **Op**: file_delete".to_string());
             lines.push(format!("- **Path**: `{}`", path));
         }
         CommandOp::ShellExec { command, workdir, timeout_ms } => {
-            lines.push(format!("- **Op**: shell_exec"));
+            lines.push("- **Op**: shell_exec".to_string());
             lines.push(format!("- **Command**: `{}`", command));
             if let Some(dir) = workdir {
                 lines.push(format!("- **Workdir**: `{}`", dir));

@@ -8,14 +8,12 @@ use std::sync::Arc;
 
 use terra_caging::engine::*;
 use terra_caging::sandbox::SandboxGuard;
-use terra_core::domain::{AlgorithmModule, CodingModule};
-use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_memory::{ArtifactStore, MemoryDatabase};
 use terra_providers::adapter::ProviderAdapter;
 use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
-use terra_types::command::{Command, CommandOp, CommandStatus};
+use terra_types::command::{Command, CommandOp};
 
 fn safe_truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {

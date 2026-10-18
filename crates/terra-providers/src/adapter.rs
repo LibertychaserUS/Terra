@@ -159,6 +159,12 @@ pub struct DryRunAdapter {
     capability: ProviderCapability,
 }
 
+impl Default for DryRunAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DryRunAdapter {
     pub fn new() -> Self {
         Self {
