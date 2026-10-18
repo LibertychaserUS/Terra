@@ -54,8 +54,7 @@ mod tests {
             max_tokens: Some(2000),
             temperature: None,
             tools: None,
-            tool_results: None,
-            pending_tool_calls: None,
+            tool_rounds: vec![],
         }
     }
 
@@ -169,8 +168,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             tools: None,
-            tool_results: None,
-            pending_tool_calls: None,
+            tool_rounds: vec![],
         };
         let chunks = adapter.complete_stream(request).await.unwrap();
 

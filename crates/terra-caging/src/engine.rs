@@ -59,23 +59,21 @@ impl Cage for MemoryCage {
                         "L0 (authoritative) is read-only".into(),
                     );
                 }
-                "L1" => {
-                    if !is_user_command {
+                "L1"
+                    if !is_user_command => {
                         return CageCheckResult::Block(
                             "L1 (project) requires user /remember or promotion chain".into(),
                         );
                     }
                     // User /remember bypasses — allowed
-                }
-                "L3" => {
-                    if !context.goal_mode {
+                "L3"
+                    if !context.goal_mode => {
                         return CageCheckResult::Block(
                             "L3 (accepted paths) only writable in Goal Mode".into(),
                         );
                     }
                     // In Goal Mode, L3 write requires Verification pass
                     // (enforced by VerificationCage in the pipeline, not here)
-                }
                 // L2, L4, L5, L6: allowed in both modes
                 _ => {}
             }

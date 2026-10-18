@@ -2,20 +2,18 @@
 //!
 //! Tests Terra's actual output quality through real LLM calls.
 //! Categories: LeetCode, Web Development, Architecture Design, Research.
-//! All tests skip when no API key.
+//! Ignored by default; run with an API key set: cargo test -- --ignored
 
 use std::sync::Arc;
 
 use terra_caging::engine::*;
 use terra_caging::sandbox::SandboxGuard;
-use terra_core::domain::{AlgorithmModule, CodingModule};
-use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 use terra_memory::{ArtifactStore, MemoryDatabase};
 use terra_providers::adapter::ProviderAdapter;
 use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
-use terra_types::command::{Command, CommandOp, CommandStatus};
+use terra_types::command::{Command, CommandOp};
 
 fn safe_truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
@@ -70,8 +68,9 @@ async fn ask(exec: &CommandExecutor, system: &str, prompt: &str) -> String {
 /// LeetCode #1: Two Sum (Easy)
 /// Optimal: HashMap O(n), General: brute force O(n²)
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn leetcode_two_sum() {
-    if !has_api_key() { eprintln!("skip"); return; }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let (exec, _dir) = live_setup().unwrap();
 
     let response = ask(&exec,
@@ -91,8 +90,9 @@ async fn leetcode_two_sum() {
 /// LeetCode #3: Longest Substring Without Repeating Characters (Medium)
 /// Optimal: sliding window O(n)
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn leetcode_longest_substring() {
-    if !has_api_key() { eprintln!("skip"); return; }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let (exec, _dir) = live_setup().unwrap();
 
     let response = ask(&exec,
@@ -111,8 +111,9 @@ async fn leetcode_longest_substring() {
 /// LeetCode #146: LRU Cache (Medium)
 /// Tests data structure design ability
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn leetcode_lru_cache() {
-    if !has_api_key() { eprintln!("skip"); return; }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let (exec, _dir) = live_setup().unwrap();
 
     let response = ask(&exec,
@@ -135,8 +136,9 @@ async fn leetcode_lru_cache() {
 
 /// Simple webpage: generate complete HTML/CSS/JS
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn build_simple_webpage() {
-    if !has_api_key() { eprintln!("skip"); return; }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let (exec, dir) = live_setup().unwrap();
 
     let response = ask(&exec,
@@ -166,8 +168,9 @@ async fn build_simple_webpage() {
 
 /// Complex web system: architecture + tech stack
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn architecture_design() {
-    if !has_api_key() { eprintln!("skip"); return; }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let (exec, _dir) = live_setup().unwrap();
 
     let response = ask(&exec,
@@ -200,8 +203,9 @@ async fn architecture_design() {
 
 /// Research exploration: novel application of existing concepts
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn research_exploration() {
-    if !has_api_key() { eprintln!("skip"); return; }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let (exec, _dir) = live_setup().unwrap();
 
     let response = ask(&exec,

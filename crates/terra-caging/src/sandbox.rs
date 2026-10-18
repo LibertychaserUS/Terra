@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// File system permission errors.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,10 @@ pub enum SandboxViolation {
 /// - Writes to protected paths (e.g., .terra/constitution) are blocked.
 /// - Symlinks that resolve outside the sandbox are blocked for writes.
 /// - Reads are allowed anywhere (read-only access outside sandbox).
+///
+/// Paths are resolved before any comparison: `.` and `..` are applied and
+/// symlinks in existing ancestors are followed, so `../x` or
+/// `.terra/../.terra/constitution.toml` cannot slip past the checks.
 pub struct SandboxGuard {
     root: PathBuf,
     protected: Vec<PathBuf>,
@@ -64,7 +68,7 @@ impl SandboxGuard {
                 target.clone()
             };
 
-            if !resolved.starts_with(&self.root) {
+            if !resolve_path(&resolved).starts_with(resolve_path(&self.root)) {
                 return Err(SandboxViolation::SymlinkEscape {
                     link: path.to_path_buf(),
                     target: resolved,
@@ -76,29 +80,70 @@ impl SandboxGuard {
 
     /// Internal: check if a mutation (write/delete) is allowed.
     fn check_mutation(&self, path: &Path) -> Result<(), SandboxViolation> {
-        let normalized = if path.is_absolute() {
+        let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.root.join(path)
         };
 
         // Check symlink escape before other checks
-        self.check_symlink(&normalized)?;
+        self.check_symlink(&absolute)?;
+
+        let root = resolve_path(&self.root);
+        let resolved = resolve_path(&absolute);
 
         // Must be within sandbox root
-        if !normalized.starts_with(&self.root) {
-            return Err(SandboxViolation::OutsideSandbox(normalized));
+        if !resolved.starts_with(&root) {
+            return Err(SandboxViolation::OutsideSandbox(resolved));
         }
 
         // Must not be in a protected path
         for protected in &self.protected {
-            if normalized.starts_with(protected) {
-                return Err(SandboxViolation::ProtectedPath(normalized));
+            if resolved.starts_with(resolve_path(protected)) {
+                return Err(SandboxViolation::ProtectedPath(resolved));
             }
         }
 
         Ok(())
     }
+}
+
+/// Resolve `path` the way the OS would when opening it: apply `.` and `..`
+/// component by component and follow symlinks for every prefix that exists.
+///
+/// Components that do not exist yet are kept lexically, so the result is
+/// still meaningful for files about to be created.
+fn resolve_path(path: &Path) -> PathBuf {
+    let mut link_budget = 40;
+    resolve_with_budget(path, &mut link_budget)
+}
+
+fn resolve_with_budget(path: &Path, link_budget: &mut usize) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => {
+                out.push(name);
+                if let Ok(canonical) = std::fs::canonicalize(&out) {
+                    out = canonical;
+                } else if *link_budget > 0 {
+                    // Dangling symlink: follow its target lexically so a link
+                    // pointing outside the sandbox is still caught.
+                    if let Ok(target) = std::fs::read_link(&out) {
+                        *link_budget -= 1;
+                        let base = out.parent().map(Path::to_path_buf).unwrap_or_default();
+                        out = resolve_with_budget(&base.join(target), link_budget);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -210,5 +255,68 @@ mod tests {
 
         // Writing through an internal symlink should pass
         assert!(guard.check_write(&link_path).is_ok());
+    }
+    #[test]
+    fn sandbox_parent_dir_traversal_blocked() {
+        let guard = test_guard();
+        let result = guard.check_write(Path::new("../outside.txt"));
+        assert!(matches!(result, Err(SandboxViolation::OutsideSandbox(_))), "{:?}", result);
+        let result = guard.check_write(Path::new("/projects/myapp/src/../../other/x"));
+        assert!(matches!(result, Err(SandboxViolation::OutsideSandbox(_))), "{:?}", result);
+    }
+
+    #[test]
+    fn sandbox_parent_dir_inside_root_allowed() {
+        let guard = test_guard();
+        assert!(guard.check_write(Path::new("src/../README.md")).is_ok());
+    }
+
+    #[test]
+    fn sandbox_protected_path_via_dot_segments_blocked() {
+        let guard = test_guard();
+        for p in [
+            "./.terra/../.terra/constitution.toml",
+            ".terra/./constitution.toml",
+            "src/../.terra/constitution.toml",
+        ] {
+            let result = guard.check_write(Path::new(p));
+            assert!(matches!(result, Err(SandboxViolation::ProtectedPath(_))), "{}: {:?}", p, result);
+        }
+    }
+
+    #[test]
+    fn sandbox_write_through_symlinked_dir_blocked() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::os::unix::fs::symlink(outside.path(), root.join("linked_dir")).unwrap();
+
+        let guard = SandboxGuard::new(root.clone(), vec![]);
+        let result = guard.check_write(&root.join("linked_dir/new_file.txt"));
+        assert!(matches!(result, Err(SandboxViolation::OutsideSandbox(_))), "{:?}", result);
+        // `link/..` must follow the link first, like the kernel does.
+        let result = guard.check_write(&root.join("linked_dir/../escaped.txt"));
+        assert!(matches!(result, Err(SandboxViolation::OutsideSandbox(_))), "{:?}", result);
+    }
+
+    #[test]
+    fn sandbox_relative_root_resolves_against_real_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        // Root given through a symlinked path (e.g. /tmp vs /private/tmp on macOS).
+        let guard = SandboxGuard::new(dir.path().to_path_buf(), vec![]);
+        let canonical = dir.path().canonicalize().unwrap();
+        assert!(guard.check_write(&canonical.join("src/main.rs")).is_ok());
+    }
+
+    #[test]
+    fn sandbox_symlink_cycle_terminates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::os::unix::fs::symlink(root.join("b"), root.join("a")).unwrap();
+        std::os::unix::fs::symlink(root.join("a"), root.join("b")).unwrap();
+        let guard = SandboxGuard::new(root.clone(), vec![]);
+        // Must return (either way) instead of recursing forever.
+        let _ = guard.check_write(&root.join("a/file.txt"));
     }
 }

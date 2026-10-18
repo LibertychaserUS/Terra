@@ -18,8 +18,7 @@ fn test_request() -> CompletionRequest {
         max_tokens: Some(10),
         temperature: None,
         tools: None,
-        tool_results: None,
-        pending_tool_calls: None,
+        tool_rounds: vec![],
     }
 }
 

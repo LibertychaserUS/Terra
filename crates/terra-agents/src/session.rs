@@ -25,6 +25,8 @@ use crate::drift::{DriftCheckResult, DriftDetector};
 ///
 /// Goal Mode is additive over Conversation: user can still talk freely,
 /// but spec alignment and drift detection are active in the background.
+// One SessionMode per session, so the size difference between variants is irrelevant.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionMode {
     /// Free interaction. Only always-on cages (Meta, Memory, Action, Knowledge).

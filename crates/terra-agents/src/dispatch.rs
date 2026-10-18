@@ -87,7 +87,7 @@ impl ModelDispatcher {
         // Find closest match to target tier
         self.models
             .iter()
-            .min_by_key(|m| (m.tier as i32 - target_tier as i32).unsigned_abs())
+            .min_by_key(|m| (m.tier as i32 - target_tier).unsigned_abs())
             .unwrap_or(&self.models[0])
     }
 

@@ -15,7 +15,7 @@ pub fn op_status_text(op: &CommandOp) -> String {
         }
         CommandOp::FileDelete { path } => format!("  ● Deleting {}", short_path(path)),
         CommandOp::ShellExec { command, .. } => {
-            let short = if command.len() > 40 { format!("{}...", &command[..37]) } else { command.clone() };
+            let short = terra_types::text::truncate_ellipsis(command, 40);
             format!("  ● Running: {}", short)
         }
         CommandOp::ProviderCall { .. } => "  ● Thinking...".into(),

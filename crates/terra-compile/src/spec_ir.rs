@@ -87,6 +87,9 @@ impl TermTable {
     }
 }
 
+/// LLM hook for the semantic compilation passes: prompt in, completion out.
+pub type LlmCallback<'a> = &'a dyn Fn(&str) -> Option<String>;
+
 impl SpecIR {
     /// Create a SpecIR from a simple task description.
     ///
@@ -161,7 +164,7 @@ impl SpecIR {
     pub fn compile_full(
         description: &str,
         term_table: &TermTable,
-        llm_callback: Option<&dyn Fn(&str) -> Option<String>>,
+        llm_callback: Option<LlmCallback<'_>>,
     ) -> Self {
         // Pass 1: Lexical — extract file paths and line numbers
         let (file, line) = lexical_extract(description);

@@ -1,9 +1,9 @@
 //! Live integration tests for the agent loop with real LLM API.
 //!
 //! These tests require a valid API key (DASHSCOPE_API_KEY or TERRA_PROVIDER_API_KEY).
-//! They are automatically skipped when no key is configured.
+//! The two live tests are ignored by default; the dry-run tests always run.
 //!
-//! Run: cargo test -p terra-agents --test live_tool_test -- --nocapture
+//! Run: cargo test -p terra-agents --test live_tool_test -- --ignored --nocapture
 
 use std::sync::Arc;
 
@@ -97,10 +97,11 @@ fn dry_run_repl() -> (Repl, tempfile::TempDir, Arc<AuditLog>) {
 // T-AGLV-001: loop_single_tool_call_live
 // Test that the agent can use a single tool (FileRead) and produce a final answer.
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn loop_single_tool_call_live() {
     let (mut repl, dir) = match live_repl() {
         Some(r) => r,
-        None => return,
+        None => panic!("live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY"),
     };
 
     // Write a test file for FileRead
@@ -139,10 +140,11 @@ async fn loop_single_tool_call_live() {
 // T-AGLV-002: loop_multi_tool_call_live
 // Test multi-tool sequence: write to memory, then search memory.
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn loop_multi_tool_call_live() {
     let (mut repl, _dir) = match live_repl() {
         Some(r) => r,
-        None => return,
+        None => panic!("live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY"),
     };
 
     // Start a session so Goal mode works

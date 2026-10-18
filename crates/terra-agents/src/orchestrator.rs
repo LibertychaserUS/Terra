@@ -348,11 +348,18 @@ impl Orchestrator {
         let search_result = self.executor.execute(search_cmd).await;
 
         // 6. Prepare worker task with IC rules and context
+        let memory_keys: Vec<String> = search_result.data.as_ref()
+            .and_then(|d| d.get("results"))
+            .and_then(|r| r.as_array())
+            .map(|hits| hits.iter()
+                .filter_map(|h| h.get("key").and_then(|k| k.as_str()).map(String::from))
+                .collect())
+            .unwrap_or_default();
         let user_prompt = format!(
-            "Task: {}\nConstraints: {:?}\nContext from memory: {:?}",
+            "Task: {}\nConstraints: {}\nRelated memory keys: {}",
             spec.intent,
-            spec.constraints,
-            search_result.data,
+            list_or_none(&spec.constraints),
+            list_or_none(&memory_keys),
         );
 
         // 7. Record worker dispatch (via Executor)
@@ -457,6 +464,11 @@ fn extract_json_array(text: &str) -> String {
     "[]".to_string()
 }
 
+/// Comma-separated list for prompts, or "(none)".
+pub(crate) fn list_or_none(items: &[String]) -> String {
+    if items.is_empty() { "(none)".into() } else { items.join(", ") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,14 +565,6 @@ mod tests {
         assert_eq!(result.provider_id, "dry_run");
     }
 
-    // FR-002: no direct subsystem imports
-    #[test]
-    fn no_direct_subsystem_imports() {
-        // terra-agents depends only on terra-core, terra-protocol,
-        // terra-compile, terra-executor — NOT terra-memory or terra-providers
-        assert!(true);
-    }
-
     // T-DP-001: goal generates plan
     #[tokio::test]
     async fn goal_generates_plan() {
@@ -569,7 +573,7 @@ mod tests {
         assert!(!plan.steps.is_empty(), "plan should have steps");
         assert_eq!(plan.spec.intent, "add logging to auth.rs");
         // DryRun won't produce real JSON, so fallback step expected
-        assert!(plan.steps.len() >= 1);
+        assert!(!plan.steps.is_empty());
     }
 
     // T-DP-005: plan versions trackable

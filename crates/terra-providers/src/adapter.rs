@@ -128,12 +128,18 @@ pub struct CompletionRequest {
     /// Tool definitions for function calling (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDef>>,
-    /// Previous tool results to include in the conversation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_results: Option<Vec<ToolResult>>,
-    /// Previous tool calls (for multi-turn tool conversations).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_tool_calls: Option<Vec<ToolCall>>,
+    /// Earlier tool calls and their results in this turn, oldest first.
+    /// Each round is replayed after the user message so the model sees the
+    /// whole chain, not just the latest result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_rounds: Vec<ToolRound>,
+}
+
+/// One assistant tool-call message and the results sent back for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRound {
+    pub calls: Vec<ToolCall>,
+    pub results: Vec<ToolResult>,
 }
 
 /// A completion response from an LLM.
@@ -151,6 +157,12 @@ pub struct CompletionResponse {
 /// A dry-run adapter that returns deterministic responses without calling any API.
 pub struct DryRunAdapter {
     capability: ProviderCapability,
+}
+
+impl Default for DryRunAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DryRunAdapter {
@@ -175,7 +187,7 @@ impl ProviderAdapter for DryRunAdapter {
         Ok(CompletionResponse {
             content: format!(
                 "DRY_RUN response to: {}",
-                &request.user_prompt[..request.user_prompt.len().min(100)]
+                request.user_prompt.chars().take(100).collect::<String>()
             ),
             usage_prompt_tokens: 0,
             usage_completion_tokens: 0,
@@ -187,7 +199,7 @@ impl ProviderAdapter for DryRunAdapter {
     async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<Vec<StreamChunk>> {
         let full = format!(
             "DRY_RUN response to: {}",
-            &request.user_prompt[..request.user_prompt.len().min(100)]
+            request.user_prompt.chars().take(100).collect::<String>()
         );
         // Emit word by word to simulate streaming
         let words: Vec<&str> = full.split_whitespace().collect();

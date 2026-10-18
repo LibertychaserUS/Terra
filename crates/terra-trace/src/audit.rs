@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
-use terra_types::command::{Command, CommandResult};
+use terra_types::command::{Command, CommandOp, CommandResult};
 
 use crate::persistent::PersistentAuditLog;
 
@@ -16,6 +16,50 @@ pub struct AuditEntry {
     pub duration_us: Option<u64>,
 }
 
+impl AuditEntry {
+    /// One-line, human-readable summary used by `terra trace`.
+    pub fn summary_line(&self) -> String {
+        let status = match &self.result {
+            Some(r) => format!("{:?}", r.status),
+            None => "pending".to_string(),
+        };
+        let duration = match self.duration_us {
+            Some(us) if us >= 1_000 => format!("{:.1}ms", us as f64 / 1_000.0),
+            Some(us) => format!("{}µs", us),
+            None => "-".to_string(),
+        };
+        format!(
+            "#{:<5} {}  {:<8} {:<60} {:<16} {}",
+            self.seq,
+            self.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            self.command.agent,
+            op_summary(&self.command.op),
+            status,
+            duration,
+        )
+    }
+}
+
+/// Short description of an operation: its name plus the most telling argument.
+pub fn op_summary(op: &CommandOp) -> String {
+    use terra_types::text::truncate_ellipsis;
+    let (name, detail) = match op {
+        CommandOp::MemWrite { key, level, .. } => ("MemWrite", format!("{} ({})", key, level)),
+        CommandOp::MemRead { key } => ("MemRead", key.clone()),
+        CommandOp::MemSearch { query, top_k } => ("MemSearch", format!("{:?} top {}", query, top_k)),
+        CommandOp::ArtifactSave { artifact_type, .. } => ("ArtifactSave", artifact_type.clone()),
+        CommandOp::ArtifactLoad { artifact_type, .. } => ("ArtifactLoad", artifact_type.clone()),
+        CommandOp::TraceEvent { event_type, .. } => ("TraceEvent", event_type.clone()),
+        CommandOp::TraceCheckpoint { title, .. } => ("TraceCheckpoint", title.clone()),
+        CommandOp::ProviderCall { user_prompt, .. } => ("ProviderCall", format!("{:?}", user_prompt)),
+        CommandOp::FileRead { path } => ("FileRead", path.clone()),
+        CommandOp::FileWrite { path, content } => ("FileWrite", format!("{} ({} bytes)", path, content.len())),
+        CommandOp::FileDelete { path } => ("FileDelete", path.clone()),
+        CommandOp::ShellExec { command, .. } => ("ShellExec", format!("{:?}", command)),
+    };
+    truncate_ellipsis(&format!("{} {}", name, detail.replace('\n', " ")), 60)
+}
+
 /// Audit log with optional write-through SQLite persistence.
 ///
 /// Thread-safe via Mutex. When a persistent backend is attached,
@@ -25,6 +69,12 @@ pub struct AuditLog {
     entries: Mutex<Vec<AuditEntry>>,
     next_seq: Mutex<u64>,
     persistent: Option<Mutex<PersistentAuditLog>>,
+}
+
+impl Default for AuditLog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AuditLog {
@@ -217,7 +267,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..100 {
                     let cmd = Command::new(
-                        &format!("agent-{}", thread_id),
+                        format!("agent-{}", thread_id),
                         CommandOp::MemRead {
                             key: format!("key-{}-{}", thread_id, i),
                         },
@@ -311,5 +361,34 @@ mod tests {
     fn in_memory_not_persistent() {
         let log = AuditLog::new();
         assert!(!log.is_persistent());
+    }
+    #[test]
+    fn summary_line_is_single_line_and_names_the_op() {
+        let log = AuditLog::new();
+        let seq = log.record_command(Command::new("main", CommandOp::ShellExec {
+            command: "echo hi\necho 你好".into(),
+            workdir: None,
+            timeout_ms: None,
+        }));
+        log.record_result(seq, CommandResult::ok("", None), 1_500);
+        let line = log.entries()[0].summary_line();
+        assert!(!line.contains('\n'));
+        assert!(line.contains("ShellExec"));
+        assert!(line.contains("Ok"));
+        assert!(line.contains("1.5ms"));
+    }
+
+    #[test]
+    fn op_summary_truncates_long_prompts() {
+        let op = CommandOp::ProviderCall {
+            system_prompt: String::new(),
+            user_prompt: "解释".repeat(100),
+            max_tokens: None,
+            temperature: None,
+            output_contract: None,
+        };
+        let s = op_summary(&op);
+        assert!(s.starts_with("ProviderCall"));
+        assert_eq!(s.chars().count(), 60);
     }
 }

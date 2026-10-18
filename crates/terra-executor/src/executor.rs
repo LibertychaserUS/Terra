@@ -18,7 +18,7 @@ fn status_text(op: &CommandOp) -> String {
         CommandOp::FileWrite { path, .. } => format!("Writing {}", path.rsplit('/').next().unwrap_or(path)),
         CommandOp::FileDelete { path } => format!("Deleting {}", path.rsplit('/').next().unwrap_or(path)),
         CommandOp::ShellExec { command, .. } => {
-            if command.len() > 30 { format!("Running: {}...", &command[..27]) } else { format!("Running: {}", command) }
+            format!("Running: {}", terra_types::text::truncate_ellipsis(command, 30))
         }
         CommandOp::ProviderCall { .. } => "Thinking...".into(),
         CommandOp::MemRead { key } => format!("Reading memory '{}'", key),
@@ -84,6 +84,11 @@ impl CommandExecutor {
 
     /// Clean up memory entries for a given scope (lifecycle boundary).
     /// Called by SessionManager when a goal/session ends.
+    /// The audit trail this executor records into.
+    pub fn audit(&self) -> &Arc<AuditLog> {
+        &self.audit
+    }
+
     pub fn cleanup_memory_scope(&self, scope: terra_memory::types::Scope) -> usize {
         self.memory.cleanup_scope(scope).unwrap_or(0)
     }
@@ -135,7 +140,8 @@ impl CommandExecutor {
 
         // Log any warnings
         for (cage_name, warning) in &cage_result.warnings {
-            warn!(cage = %cage_name, warning = %warning, "cage warning");
+            // Expected for every shell call; logged, not shown in the chat.
+            info!(cage = %cage_name, warning = %warning, "cage warning");
         }
 
         // 3. Emit start event
@@ -305,7 +311,7 @@ impl CommandExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    
     use terra_caging::engine::*;
     use terra_caging::sandbox::SandboxGuard;
     use terra_providers::adapter::DryRunAdapter;
@@ -404,7 +410,7 @@ mod tests {
         );
         let result = exec.execute(cmd).await;
         assert_eq!(result.status, CommandStatus::Ok);
-        assert!(exec.audit.len() > 0);
+        assert!(!exec.audit.is_empty());
     }
 
     #[tokio::test]

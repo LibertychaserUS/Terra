@@ -11,6 +11,12 @@ pub struct IntelligenceCore {
     modules: Vec<Box<dyn DomainModule>>,
 }
 
+impl Default for IntelligenceCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntelligenceCore {
     /// Create a new core with only universal rules.
     pub fn new() -> Self {

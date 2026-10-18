@@ -1,7 +1,7 @@
 //! Live End-to-End Tests (T-E2E)
 //!
 //! These tests use a real LLM provider (DashScope).
-//! They skip gracefully when no API key is configured.
+//! Ignored by default; run with an API key set: cargo test -- --ignored
 //! Run with: cargo test -p terra-cli --test live_e2e
 
 use std::sync::Arc;
@@ -61,14 +61,12 @@ fn live_executor(
 
 /// T-E2E-001: CodeEditor live — read → LLM modify → write back
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn code_editor_live() {
-    if !has_api_key() {
-        eprintln!("skipping code_editor_live (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let provider = match live_provider() {
         Some(p) => p,
-        None => { eprintln!("skipping (provider init failed)"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
     let (exec, _audit, dir) = live_executor(provider);
@@ -113,14 +111,12 @@ async fn code_editor_live() {
 
 /// T-E2E-002: TestRunner live — run shell, capture output
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn test_runner_live() {
-    if !has_api_key() {
-        eprintln!("skipping test_runner_live (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let provider = match live_provider() {
         Some(p) => p,
-        None => { eprintln!("skipping"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
     let (exec, _audit, _dir) = live_executor(provider);
@@ -148,14 +144,12 @@ async fn test_runner_live() {
 
 /// T-E2E-003: OutputContract live — real LLM response parsed
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn output_contract_live() {
-    if !has_api_key() {
-        eprintln!("skipping output_contract_live (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let provider = match live_provider() {
         Some(p) => p,
-        None => { eprintln!("skipping"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
     let (exec, _audit, _dir) = live_executor(provider);
@@ -201,14 +195,12 @@ async fn output_contract_live() {
 
 /// T-E2E-004: Output Cage no false positive on normal coding response
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn output_cage_no_false_positive() {
-    if !has_api_key() {
-        eprintln!("skipping output_cage_no_false_positive (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let provider = match live_provider() {
         Some(p) => p,
-        None => { eprintln!("skipping"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
     let (exec, _audit, _dir) = live_executor(provider);
@@ -239,14 +231,12 @@ async fn output_cage_no_false_positive() {
 
 /// T-E2E-005: Full pipeline live
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn full_pipeline_live() {
-    if !has_api_key() {
-        eprintln!("skipping full_pipeline_live (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let provider = match live_provider() {
         Some(p) => p,
-        None => { eprintln!("skipping"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
     let (exec, audit, _dir) = live_executor(provider);
@@ -270,17 +260,15 @@ async fn full_pipeline_live() {
 
 /// T-FULL-001: User intent → plan proposed → file could be modified
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn full_pipeline_plan_proposal() {
-    if !has_api_key() {
-        eprintln!("skipping full_pipeline_plan_proposal (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
     let provider = match live_provider() {
         Some(p) => p,
-        None => { eprintln!("skipping"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
-    let (exec, audit, dir) = live_executor(provider);
+    let (exec, audit, _dir) = live_executor(provider);
     let mut core = IntelligenceCore::new();
     core.register(Box::new(CodingModule));
     core.register(Box::new(AlgorithmModule));

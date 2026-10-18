@@ -237,6 +237,24 @@ pub fn git_diff_colored(root: &Path, file_path: &str) -> Option<String> {
 }
 
 /// Stage files and create a commit with the given message.
+/// Tracked files under `root` with unstaged changes — exactly what
+/// `git checkout -- .` run in `root` would discard. Paths are relative to `root`.
+pub fn git_unstaged_files(root: &Path) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--relative"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git diff failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
 pub fn git_commit(root: &Path, files: &[&str], message: &str) -> Result<String, String> {
     // Stage files
     for file in files {
@@ -341,5 +359,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let info = detect_git(dir.path());
         assert!(!info.is_repo);
+    }
+    #[test]
+    fn git_unstaged_files_lists_only_modified_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(root).output().unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("tracked.txt"), "v1").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+
+        assert!(git_unstaged_files(root).unwrap().is_empty());
+
+        std::fs::write(root.join("tracked.txt"), "v2").unwrap();
+        std::fs::write(root.join("untracked.txt"), "new").unwrap();
+        assert_eq!(git_unstaged_files(root).unwrap(), vec!["tracked.txt".to_string()]);
     }
 }

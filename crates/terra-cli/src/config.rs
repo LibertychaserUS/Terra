@@ -110,10 +110,14 @@ pub fn resolve_config(project_root: Option<&Path>) -> TerraConfig {
     }
 
     // Layer 3: environment variables (highest precedence)
-    if let Ok(key) = env::var("TERRA_PROVIDER_API_KEY") {
+    if let Some(key) = non_empty_env("TERRA_PROVIDER_API_KEY").or_else(|| non_empty_env("DASHSCOPE_API_KEY")) {
         config.provider.api_key = Some(key);
-    } else if let Ok(key) = env::var("DASHSCOPE_API_KEY") {
-        config.provider.api_key = Some(key);
+    }
+
+    // An empty key means "not configured": use dry-run instead of sending
+    // requests with a blank bearer token.
+    if config.provider.api_key.as_deref().is_some_and(|k| k.trim().is_empty()) {
+        config.provider.api_key = None;
     }
     if let Ok(url) = env::var("TERRA_PROVIDER_BASE_URL") {
         config.provider.base_url = url;
@@ -123,6 +127,10 @@ pub fn resolve_config(project_root: Option<&Path>) -> TerraConfig {
     }
 
     config
+}
+
+fn non_empty_env(var: &str) -> Option<String> {
+    env::var(var).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// Apply TOML values onto config (partial override).
@@ -166,8 +174,6 @@ pub fn to_toml_string(config: &TerraConfig) -> Result<String> {
     if config.provider.api_key.is_some() {
         output.push_str("api_key = \"***REDACTED***\"\n");
     }
-    output.push_str("\n[memory]\n");
-    output.push_str(&format!("cache_capacity = {}\n", config.memory.cache_capacity));
     Ok(output)
 }
 
@@ -229,38 +235,73 @@ pub struct EnvironmentReport {
     pub os: String,
     pub arch: String,
     pub terra_version: String,
-    pub rust_version: String,
+    /// Minimum supported Rust version, from Cargo.toml `rust-version`.
+    pub rust_version_min: String,
     pub provider_configured: bool,
+    /// Where the API key comes from: an env var name, a config file, or "none".
     pub provider_source: String,
+    pub model: String,
+    pub base_url: String,
+    pub project_initialized: bool,
     pub global_config_exists: bool,
     pub project_config_exists: bool,
 }
 
-pub fn detect_environment(project_root: Option<&Path>) -> EnvironmentReport {
-    let terra_key = env::var("TERRA_PROVIDER_API_KEY").is_ok();
-    let dash_key = env::var("DASHSCOPE_API_KEY").is_ok();
-    let provider_configured = terra_key || dash_key;
-    let provider_source = if terra_key {
-        "TERRA_PROVIDER_API_KEY".into()
-    } else if dash_key {
-        "DASHSCOPE_API_KEY".into()
-    } else {
-        "none".into()
+/// Where the effective API key comes from, following the same precedence as
+/// `resolve_config`: env vars, then project config, then global config.
+pub fn api_key_source(project_root: Option<&Path>) -> String {
+    for var in ["TERRA_PROVIDER_API_KEY", "DASHSCOPE_API_KEY"] {
+        if non_empty_env(var).is_some() {
+            return var.into();
+        }
+    }
+    let has_key = |path: &Path| {
+        matches!(load_toml(path), Ok(Some(t)) if t
+            .get("provider")
+            .and_then(|p| p.get("api_key"))
+            .and_then(|k| k.as_str())
+            .is_some_and(|k| !k.trim().is_empty()))
     };
+    if let Some(root) = project_root {
+        if has_key(&project_config_path(root)) {
+            return ".terra/config.toml".into();
+        }
+    }
+    if has_key(&global_config_path()) {
+        return "~/.terra/config.toml".into();
+    }
+    "none".into()
+}
 
-    let project_config_exists = project_root
-        .map(|r| project_config_path(r).exists())
-        .unwrap_or(false);
+/// Environment variable that overrides `key` and is currently set, if any.
+pub fn env_override_for(key: &str) -> Option<&'static str> {
+    let candidates: &[&'static str] = match key {
+        "provider.api_key" => &["TERRA_PROVIDER_API_KEY", "DASHSCOPE_API_KEY"],
+        "provider.base_url" => &["TERRA_PROVIDER_BASE_URL"],
+        "provider.model" => &["TERRA_PROVIDER_MODEL"],
+        _ => &[],
+    };
+    candidates.iter().copied().find(|var| non_empty_env(var).is_some())
+}
+
+pub fn detect_environment(project_root: Option<&Path>) -> EnvironmentReport {
+    let config = resolve_config(project_root);
+    let provider_source = api_key_source(project_root);
 
     EnvironmentReport {
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
         terra_version: env!("CARGO_PKG_VERSION").into(),
-        rust_version: "1.75+".into(),
-        provider_configured,
+        rust_version_min: env!("CARGO_PKG_RUST_VERSION").into(),
+        provider_configured: config.provider.api_key.is_some(),
         provider_source,
+        model: config.provider.model,
+        base_url: config.provider.base_url,
+        project_initialized: project_root.map(|r| r.join(".terra").is_dir()).unwrap_or(false),
         global_config_exists: global_config_path().exists(),
-        project_config_exists,
+        project_config_exists: project_root
+            .map(|r| project_config_path(r).exists())
+            .unwrap_or(false),
     }
 }
 
@@ -321,7 +362,7 @@ mod tests {
         let config = resolve_config(None);
         // We can't easily test env override without side effects,
         // but we verify the precedence logic exists
-        assert!(config.provider.model.len() > 0);
+        assert!(!config.provider.model.is_empty());
     }
 
     // T-CF-004

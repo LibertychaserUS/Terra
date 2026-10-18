@@ -129,6 +129,12 @@ pub struct CollectorBus {
     events: std::sync::Mutex<Vec<StreamEvent>>,
 }
 
+impl Default for CollectorBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CollectorBus {
     pub fn new() -> Self {
         Self { events: std::sync::Mutex::new(Vec::new()) }
@@ -140,6 +146,10 @@ impl CollectorBus {
 
     pub fn len(&self) -> usize {
         self.events.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

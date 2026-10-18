@@ -23,13 +23,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use terra_agents::repl::{Repl, ReplOutput};
+use terra_agents::repl::{ConfirmCallback, Repl, ReplOutput};
+use terra_agents::session_store::SessionStore;
 use terra_core::IntelligenceCore;
 use terra_executor::CommandExecutor;
 
 /// TUI application state.
 struct TuiState {
     input: String,
+    /// Cursor position in characters (not bytes) within `input`.
     cursor_pos: usize,
     messages: Vec<(String, String, Style)>,
     model_name: String,
@@ -39,6 +41,8 @@ struct TuiState {
     greeter_lines: Vec<String>,
     input_history: Vec<String>,
     history_pos: Option<usize>,
+    /// True while response tokens are being appended to the last message.
+    streaming: bool,
 }
 
 impl TuiState {
@@ -54,7 +58,52 @@ impl TuiState {
             greeter_lines,
             input_history: Vec::new(),
             history_pos: None,
+            streaming: false,
         }
+    }
+
+    /// Byte offset of the character at `char_idx` (or the end of the input).
+    fn byte_offset(&self, char_idx: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let at = self.byte_offset(self.cursor_pos);
+        self.input.insert(at, c);
+        self.cursor_pos += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+            let at = self.byte_offset(self.cursor_pos);
+            self.input.remove(at);
+        }
+    }
+
+    fn move_left(&mut self) {
+        self.cursor_pos = self.cursor_pos.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor_pos < self.input.chars().count() {
+            self.cursor_pos += 1;
+        }
+    }
+
+    fn set_input(&mut self, text: String) {
+        self.cursor_pos = text.chars().count();
+        self.input = text;
+    }
+
+    /// Terminal columns between the start of the input and the cursor
+    /// (wide characters such as CJK take two columns).
+    fn cursor_columns(&self) -> u16 {
+        Span::raw(&self.input[..self.byte_offset(self.cursor_pos)]).width() as u16
     }
 
     fn add_msg(&mut self, prefix: &str, content: &str, style: Style) {
@@ -64,6 +113,9 @@ impl TuiState {
     fn process_outputs(&mut self, outputs: Vec<ReplOutput>) {
         self.thinking = false;
         for output in outputs {
+            if !matches!(output, ReplOutput::Token(_)) {
+                self.streaming = false;
+            }
             match output {
                 ReplOutput::Text(t) => self.add_msg("", &t, Style::default()),
                 ReplOutput::Notification(n) => {
@@ -77,6 +129,11 @@ impl TuiState {
                 }
                 ReplOutput::Prompt(_) => {}
                 ReplOutput::Token(t) => {
+                    // A response starts on its own line, not after the last notification.
+                    if !self.streaming {
+                        self.add_msg("", "", Style::default());
+                        self.streaming = true;
+                    }
                     if let Some(last) = self.messages.last_mut() { last.1.push_str(&t); }
                 }
                 ReplOutput::Event(_) => {}
@@ -95,12 +152,24 @@ pub async fn run_tui_async(
     core: Arc<IntelligenceCore>,
     model_name: &str,
     greeter_lines: Vec<String>,
+    terra_dir: &std::path::Path,
 ) -> io::Result<()> {
     // REPL lives in the SAME task — no Send requirement
-    let mut repl = Repl::new(executor, core);
+    let mut repl = Repl::new(executor, core)
+        .with_store(SessionStore::new(terra_dir))
+        .with_confirm_callback(tui_confirm_callback());
+
+    // Restore the terminal before a panic message is printed, otherwise the
+    // message is lost in the alternate screen and the shell stays in raw mode.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
 
     // Terminal setup
     enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -118,6 +187,8 @@ pub async fn run_tui_async(
             let outputs = repl.process_input(&input).await;
             let quit = Repl::should_quit(&outputs);
             state.process_outputs(outputs);
+            state.mode = if repl.session.mode().is_goal() { "goal" } else { "conversation" }.into();
+            state.tokens = repl.tokens().total_tokens() as u64;
             if quit {
                 running = false;
                 continue;
@@ -128,46 +199,43 @@ pub async fn run_tui_async(
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if state.thinking {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && state.thinking => {
                             state.thinking = false;
                             state.add_msg("", "[interrupted]", Style::default().fg(Color::Yellow));
                         }
-                    }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         running = false;
                     }
-                    KeyCode::Enter => {
-                        if !state.input.is_empty() {
-                            let input = state.input.clone();
+                    KeyCode::Enter
+                        if !state.input.is_empty() => {
+                            let input = std::mem::take(&mut state.input);
                             state.input_history.push(input.clone());
                             state.history_pos = None;
-                            state.input.clear();
                             state.cursor_pos = 0;
                             state.add_msg("you ❯ ", &input, Style::default().fg(Color::Green));
                             state.thinking = true;
                             pending_input = Some(input);
                         }
-                    }
-                    KeyCode::Char(c) => { state.input.insert(state.cursor_pos, c); state.cursor_pos += 1; }
-                    KeyCode::Backspace => { if state.cursor_pos > 0 { state.cursor_pos -= 1; state.input.remove(state.cursor_pos); } }
-                    KeyCode::Left => { if state.cursor_pos > 0 { state.cursor_pos -= 1; } }
-                    KeyCode::Right => { if state.cursor_pos < state.input.len() { state.cursor_pos += 1; } }
-                    KeyCode::Up => {
-                        if !state.input_history.is_empty() {
+                    KeyCode::Char(c) => state.insert_char(c),
+                    KeyCode::Backspace => state.backspace(),
+                    KeyCode::Left => state.move_left(),
+                    KeyCode::Right => state.move_right(),
+                    KeyCode::Up
+                        if !state.input_history.is_empty() => {
                             let pos = state.history_pos.map(|p| p.saturating_sub(1)).unwrap_or(state.input_history.len() - 1);
                             state.history_pos = Some(pos);
-                            state.input = state.input_history[pos].clone();
-                            state.cursor_pos = state.input.len();
+                            state.set_input(state.input_history[pos].clone());
                         }
-                    }
                     KeyCode::Down => {
                         if let Some(pos) = state.history_pos {
                             if pos + 1 < state.input_history.len() {
                                 state.history_pos = Some(pos + 1);
-                                state.input = state.input_history[pos + 1].clone();
-                            } else { state.history_pos = None; state.input.clear(); }
-                            state.cursor_pos = state.input.len();
+                                state.set_input(state.input_history[pos + 1].clone());
+                            } else {
+                                state.history_pos = None;
+                                state.set_input(String::new());
+                            }
                         }
                     }
                     _ => {}
@@ -176,10 +244,52 @@ pub async fn run_tui_async(
         }
     }
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Ask y/N on the bottom row of the screen for dangerous operations.
+///
+/// The REPL runs inline in the TUI loop, so while it waits here no other key
+/// handling happens; the next frame redraws over the prompt.
+fn tui_confirm_callback() -> ConfirmCallback {
+    Arc::new(|prompt: &str| {
+        use crossterm::style::{Print, Stylize};
+        use crossterm::terminal::{Clear, ClearType};
+        let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let _ = execute!(
+            io::stdout(),
+            crossterm::cursor::MoveTo(0, rows.saturating_sub(1)),
+            Clear(ClearType::CurrentLine),
+            Print(format!(" {} ", prompt).black().on_yellow()),
+        );
+        loop {
+            match event::read() {
+                Ok(Event::Key(key)) => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => return true,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => return false,
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    })
+}
+
+/// Leaves raw mode and the alternate screen when the TUI exits for any reason.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
 }
 
 /// Draw UI — 3 zones: status bar (top), chat (middle), input (bottom).
@@ -250,6 +360,69 @@ fn draw_ui(f: &mut ratatui::Frame, state: &TuiState) {
     .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Green)));
     f.render_widget(input, chunks[2]);
 
-    let prompt_len = prompt.chars().count() as u16;
-    f.set_cursor_position((chunks[2].x + 1 + prompt_len + state.cursor_pos as u16, chunks[2].y + 1));
+    let prompt_width = Span::raw(prompt).width() as u16;
+    f.set_cursor_position((chunks[2].x + 1 + prompt_width + state.cursor_columns(), chunks[2].y + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn typed(keys: &str) -> TuiState {
+        let mut state = TuiState::new("test", vec![]);
+        for c in keys.chars() {
+            state.insert_char(c);
+        }
+        state
+    }
+
+    // Regression: typing a multi-byte char followed by another char panicked.
+    #[test]
+    fn input_accepts_non_ascii() {
+        let state = typed("éa中文🦀");
+        assert_eq!(state.input, "éa中文🦀");
+        assert_eq!(state.cursor_pos, 5);
+    }
+
+    #[test]
+    fn edit_in_middle_of_multibyte_text() {
+        let mut state = typed("中文");
+        state.move_left();
+        state.insert_char('x');
+        assert_eq!(state.input, "中x文");
+        state.backspace();
+        state.backspace();
+        assert_eq!(state.input, "文");
+        state.move_right();
+        state.move_right();
+        assert_eq!(state.cursor_pos, 1);
+    }
+
+    #[test]
+    fn cursor_columns_count_wide_chars() {
+        let state = typed("a中");
+        assert_eq!(state.cursor_columns(), 3);
+    }
+
+    #[test]
+    fn response_tokens_start_a_new_line() {
+        let mut state = TuiState::new("test", vec![]);
+        state.process_outputs(vec![
+            ReplOutput::Notification("  << ShellExec complete".into()),
+            ReplOutput::Token("tool ".into()),
+            ReplOutput::Token("said".into()),
+            ReplOutput::Text(String::new()),
+        ]);
+        let contents: Vec<&str> = state.messages.iter().map(|m| m.1.as_str()).collect();
+        assert_eq!(contents, ["  << ShellExec complete", "tool said", ""]);
+    }
+
+    #[test]
+    fn history_recall_puts_cursor_at_end() {
+        let mut state = TuiState::new("test", vec![]);
+        state.set_input("你好".into());
+        assert_eq!(state.cursor_pos, 2);
+        state.insert_char('!');
+        assert_eq!(state.input, "你好!");
+    }
 }

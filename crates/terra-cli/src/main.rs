@@ -2,7 +2,7 @@ mod config;
 mod ui;
 mod tui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -19,6 +19,12 @@ use terra_providers::OpenAICompatibleAdapter;
 use terra_trace::AuditLog;
 
 use config::{detect_environment, resolve_config, to_toml_string};
+
+/// `println!` that drops color codes when stdout is not a color terminal.
+macro_rules! say {
+    () => { println!() };
+    ($($arg:tt)*) => { println!("{}", ui::paint(&format!($($arg)*))) };
+}
 
 #[derive(Parser)]
 #[command(name = "terra", version, about = "Terra — Agent OS")]
@@ -56,8 +62,16 @@ enum Commands {
         as_json: bool,
     },
 
-    /// Show the audit trail.
-    Trace,
+    /// Show the audit trail of this project (.terra/audit.db).
+    Trace {
+        /// Number of most recent entries to show (0 = all).
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+
+        /// Output as JSON for machine consumption.
+        #[arg(long, default_value_t = false)]
+        as_json: bool,
+    },
 
     /// Configuration management.
     Config {
@@ -71,68 +85,88 @@ enum Commands {
 
 #[derive(clap::Subcommand)]
 enum ConfigAction {
-    /// Show current configuration.
+    /// Show the effective provider configuration.
     Show,
-    /// Set a configuration value.
+    /// Set a provider setting: provider.base_url, provider.model or provider.api_key.
     Set {
         key: String,
         value: String,
+        /// Write to this project's .terra/config.toml instead of ~/.terra/config.toml.
+        #[arg(long, default_value_t = false)]
+        project: bool,
     },
 }
 
-/// Bootstrap the Terra runtime: Memory, Caging, IC, Executor, Orchestrator.
+/// Keys `terra config set` accepts — the ones the runtime actually reads.
+const SETTABLE_KEYS: &[&str] = &["provider.base_url", "provider.model", "provider.api_key"];
+
+/// Everything a command needs, built from the project directory.
+struct Runtime {
+    executor: Arc<CommandExecutor>,
+    core: Arc<IntelligenceCore>,
+    provider_name: String,
+}
+
+/// Provider from config files and environment (env > project > global > defaults).
+/// Without an API key Terra runs against a dry-run stub that echoes the prompt.
+fn build_provider(project_root: &Path) -> (Arc<dyn ProviderAdapter>, String) {
+    let cfg = resolve_config(Some(project_root));
+    let Some(api_key) = cfg.provider.api_key else {
+        return (Arc::new(DryRunAdapter::new()), "dry_run".into());
+    };
+    match OpenAICompatibleAdapter::new(
+        api_key,
+        cfg.provider.base_url,
+        cfg.provider.model.clone(),
+        terra_providers::openai::DEFAULT_TIMEOUT_SECS,
+    ) {
+        Ok(adapter) => (Arc::new(adapter), cfg.provider.model),
+        Err(e) => {
+            tracing::warn!("provider setup failed ({e}), using dry_run");
+            (Arc::new(DryRunAdapter::new()), "dry_run".into())
+        }
+    }
+}
+
+/// Bootstrap the Terra runtime: Memory, Caging, IC, Executor.
 ///
 /// Loads .terra/constitution.toml if present to configure sandbox and cage rules.
-/// Falls back to sensible defaults when no constitution file exists.
-fn bootstrap() -> Orchestrator {
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+/// Memory and audit are persisted in .terra/ when it exists, in memory otherwise.
+fn build_runtime(project_root: &Path, event_bus: Option<Arc<dyn terra_types::EventBus>>) -> Runtime {
     let terra_dir = project_root.join(".terra");
+    let persistent = terra_dir.exists();
 
-    // Try loading constitution
     let constitution_path = terra_dir.join("constitution.toml");
     let constitution = terra_caging::Constitution::load(&constitution_path).ok();
-
     if constitution.is_some() {
         tracing::info!("Constitution loaded from {}", constitution_path.display());
     }
 
     // L2: Memory Database (per-project persistent storage)
-    let memory = if terra_dir.exists() {
-        let db_path = terra_dir.join("memory.db");
-        match MemoryDatabase::open(&db_path) {
-            Ok(db) => {
-                tracing::info!("Memory database: {}", db_path.display());
-                Arc::new(db)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open {}: {}, falling back to in-memory", db_path.display(), e);
-                Arc::new(MemoryDatabase::open_in_memory().unwrap())
-            }
+    let memory = match persistent.then(|| MemoryDatabase::open(&terra_dir.join("memory.db"))) {
+        Some(Ok(db)) => Arc::new(db),
+        Some(Err(e)) => {
+            tracing::warn!("Failed to open .terra/memory.db: {e}, falling back to in-memory");
+            Arc::new(MemoryDatabase::open_in_memory().expect("in-memory SQLite"))
         }
-    } else {
-        Arc::new(MemoryDatabase::open_in_memory().unwrap())
+        None => Arc::new(MemoryDatabase::open_in_memory().expect("in-memory SQLite")),
     };
 
-    // L2: Audit Trail (with persistence if .terra dir exists)
-    let audit = if terra_dir.exists() {
-        let audit_path = terra_dir.join("audit.db");
-        match AuditLog::with_persistence(&audit_path) {
-            Ok(log) => {
-                tracing::info!("Audit log: persistent ({})", audit_path.display());
-                Arc::new(log)
-            }
-            Err(_) => Arc::new(AuditLog::new()),
+    // L2: Audit Trail
+    let audit = match persistent.then(|| AuditLog::with_persistence(&terra_dir.join("audit.db"))) {
+        Some(Ok(log)) => Arc::new(log),
+        Some(Err(e)) => {
+            tracing::warn!("Failed to open .terra/audit.db: {e}, audit kept in memory only");
+            Arc::new(AuditLog::new())
         }
-    } else {
-        Arc::new(AuditLog::new())
+        None => Arc::new(AuditLog::new()),
     };
 
-    // L4: Caging Engine — driven by constitution or defaults
+    // L3: Caging Engine — driven by constitution or defaults
     let sandbox = match &constitution {
-        Some(c) => c.to_sandbox_guard(&project_root),
-        None => SandboxGuard::new(project_root.clone(), vec![]),
+        Some(c) => c.to_sandbox_guard(project_root),
+        None => SandboxGuard::new(project_root.to_path_buf(), vec![]),
     };
-
     let caging = Arc::new(CagingEngine::new(vec![
         Box::new(SpecificationCage),
         Box::new(MemoryCage),
@@ -141,77 +175,45 @@ fn bootstrap() -> Orchestrator {
         Box::new(MetaCage),
     ]));
 
-    // L2: Artifact Store
     let artifacts = Arc::new(ArtifactStore::new(terra_dir));
+    let (provider, provider_name) = build_provider(project_root);
 
-    // L1: Provider
-    let provider: Arc<dyn ProviderAdapter> = match OpenAICompatibleAdapter::from_env() {
-        Ok(adapter) => Arc::new(adapter),
-        Err(_) => Arc::new(DryRunAdapter::new()),
-    };
-
-    // L3+: Command Executor
-    let executor = Arc::new(CommandExecutor::new(memory, artifacts, audit, caging, provider));
+    let mut executor = CommandExecutor::new(memory, artifacts, audit, caging, provider);
+    if let Some(bus) = event_bus {
+        executor = executor.with_event_bus(bus);
+    }
 
     // L4: Intelligence Core
     let mut core = IntelligenceCore::new();
     core.register(Box::new(CodingModule));
     core.register(Box::new(AlgorithmModule));
-    let core = Arc::new(core);
 
-    // L5: Orchestrator
-    Orchestrator::new(executor, core)
+    Runtime { executor: Arc::new(executor), core: Arc::new(core), provider_name }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+/// `.terra/.gitignore`: only the shareable project files are tracked; memory,
+/// audit log, history, sessions, artifacts and the local config stay private.
+const TERRA_GITIGNORE: &str = "# Terra runtime data (databases, history, sessions, artifacts, local config).\n# Only the project rules and the system prompt are meant to be shared.\n*\n!.gitignore\n!constitution.toml\n!prompt.md\n";
 
-    // Chat mode: suppress INFO logs (spinner covers "thinking" state).
-    // Other commands: keep INFO for diagnostics.
-    // User can always override with RUST_LOG=terra=info.
-    let default_filter = match &cli.command {
-        Some(Commands::Chat { .. }) | None => "terra=warn",
-        _ => "terra=info",
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter))
-        )
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+const DEFAULT_PROJECT_CONFIG: &str = r#"# Provider settings for this project; unset keys fall back to ~/.terra/config.toml.
+# Environment variables (TERRA_PROVIDER_API_KEY, TERRA_PROVIDER_BASE_URL,
+# TERRA_PROVIDER_MODEL) take precedence. This file is git-ignored.
+[provider]
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "qwen-plus"
+# api_key = "..."
+"#;
 
-    match cli.command {
-        Some(Commands::Init) => {
-            use std::io::{BufRead, Write};
+fn write_terra_gitignore(terra_dir: &Path) -> std::io::Result<()> {
+    std::fs::write(terra_dir.join(".gitignore"), TERRA_GITIGNORE)
+}
 
-            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let terra_dir = project_root.join(".terra");
-
-            println!("\x1b[1m\x1b[35m");
-            println!("  Terra Agent OS — Project Setup");
-            println!("\x1b[0m");
-
-            if terra_dir.exists() {
-                println!("  \x1b[33m.terra/ already exists.\x1b[0m Overwrite? (y/N)");
-                print!("  > ");
-                std::io::stdout().flush().ok();
-                let mut answer = String::new();
-                std::io::stdin().lock().read_line(&mut answer).ok();
-                if !answer.trim().eq_ignore_ascii_case("y") {
-                    println!("  Aborted.");
-                    return Ok(());
-                }
-            }
-
-            // Create .terra/
-            std::fs::create_dir_all(&terra_dir)?;
-
-            // Generate constitution.toml
-            let constitution_content = format!(
-                r#"[meta]
+/// Write constitution, config, prompt and .gitignore into `.terra/`.
+fn write_project_files(project_root: &Path) -> std::io::Result<()> {
+    let terra_dir = project_root.join(".terra");
+    std::fs::create_dir_all(&terra_dir)?;
+    let constitution = format!(
+        r#"[meta]
 version = 1
 description = "Terra project constitution for {}"
 
@@ -229,56 +231,91 @@ allow_external_writes = false
 require_spec_complete = true
 require_verification = true
 "#,
-                project_root.file_name().and_then(|n| n.to_str()).unwrap_or("project")
-            );
-            std::fs::write(terra_dir.join("constitution.toml"), &constitution_content)?;
-            println!("  \x1b[32m✓\x1b[0m Constitution written");
+        project_root.file_name().and_then(|n| n.to_str()).unwrap_or("project")
+    );
+    std::fs::write(terra_dir.join("constitution.toml"), constitution)?;
+    std::fs::write(terra_dir.join("config.toml"), DEFAULT_PROJECT_CONFIG)?;
+    std::fs::write(terra_dir.join("prompt.md"), include_str!("../../terra-agents/src/prompt.md"))?;
+    write_terra_gitignore(&terra_dir)
+}
 
-            // Generate config.toml
-            let config_content = r#"[provider]
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-model = "qwen-plus"
+fn current_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
 
-[memory]
-cache_capacity = 1000
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Exit quietly when the reader goes away (`terra trace | head`) instead of
+    // panicking on a broken pipe, like other command-line tools.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
 
-[sleep]
-trigger = "session_end"
-interval_hours = 24
-max_candidates = 10
-"#;
-            std::fs::write(terra_dir.join("config.toml"), config_content)?;
-            println!("  \x1b[32m✓\x1b[0m Config written");
+    let cli = Cli::parse();
 
-            // Generate prompt.md (user-editable system prompt)
-            let prompt_content = include_str!("../../terra-agents/src/prompt.md");
-            std::fs::write(terra_dir.join("prompt.md"), prompt_content)?;
-            println!("  \x1b[32m✓\x1b[0m Prompt written (editable: .terra/prompt.md)");
+    // Warnings only by default: the interactive UI already shows progress.
+    // Override with RUST_LOG=terra=info for diagnostics.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("terra=warn"))
+        )
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
 
-            // Check API key
-            let has_key = std::env::var("DASHSCOPE_API_KEY").is_ok()
-                || std::env::var("TERRA_PROVIDER_API_KEY").is_ok();
-            if has_key {
-                println!("  \x1b[32m✓\x1b[0m API key detected");
-            } else {
-                println!("  \x1b[33m!\x1b[0m No API key found (will use dry_run mode)");
-                println!("    Set DASHSCOPE_API_KEY or TERRA_PROVIDER_API_KEY in your environment.");
+    match cli.command {
+        Some(Commands::Init) => {
+            use std::io::{BufRead, Write};
+
+            let project_root = current_dir();
+            let terra_dir = project_root.join(".terra");
+
+            say!();
+            say!("\x1b[1m\x1b[35m  Terra Agent OS — Project Setup\x1b[0m");
+            say!();
+
+            if terra_dir.exists() {
+                say!("  \x1b[33m.terra/ already exists.\x1b[0m Overwrite constitution, config and prompt? (y/N)");
+                print!("  > ");
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer).ok();
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    say!("  Aborted.");
+                    return Ok(());
+                }
             }
 
-            // Summary
-            println!();
-            println!("  \x1b[1mProject initialized:\x1b[0m");
-            println!("    \x1b[2m{}\x1b[0m", terra_dir.display());
-            println!("    ├── constitution.toml  (safety rules)");
-            println!("    ├── config.toml        (provider + sleep)");
-            println!("    ├── memory.db          (created on first run)");
-            println!("    └── audit.db           (created on first run)");
-            println!();
-            println!("  Next steps:");
-            println!("    \x1b[32mterra chat\x1b[0m     — Start interactive dialogue");
-            println!("    \x1b[32mterra doctor\x1b[0m   — Check environment");
-            println!("    \x1b[32mterra run\x1b[0m      — Run a one-shot task");
-            println!();
+            write_project_files(&project_root)?;
+            say!("  \x1b[32m✓\x1b[0m Constitution written");
+            say!("  \x1b[32m✓\x1b[0m Config written");
+            say!("  \x1b[32m✓\x1b[0m Prompt written (editable: .terra/prompt.md)");
+            say!("  \x1b[32m✓\x1b[0m .gitignore written (runtime data stays out of git)");
+
+            if resolve_config(Some(&project_root)).provider.api_key.is_some() {
+                say!("  \x1b[32m✓\x1b[0m API key detected");
+            } else {
+                say!("  \x1b[33m!\x1b[0m No API key found (chat and run will use a dry-run stub)");
+                say!("    Set TERRA_PROVIDER_API_KEY (or DASHSCOPE_API_KEY), or run");
+                say!("    `terra config set provider.api_key <key>`.");
+            }
+
+            say!();
+            say!("  \x1b[1mProject initialized:\x1b[0m");
+            say!("    \x1b[2m{}\x1b[0m", terra_dir.display());
+            say!("    ├── constitution.toml  (sandbox + protected paths)");
+            say!("    ├── config.toml        (provider settings, git-ignored)");
+            say!("    ├── prompt.md          (system prompt, editable)");
+            say!("    ├── memory.db          (created on first run)");
+            say!("    └── audit.db           (created on first run)");
+            say!();
+            say!("  Next steps:");
+            say!("    \x1b[32mterra chat\x1b[0m     — Start interactive dialogue");
+            say!("    \x1b[32mterra doctor\x1b[0m   — Check environment");
+            say!("    \x1b[32mterra run\x1b[0m      — Run a one-shot task");
+            say!();
         }
 
         ref cmd @ (Some(Commands::Chat { .. }) | None) => {
@@ -286,140 +323,93 @@ max_candidates = 10
             use terra_agents::repl::{Repl, ReplOutput};
             use terra_agents::codebase::{ProjectContext, detect_git};
             use terra_agents::session_store::SessionStore;
-            #[allow(unused_imports)]
-            use ui::{auto_renderer, OutputRenderer};
+            use ui::auto_renderer;
             use rustyline::error::ReadlineError;
             use rustyline::{CompletionType, Config, EditMode, Editor};
 
-            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let project_root = current_dir();
             let terra_dir = project_root.join(".terra");
 
             // Auto-init if needed
             if !terra_dir.exists() {
-                std::fs::create_dir_all(&terra_dir).ok();
-                std::fs::write(terra_dir.join("constitution.toml"),
-                    "[meta]\nversion = 1\ndescription = \"Terra auto-initialized\"\n\n[[protected_paths]]\npath = \".terra/constitution.toml\"\n\n[sandbox]\nroot = \".\"\n\n[rules]\nallow_external_writes = false\nrequire_spec_complete = true\nrequire_verification = true\n"
-                ).ok();
-                std::fs::write(terra_dir.join("config.toml"),
-                    "[provider]\nbase_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\nmodel = \"qwen-plus\"\n\n[memory]\ncache_capacity = 1000\n\n[sleep]\ntrigger = \"session_end\"\ninterval_hours = 24\nmax_candidates = 10\n"
-                ).ok();
+                write_project_files(&project_root).ok();
+            }
+            // Keep databases, history and sessions out of the user's git repo,
+            // including for projects initialized before this file existed.
+            if !terra_dir.join(".gitignore").exists() {
+                write_terra_gitignore(&terra_dir).ok();
             }
 
             // First launch declaration
             let ack_path = terra_dir.join(".acknowledged");
             if !ack_path.exists() {
-                println!();
-                println!("\x1b[1m  Terra Agent OS — First Launch\x1b[0m");
-                println!();
-                println!("  Terra can:");
-                println!("    \x1b[36m◆\x1b[0m Read and modify files in this directory");
-                println!("    \x1b[36m◆\x1b[0m Execute shell commands");
-                println!("    \x1b[36m◆\x1b[0m Call LLM APIs (token costs apply)");
-                println!("    \x1b[36m◆\x1b[0m Store conversation history and project memory");
-                println!();
-                println!("  All operations are sandboxed to this directory.");
-                println!("  Destructive operations require your confirmation.");
-                println!();
+                say!();
+                say!("\x1b[1m  Terra Agent OS — First Launch\x1b[0m");
+                say!();
+                say!("  Terra can:");
+                say!("    \x1b[36m◆\x1b[0m Read files (anywhere) and write files (only inside this directory)");
+                say!("    \x1b[36m◆\x1b[0m Execute shell commands — each one asks for your confirmation");
+                say!("    \x1b[36m◆\x1b[0m Call LLM APIs (token costs apply)");
+                say!("    \x1b[36m◆\x1b[0m Store conversation history and project memory in .terra/");
+                say!();
+                say!("  File writes and deletes are sandboxed to this directory.");
+                say!("  Shell commands and deletes run only after you answer y.");
+                say!();
                 std::fs::write(&ack_path, "acknowledged").ok();
             }
 
-            // Detect provider
-            let (provider, provider_name): (Arc<dyn ProviderAdapter>, String) =
-                match OpenAICompatibleAdapter::from_env() {
-                    Ok(adapter) => {
-                        let name = adapter.capabilities().model_id.clone();
-                        (Arc::new(adapter), name)
-                    }
-                    Err(_) => {
-                        println!("  \x1b[33m⚠\x1b[0m No API key — dry_run mode");
-                        (Arc::new(terra_providers::adapter::DryRunAdapter::new()), "dry_run".into())
-                    }
-                };
+            // EventBus: live operation lines in the REPL. The TUI owns the
+            // screen, so it gets no bus (events would print over it).
+            let (bus, event_rx) = if use_tui {
+                (None, None)
+            } else {
+                let (bus, rx) = terra_types::ChannelBus::new();
+                (Some(Arc::new(bus) as Arc<dyn terra_types::EventBus>), Some(rx))
+            };
+            let Runtime { executor, core, provider_name } = build_runtime(&project_root, bus);
+
+            if provider_name == "dry_run" {
+                say!("  \x1b[33m⚠\x1b[0m No API key — dry_run mode (replies echo your input). See `terra doctor`.");
+            }
 
             // Project awareness
             let project_ctx = ProjectContext::scan(&project_root);
             let git_info = detect_git(&project_root);
 
             // Display project info (oh-my-zsh style)
-            println!("  \x1b[2m📂 {}\x1b[0m", project_root.display());
-            println!("  \x1b[2m🔧 {} │ {} files │ {}\x1b[0m",
+            say!("  \x1b[2m📂 {}\x1b[0m", project_root.display());
+            say!("  \x1b[2m🔧 {} │ {} files │ {}\x1b[0m",
                 project_ctx.project_type.as_str(),
                 project_ctx.total_files,
                 provider_name,
             );
             if git_info.is_repo {
                 let changes = if git_info.has_changes { format!(" │ {} changed", git_info.changed_files) } else { String::new() };
-                println!("  \x1b[2m🌿 {}{}\x1b[0m", git_info.branch, changes);
+                say!("  \x1b[2m🌿 {}{}\x1b[0m", git_info.branch, changes);
             }
-            println!();
+            say!();
 
-            // Build runtime
-            let constitution = terra_caging::Constitution::load(&terra_dir.join("constitution.toml")).ok();
-
-            let memory = if terra_dir.exists() {
-                MemoryDatabase::open(&terra_dir.join("memory.db"))
-                    .map(Arc::new)
-                    .unwrap_or_else(|_| Arc::new(MemoryDatabase::open_in_memory().unwrap()))
-            } else {
-                Arc::new(MemoryDatabase::open_in_memory().unwrap())
-            };
-            let artifacts = Arc::new(ArtifactStore::new(terra_dir.clone()));
-            let audit = if terra_dir.exists() {
-                AuditLog::with_persistence(&terra_dir.join("audit.db"))
-                    .map(Arc::new)
-                    .unwrap_or_else(|_| Arc::new(AuditLog::new()))
-            } else {
-                Arc::new(AuditLog::new())
-            };
-            let sandbox = match &constitution {
-                Some(c) => c.to_sandbox_guard(&project_root),
-                None => SandboxGuard::new(project_root.clone(), vec![]),
-            };
-            let caging = Arc::new(CagingEngine::new(vec![
-                Box::new(SpecificationCage),
-                Box::new(MemoryCage),
-                Box::new(ActionCage::new(sandbox)),
-                Box::new(VerificationCage),
-                Box::new(MetaCage),
-            ]));
-            // EventBus: ChannelBus for operation visibility
-            let (event_bus, mut event_rx) = terra_types::ChannelBus::new();
-            let executor = Arc::new(
-                CommandExecutor::new(memory, artifacts, audit, caging, provider)
-                    .with_event_bus(Arc::new(event_bus))
-            );
-
-            // Spawn event consumer (displays operation chain)
-            tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    use terra_types::EventType;
-                    match event.event_type {
-                        EventType::StepStart => {
-                            if let Some(desc) = event.data.get("description").and_then(|d| d.as_str()) {
-                                if !desc.contains("Thinking") {
-                                    eprint!("\x1b[2m  ● {}\x1b[0m", desc);
+            // Print each operation as its own line while a turn runs.
+            if let Some(mut rx) = event_rx {
+                tokio::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        use terra_types::EventType;
+                        match event.event_type {
+                            EventType::StepStart => {
+                                if let Some(desc) = event.data.get("description").and_then(|d| d.as_str()) {
+                                    if !desc.contains("Thinking") && !desc.starts_with("Event:") {
+                                        eprintln!("{}", ui::paint(&format!("\x1b[2m  ● {}\x1b[0m", desc.trim_start_matches(['●', ' ']))));
+                                    }
                                 }
                             }
-                        }
-                        EventType::StepComplete => {
-                            if let Some(desc) = event.data.get("op").and_then(|d| d.as_str()) {
-                                if !desc.contains("ProviderCall") {
-                                    eprintln!(" \x1b[2m✓\x1b[0m");
-                                }
+                            EventType::StepFailed => {
+                                eprintln!("{}", ui::paint("  \x1b[31m✗ step failed\x1b[0m"));
                             }
+                            _ => {}
                         }
-                        EventType::StepFailed => {
-                            eprintln!(" \x1b[31m✗\x1b[0m");
-                        }
-                        _ => {}
                     }
-                }
-            });
-
-            let mut core = IntelligenceCore::new();
-            core.register(Box::new(CodingModule));
-            core.register(Box::new(AlgorithmModule));
-            let core = Arc::new(core);
+                });
+            }
 
             // TUI mode: launch ratatui TUI instead of rustyline
             if use_tui {
@@ -434,14 +424,14 @@ max_candidates = 10
                 let greeter_lines: Vec<String> = suggestions.iter()
                     .map(|s| format!("  {} — {}", s.label, s.hint))
                     .collect();
-                tui::run_tui_async(executor, core, &provider_name, greeter_lines).await?;
+                tui::run_tui_async(executor, core, &provider_name, greeter_lines, &terra_dir).await?;
                 return Ok(());
             }
 
             // L2 confirmation callback: prompts user in terminal for dangerous operations.
             let confirm_cb: terra_agents::repl::ConfirmCallback = Arc::new(|prompt: &str| {
                 use std::io::{Write, BufRead};
-                print!("\n  \x1b[33m{}\x1b[0m ", prompt);
+                print!("\n  {} ", ui::paint(&format!("\x1b[33m{}\x1b[0m", prompt)));
                 std::io::stdout().flush().ok();
                 let mut answer = String::new();
                 std::io::stdin().lock().read_line(&mut answer).ok();
@@ -450,9 +440,11 @@ max_candidates = 10
             });
 
             let mut repl = Repl::new(executor, core)
+                .with_project_root(&project_root)
                 .with_store(SessionStore::new(&terra_dir))
                 .with_confirm_callback(confirm_cb);
             let renderer = auto_renderer(&provider_name);
+            let animate = ui::color_enabled();
 
             // Rustyline config
             let rl_config = Config::builder()
@@ -479,8 +471,8 @@ max_candidates = 10
                 );
                 let greeter_output = render_greeter(&suggestions);
                 if !greeter_output.is_empty() {
-                    println!("{}", greeter_output);
-                    println!();
+                    say!("{}", greeter_output);
+                    say!();
                 }
             }
 
@@ -510,25 +502,27 @@ max_candidates = 10
                         if Repl::should_quit(&outputs) {
                             // Exit summary
                             let tokens = repl.tokens();
-                            println!();
-                            println!("  \x1b[2m─────────────────────────────────\x1b[0m");
-                            println!("  \x1b[2mSession: {} tokens ({} prompt, {} completion)\x1b[0m",
+                            say!();
+                            say!("  \x1b[2m─────────────────────────────────\x1b[0m");
+                            say!("  \x1b[2mSession: {} tokens ({} prompt, {} completion)\x1b[0m",
                                 tokens.total_tokens(), tokens.prompt_tokens, tokens.completion_tokens);
-                            println!("  \x1b[2mSession ID: {}\x1b[0m", repl.session_id());
-                            println!();
-                            println!("  Goodbye. 👋");
+                            say!("  \x1b[2mSession ID: {}\x1b[0m", repl.session_id());
+                            say!();
+                            say!("  Goodbye. 👋");
                             break;
                         }
 
                         for output in &outputs {
                             match output {
                                 ReplOutput::Prompt(_) => {}
-                                // Token: streaming word-by-word display
+                                // Token: word-by-word display of the finished response
                                 ReplOutput::Token(word) => {
                                     use std::io::Write;
                                     print!("{}", word);
                                     std::io::stdout().flush().ok();
-                                    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                                    if animate {
+                                        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+                                    }
                                 }
                                 // Empty text = end of streaming response
                                 ReplOutput::Text(t) if t.is_empty() => {
@@ -538,22 +532,19 @@ max_candidates = 10
                                 ReplOutput::Text(text) => {
                                     ui::render_text_block(text);
                                 }
-                                ReplOutput::Notification(_msg) => {
-                                    renderer.render(output);
-                                }
                                 other => renderer.render(other),
                             }
                         }
                     }
                     Err(ReadlineError::Interrupted) => {
                         // Ctrl+C: cancel current, show new prompt
-                        println!("\n\x1b[33m[interrupted]\x1b[0m");
+                        say!("\n\x1b[33m[interrupted]\x1b[0m");
                         continue;
                     }
                     Err(ReadlineError::Eof) => {
                         let tokens = repl.tokens();
-                        println!("\n  \x1b[2mSession: {} tokens\x1b[0m", tokens.total_tokens());
-                        println!("  Goodbye. 👋");
+                        say!("\n  \x1b[2mSession: {} tokens\x1b[0m", tokens.total_tokens());
+                        say!("  Goodbye. 👋");
                         break;
                     }
                     Err(err) => {
@@ -572,26 +563,35 @@ max_candidates = 10
         }
 
         Some(Commands::Doctor { as_json }) => {
-            let report = detect_environment(None);
+            let project_root = current_dir();
+            let report = detect_environment(Some(&project_root));
             if as_json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
+                let yes_no = |found: bool| if found { "found" } else { "not found" };
                 println!("Terra doctor: environment check");
-                println!("  Version:    {}", report.terra_version);
-                println!("  OS:         {} {}", report.os, report.arch);
-                println!("  Provider:   {}", if report.provider_configured {
-                    format!("configured ({})", report.provider_source)
+                println!("  Version:      {} ({} {})", report.terra_version, report.os, report.arch);
+                println!("  Project:      {} ({})", project_root.display(),
+                    if report.project_initialized { ".terra/ found" } else { "not initialized — run `terra init`" });
+                println!("  Provider:     {} at {}", report.model, report.base_url);
+                println!("  API key:      {}", if report.provider_configured {
+                    format!("from {}", report.provider_source)
                 } else {
-                    "not configured (dry_run only)".into()
+                    "not set".into()
                 });
-                println!("  Global cfg: {}", if report.global_config_exists { "found" } else { "not found" });
-                println!("  Project cfg:{}", if report.project_config_exists { "found" } else { "not found" });
-                println!("  Status:     OK");
+                println!("  Config files: global {}, project {}",
+                    yes_no(report.global_config_exists), yes_no(report.project_config_exists));
+                if report.provider_configured {
+                    println!("  Status:       ready");
+                } else {
+                    println!("  Status:       dry-run only — set TERRA_PROVIDER_API_KEY or `terra config set provider.api_key <key>`");
+                }
             }
         }
 
         Some(Commands::Run { task, as_json }) => {
-            let orchestrator = bootstrap();
+            let Runtime { executor, core, .. } = build_runtime(&current_dir(), None);
+            let orchestrator = Orchestrator::new(executor, core);
             let result = orchestrator.run(&task).await?;
 
             if as_json {
@@ -616,25 +616,54 @@ max_candidates = 10
             }
         }
 
-        Some(Commands::Trace) => {
-            println!("(Trace is session-scoped — view via terra trace show)");
+        Some(Commands::Trace { limit, as_json }) => {
+            let audit_path = current_dir().join(".terra").join("audit.db");
+            if !audit_path.exists() {
+                println!("No audit log here yet ({}).", audit_path.display());
+                println!("It is created the first time `terra chat`, `terra run` or `terra mcp` runs in this directory.");
+                return Ok(());
+            }
+            let log = AuditLog::with_persistence(&audit_path)?;
+            let entries = log.entries();
+            let skip = if limit == 0 { 0 } else { entries.len().saturating_sub(limit) };
+            let shown = &entries[skip..];
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(shown)?);
+            } else {
+                println!("Audit log {} — {} entries, showing {}", audit_path.display(), entries.len(), shown.len());
+                for entry in shown {
+                    println!("{}", entry.summary_line());
+                }
+            }
         }
 
         Some(Commands::Config { action }) => match action {
             ConfigAction::Show => {
-                let config = resolve_config(None);
+                let project_root = current_dir();
+                let config = resolve_config(Some(&project_root));
+                println!("# Effective settings (env vars > .terra/config.toml > ~/.terra/config.toml > defaults)");
                 print!("{}", to_toml_string(&config)?);
             }
-            ConfigAction::Set { key, value } => {
-                let config_path = config::global_config_path();
+            ConfigAction::Set { key, value, project } => {
+                if !SETTABLE_KEYS.contains(&key.as_str()) {
+                    anyhow::bail!("unknown key '{}'. Supported: {}", key, SETTABLE_KEYS.join(", "));
+                }
+                let config_path = if project {
+                    config::project_config_path(&current_dir())
+                } else {
+                    config::global_config_path()
+                };
                 config::config_set(&config_path, &key, &value)?;
-                println!("Set {} = {} in {}", key, value, config_path.display());
+                let shown = if key == "provider.api_key" { "***" } else { value.as_str() };
+                println!("Set {} = {} in {}", key, shown, config_path.display());
+                if let Some(var) = config::env_override_for(&key) {
+                    println!("Note: {} is set in the environment and takes precedence.", var);
+                }
             }
         },
 
         Some(Commands::Mcp) => {
-            let orchestrator = bootstrap();
-            let executor = orchestrator.executor().clone();
+            let Runtime { executor, .. } = build_runtime(&current_dir(), None);
             let server = terra_mcp::McpServer::new(executor);
             server.run_stdio().await;
         }

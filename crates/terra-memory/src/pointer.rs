@@ -410,14 +410,14 @@ fn parse_mem_key(dsl: &str) -> Option<String> {
 fn parse_level_wildcard(dsl: &str) -> Option<Level> {
     let re = Regex::new(r#"^@(L[0-6])\[\*\]$"#).ok()?;
     let caps = re.captures(dsl)?;
-    Level::from_str(&caps[1])
+    Level::parse(&caps[1])
 }
 
 /// Parse `@scope["project"]` -> Some(Scope)
 fn parse_scope_filter(dsl: &str) -> Option<Scope> {
     let re = Regex::new(r#"^@scope\["([^"]+)"\]$"#).ok()?;
     let caps = re.captures(dsl)?;
-    Scope::from_str(&caps[1])
+    Scope::parse(&caps[1])
 }
 
 /// Parse `@search("query")` or `@search("query", N)` -> Some((query, top_n))
@@ -504,8 +504,8 @@ impl TomlWrapper {
     fn into_table(self) -> PointerTable {
         let mut entries = BTreeMap::new();
         for tp in self.pointer {
-            let level = Level::from_str(&tp.level).unwrap_or(Level::L6);
-            let scope = Scope::from_str(&tp.scope).unwrap_or(Scope::Session);
+            let level = Level::parse(&tp.level).unwrap_or(Level::L6);
+            let scope = Scope::parse(&tp.scope).unwrap_or(Scope::Session);
             let last_accessed = DateTime::parse_from_rfc3339(&tp.last_accessed)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());

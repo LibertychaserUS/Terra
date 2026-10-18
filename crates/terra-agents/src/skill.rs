@@ -78,6 +78,12 @@ pub struct SkillRegistry {
     skills: HashMap<String, SkillDef>,
 }
 
+impl Default for SkillRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SkillRegistry {
     pub fn new() -> Self {
         Self { skills: HashMap::new() }

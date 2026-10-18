@@ -44,6 +44,12 @@ pub struct DriftCheckResult {
     pub signal: Option<DiagnosticSignal>,
 }
 
+impl Default for DriftDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DriftDetector {
     pub fn new() -> Self {
         Self::with_config(DriftConfig::default())
@@ -65,7 +71,7 @@ impl DriftDetector {
         self.command_count += 1;
 
         // Only check at intervals
-        if self.command_count % self.config.check_interval != 0 {
+        if !self.command_count.is_multiple_of(self.config.check_interval) {
             return DriftCheckResult {
                 checked: false,
                 score: self.last_score,
@@ -78,8 +84,8 @@ impl DriftDetector {
         let signal = detect_goal_drift(spec_text, action_text, self.config.threshold);
 
         // Compute actual similarity score for reporting
-        let actual_score = if signal.is_some() {
-            signal.as_ref().unwrap().measured
+        let actual_score = if let Some(s) = &signal {
+            s.measured
         } else {
             // Compute the actual score for reporting
             let spec_tokens = drift_tfidf::tokenize_and_weight(spec_text);
