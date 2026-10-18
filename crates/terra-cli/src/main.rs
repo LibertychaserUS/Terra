@@ -316,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
             use terra_agents::repl::{Repl, ReplOutput};
             use terra_agents::codebase::{ProjectContext, detect_git};
             use terra_agents::session_store::SessionStore;
-            use ui::{auto_renderer, OutputRenderer};
+            use ui::auto_renderer;
             use rustyline::error::ReadlineError;
             use rustyline::{CompletionType, Config, EditMode, Editor};
 

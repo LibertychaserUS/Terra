@@ -25,6 +25,7 @@ use terra_trace::AuditLog;
 
 fn has_api_key() -> bool {
     std::env::var("DASHSCOPE_API_KEY").is_ok()
+        || std::env::var("TERRA_PROVIDER_API_KEY").is_ok()
 }
 
 fn live_repl() -> Option<(Repl, tempfile::TempDir)> {
@@ -74,15 +75,13 @@ fn has_notification(outputs: &[ReplOutput]) -> bool {
 /// 30+ turn long conversation with real LLM.
 /// Tests the full dialogue lifecycle.
 #[tokio::test]
+#[ignore = "needs an LLM API key; run with `cargo test -- --ignored`"]
 async fn long_conversation_30_turns() {
-    if !has_api_key() {
-        eprintln!("skipping long_conversation_30_turns (no API key)");
-        return;
-    }
+    assert!(has_api_key(), "live test: set TERRA_PROVIDER_API_KEY or DASHSCOPE_API_KEY");
 
     let (mut repl, _dir) = match live_repl() {
         Some(r) => r,
-        None => { eprintln!("skipping (provider init failed)"); return; }
+        None => panic!("provider init failed: check TERRA_PROVIDER_* settings"),
     };
 
     let mut turn = 0;
