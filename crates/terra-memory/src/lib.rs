@@ -1,32 +1,16 @@
-//! Terra Memory Database
+//! Terra memory: one SQLite table of entries with an owner, a scope and a
+//! level, plus an FTS5 index for search.
 //!
-//! Rust-safe memory system with ownership, borrowing, lifetime management,
-//! pluggable storage backends, moka cache, and layered access.
-//!
-//! Architecture (bottom-up):
-//! - `types`: core data types (Scope, Level, MemoryEntry)
-//! - `error`: domain error taxonomy
-//! - `backend`: StorageBackend trait + InMemoryBackend
-//! - `store`: SQLite persistence layer (implements StorageBackend)
-//! - `safety`: ownership and lifetime enforcement
-//! - `cache`: moka in-memory cache layer
-//! - `db`: public API combining all layers
+//! The rules that make this a cage rather than a key-value store live in
+//! `MemoryDatabase`: an entry is changed or deleted only by its owner, and
+//! promotion to a more authoritative level needs a human for L6 candidates.
+//! Level write permissions (L0 read-only, L1 user-only) are enforced by the
+//! Memory cage in `terra-caging` before a write reaches this crate.
 
-pub mod types;
-pub mod error;
-pub mod backend;
-pub mod store;
-pub mod safety;
-pub mod cache;
-pub mod artifact;
-pub mod search;
-pub mod pointer;
 pub mod db;
+pub mod error;
+pub mod types;
 
-pub use db::MemoryDatabase;
+pub use db::{GcReport, MemoryDatabase, SearchHit};
 pub use error::MemoryError;
 pub use types::{Level, MemoryEntry, Scope};
-pub use backend::{StorageBackend, InMemoryBackend};
-pub use artifact::{ArtifactStore, ArtifactType, ArtifactMeta};
-pub use search::{VectorIndex, EmbeddingBackend, TfIdfBackend};
-pub use pointer::{Pointer, PointerTable, SalienceSignal};

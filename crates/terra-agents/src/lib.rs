@@ -1,38 +1,17 @@
-//! Terra Multi-Agent Runtime
-//!
-//! Orchestrator that follows the canonical pipeline:
-//! User Input → Compilation → SpecIR → IC consultation
-//! → Caging gate → Command Executor → Result
-//!
-//! Agent roles:
-//! - Main (Orchestrator): full pipeline, strongest model
-//! - Worker: coding tasks, filtered rules, balanced model
-//! - Explorer: search/research, fast model
-//! - CageMonitor: diagnostic checks only, no mutations
+//! The agent: a tool loop over the executor, Goal Mode with a specified
+//! goal and a verified completion claim, and the user's slash commands.
 
-pub mod orchestrator;
-pub mod roles;
-pub mod dispatch;
-pub mod session;
-pub mod drift;
-pub mod profile;
-pub mod subagent;
-pub mod skill;
-pub mod tools;
-pub mod repl;
-pub mod session_store;
-pub mod status;
+pub mod agent;
 pub mod codebase;
-pub mod greeter;
+pub mod commands;
+pub mod consolidate;
+pub mod run;
+pub mod session;
+pub mod session_store;
+pub mod spec;
 
-pub use orchestrator::Orchestrator;
-pub use roles::{AgentRole, CageMonitorAgent, ExplorerAgent, WorkerAgent};
-pub use dispatch::{ModelDispatcher, ModelCapability, DispatchParams};
-pub use session::{SessionManager, SessionMode, SessionStatus, SleepSettings, Verification};
-pub use drift::{DriftDetector, DriftConfig};
-pub use profile::{AgentProfile, MemoryView};
-pub use subagent::SubAgentRunner;
-pub use skill::{SkillRegistry, SkillDef, TrustLevel};
-pub use tools::{ToolRegistry, ToolLevel, ToolProvider};
-pub use repl::Repl;
-pub use repl::ConfirmCallback;
+pub use agent::{Agent, ConfirmCallback, Output};
+pub use run::{run_task, TaskReport};
+pub use session::{Session, SessionMode, Verification, VERIFIER_AGENT};
+pub use session_store::{SessionRecord, SessionStore};
+pub use spec::Spec;

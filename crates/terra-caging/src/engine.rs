@@ -1,10 +1,14 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use crate::cage::{Cage, CageAction, CageCheckResult, CageContext, KnowledgeSource};
+use crate::cage::{Cage, CageAction, CageCheckResult, CageContext};
 use crate::sandbox::{resolve_path, SandboxGuard};
 
-/// Specification Cage — blocks execution when spec is incomplete.
+/// Specification Cage: nothing changes while the task is not specified.
+///
+/// In Goal Mode, every write, delete or shell command is blocked until the
+/// goal's specification has no open questions. Starting a task
+/// (`ExecuteTask`) with an incomplete spec is blocked in the same way.
 pub struct SpecificationCage;
 
 impl Cage for SpecificationCage {
@@ -13,14 +17,15 @@ impl Cage for SpecificationCage {
     }
 
     fn check(&self, context: &CageContext) -> CageCheckResult {
-        if let CageAction::ExecuteTask { spec_complete } = &context.action {
-            if !spec_complete {
-                return CageCheckResult::Block(
-                    "task specification is incomplete (has open questions)".into(),
-                );
-            }
+        match &context.action {
+            CageAction::ExecuteTask { spec_complete } if !spec_complete => CageCheckResult::Block(
+                "task specification is incomplete (has open questions)".into(),
+            ),
+            action if action.mutates() && !context.spec_complete => CageCheckResult::Block(
+                "the goal's specification still has open questions; answer them before changing anything".into(),
+            ),
+            _ => CageCheckResult::Pass,
         }
-        CageCheckResult::Pass
     }
 
     fn goal_only(&self) -> bool {
@@ -28,16 +33,12 @@ impl Cage for SpecificationCage {
     }
 }
 
-/// Memory Cage — enforces ownership + level-based write permissions.
+/// Memory Cage: ownership plus level-based write permissions.
 ///
-/// Permission matrix:
-/// - L0: blocked always (read-only, constitution)
-/// - L1: blocked for agent (only user /remember or promotion chain)
-/// - L2: allowed both modes (task scope)
-/// - L3: allowed Goal Mode + Verification pass only
-/// - L4: allowed both modes (failure records)
-/// - L5: allowed both modes (buffer layer)
-/// - L6: allowed both modes (agent nominations)
+/// - L0 is read-only for everyone.
+/// - L1 accepts only user commands (`/remember`, `/accept`).
+/// - L3 is written in Goal Mode only.
+/// - L2, L4, L5, L6 are open to the agent.
 pub struct MemoryCage;
 
 impl Cage for MemoryCage {
@@ -47,37 +48,17 @@ impl Cage for MemoryCage {
 
     fn check(&self, context: &CageContext) -> CageCheckResult {
         if let CageAction::MemoryWrite { owner, level, is_user_command, .. } = &context.action {
-            // Ownership check (existing)
             if *owner != context.agent && !is_user_command {
-                return CageCheckResult::Block(format!(
-                    "{} is not the owner (owner: {})",
-                    context.agent, owner
-                ));
+                return CageCheckResult::Block(format!("{} is not the owner (owner: {})", context.agent, owner));
             }
-
-            // Level-based permission matrix
             match level.as_str() {
-                "L0" => {
-                    return CageCheckResult::Block(
-                        "L0 (authoritative) is read-only".into(),
-                    );
+                "L0" => return CageCheckResult::Block("L0 (authoritative) is read-only".into()),
+                "L1" if !is_user_command => {
+                    return CageCheckResult::Block("L1 (project) requires user /remember or /accept".into())
                 }
-                "L1"
-                    if !is_user_command => {
-                        return CageCheckResult::Block(
-                            "L1 (project) requires user /remember or promotion chain".into(),
-                        );
-                    }
-                    // User /remember bypasses — allowed
-                "L3"
-                    if !context.goal_mode => {
-                        return CageCheckResult::Block(
-                            "L3 (accepted paths) only writable in Goal Mode".into(),
-                        );
-                    }
-                    // In Goal Mode, L3 write requires Verification pass
-                    // (enforced by VerificationCage in the pipeline, not here)
-                // L2, L4, L5, L6: allowed in both modes
+                "L3" if !context.goal_mode => {
+                    return CageCheckResult::Block("L3 (accepted paths) only writable in Goal Mode".into())
+                }
                 _ => {}
             }
         }
@@ -85,7 +66,12 @@ impl Cage for MemoryCage {
     }
 }
 
-/// Action Cage — enforces file system sandbox.
+/// Action Cage: file writes and deletes stay inside the sandbox; a short
+/// list of destructive shell patterns is refused outright.
+///
+/// The pattern list is a convenience, not the mechanism: the OS-level
+/// isolation the executor applies to shell commands is what keeps them
+/// inside the project.
 pub struct ActionCage {
     sandbox: SandboxGuard,
 }
@@ -95,6 +81,8 @@ impl ActionCage {
         Self { sandbox }
     }
 }
+
+const DESTRUCTIVE_SHELL: &[&str] = &["rm -rf /", "rm -fr /", "mkfs", "> /dev/", "dd if=", ":(){"];
 
 impl Cage for ActionCage {
     fn name(&self) -> &str {
@@ -116,12 +104,11 @@ impl Cage for ActionCage {
                 Err(e) => CageCheckResult::Block(e.to_string()),
             },
             CageAction::ShellExec { command } => {
-                // Block dangerous patterns
                 let lower = command.to_lowercase();
-                if lower.contains("rm -rf /") || lower.contains("mkfs") || lower.contains("> /dev/") {
+                if DESTRUCTIVE_SHELL.iter().any(|p| lower.contains(p)) {
                     CageCheckResult::Block(format!("destructive shell command blocked: {}", command))
                 } else {
-                    CageCheckResult::Warn(format!("shell execution: {}", command))
+                    CageCheckResult::Pass
                 }
             }
             _ => CageCheckResult::Pass,
@@ -129,7 +116,8 @@ impl Cage for ActionCage {
     }
 }
 
-/// Verification Cage — blocks completion claims without verification.
+/// Verification Cage: a completion claim needs verification the agent did
+/// not produce itself.
 pub struct VerificationCage;
 
 impl Cage for VerificationCage {
@@ -138,12 +126,8 @@ impl Cage for VerificationCage {
     }
 
     fn check(&self, context: &CageContext) -> CageCheckResult {
-        if let CageAction::ClaimComplete { verified } = &context.action {
-            if !verified {
-                return CageCheckResult::Block(
-                    "completion claimed without external verification".into(),
-                );
-            }
+        if let CageAction::ClaimComplete { verified: false } = &context.action {
+            return CageCheckResult::Block("completion claimed without external verification".into());
         }
         CageCheckResult::Pass
     }
@@ -153,81 +137,11 @@ impl Cage for VerificationCage {
     }
 }
 
-/// Convergence Cage — stops exploration after an accepted path exists.
-///
-/// When a solution path has been accepted (verified, committed),
-/// further exploration of alternatives is warned (or blocked if
-/// the path is locked). This prevents wasted effort and divergence.
-pub struct ConvergenceCage;
-
-impl Cage for ConvergenceCage {
-    fn name(&self) -> &str {
-        "convergence"
-    }
-
-    fn check(&self, context: &CageContext) -> CageCheckResult {
-        if let CageAction::ExploreAfterAccepted { path_id } = &context.action {
-            return CageCheckResult::Warn(format!(
-                "accepted path '{}' exists — further exploration may be wasteful",
-                path_id
-            ));
-        }
-        CageCheckResult::Pass
-    }
-
-    fn goal_only(&self) -> bool {
-        true
-    }
-}
-
-/// Knowledge Cage — enforces authority ranking for knowledge claims.
-///
-/// Authority hierarchy (FR-073):
-///   Code > Documentation > Memory > Assumption
-///
-/// A claim from a lower-authority source that contradicts a
-/// higher-authority source is blocked.
-pub struct KnowledgeCage;
-
-impl Cage for KnowledgeCage {
-    fn name(&self) -> &str {
-        "knowledge"
-    }
-
-    fn check(&self, context: &CageContext) -> CageCheckResult {
-        if let CageAction::KnowledgeClaim {
-            source,
-            contradicted_by_higher,
-        } = &context.action
-        {
-            if *contradicted_by_higher {
-                return CageCheckResult::Block(format!(
-                    "{} contradicts higher-authority source",
-                    match source {
-                        KnowledgeSource::Assumption => "assumption",
-                        KnowledgeSource::Memory => "memory claim",
-                        KnowledgeSource::Documentation => "documentation claim",
-                        KnowledgeSource::Code => "code claim",
-                    }
-                ));
-            }
-            // Warn on low-authority sources even when not contradicted
-            if *source <= KnowledgeSource::Assumption {
-                return CageCheckResult::Warn(
-                    "claim based on assumption — seek verification from code or docs".into(),
-                );
-            }
-        }
-        CageCheckResult::Pass
-    }
-}
-
-/// Meta-Cage — the agent cannot change the rules that cage it.
+/// Meta-Cage: the agent cannot change the rules that cage it.
 ///
 /// Blocks `ModifyRule`, and any write or delete that resolves to the project
-/// constitution (`.terra/constitution.toml`) or a path beneath it. This holds
-/// whether or not the constitution lists itself as a protected path, so an
-/// agent cannot create one with a wider sandbox for the next session.
+/// constitution (`.terra/constitution.toml`) or a path beneath it, whether or
+/// not the constitution lists itself as protected.
 pub struct MetaCage;
 
 impl MetaCage {
@@ -249,27 +163,19 @@ impl Cage for MetaCage {
 
     fn check(&self, context: &CageContext) -> CageCheckResult {
         match &context.action {
-            CageAction::ModifyRule { rule_name } => CageCheckResult::Block(format!(
-                "cannot modify protected rule: {}",
-                rule_name
-            )),
-            CageAction::FileWrite { path } | CageAction::FileDelete { path }
-                if Self::is_rule_file(path) =>
-            {
-                CageCheckResult::Block(format!(
-                    "cannot modify protected rule file: {}",
-                    path.display()
-                ))
+            CageAction::ModifyRule { rule_name } => {
+                CageCheckResult::Block(format!("cannot modify protected rule: {}", rule_name))
+            }
+            CageAction::FileWrite { path } | CageAction::FileDelete { path } if Self::is_rule_file(path) => {
+                CageCheckResult::Block(format!("cannot modify protected rule file: {}", path.display()))
             }
             _ => CageCheckResult::Pass,
         }
     }
 }
 
-/// The caging engine that runs all cages in sequence.
-///
-/// First Block result short-circuits: the action is prevented.
-/// Warn results are collected but do not prevent the action.
+/// Runs the cages in sequence. The first `Block` stops the action; warnings
+/// are collected and do not stop it.
 pub struct CagingEngine {
     cages: Vec<Box<dyn Cage>>,
 }
@@ -278,8 +184,8 @@ pub struct CagingEngine {
 #[derive(Debug)]
 pub struct CagingResult {
     pub allowed: bool,
-    pub warnings: Vec<(String, String)>,  // (cage_name, message)
-    pub block: Option<(String, String)>,  // (cage_name, message)
+    pub warnings: Vec<(String, String)>,
+    pub block: Option<(String, String)>,
 }
 
 impl CagingEngine {
@@ -287,37 +193,44 @@ impl CagingEngine {
         Self { cages }
     }
 
+    /// The standard cage set, in the order they run: Specification, Memory,
+    /// Meta, Action, Verification. Meta runs before Action so a write to the
+    /// constitution is reported as a rule change.
+    pub fn standard(sandbox: SandboxGuard, require_spec_complete: bool, require_verification: bool) -> Self {
+        let mut cages: Vec<Box<dyn Cage>> = Vec::new();
+        if require_spec_complete {
+            cages.push(Box::new(SpecificationCage));
+        }
+        cages.push(Box::new(MemoryCage));
+        cages.push(Box::new(MetaCage));
+        cages.push(Box::new(ActionCage::new(sandbox)));
+        if require_verification {
+            cages.push(Box::new(VerificationCage));
+        }
+        Self::new(cages)
+    }
+
+    /// Names of the registered cages, in order.
+    pub fn names(&self) -> Vec<&str> {
+        self.cages.iter().map(|c| c.name()).collect()
+    }
+
     /// Run all cages against the given context.
-    /// Goal-only cages are skipped when context.goal_mode is false.
     pub fn check(&self, context: &CageContext) -> CagingResult {
         let mut warnings = Vec::new();
-
         for cage in &self.cages {
-            // Skip goal-only cages in Conversation Mode
             if cage.goal_only() && !context.goal_mode {
                 continue;
             }
-
             match cage.check(context) {
                 CageCheckResult::Pass => {}
-                CageCheckResult::Warn(msg) => {
-                    warnings.push((cage.name().to_string(), msg));
-                }
+                CageCheckResult::Warn(msg) => warnings.push((cage.name().to_string(), msg)),
                 CageCheckResult::Block(msg) => {
-                    return CagingResult {
-                        allowed: false,
-                        warnings,
-                        block: Some((cage.name().to_string(), msg)),
-                    };
+                    return CagingResult { allowed: false, warnings, block: Some((cage.name().to_string(), msg)) };
                 }
             }
         }
-
-        CagingResult {
-            allowed: true,
-            warnings,
-            block: None,
-        }
+        CagingResult { allowed: true, warnings, block: None }
     }
 }
 
@@ -331,500 +244,118 @@ mod tests {
             PathBuf::from("/projects/myapp"),
             vec![PathBuf::from("/projects/myapp/.terra/constitution.toml")],
         );
-
-        CagingEngine::new(vec![
-            Box::new(SpecificationCage),
-            Box::new(MemoryCage),
-            Box::new(ActionCage::new(sandbox)),
-            Box::new(VerificationCage),
-            Box::new(KnowledgeCage),
-            Box::new(ConvergenceCage),
-            Box::new(MetaCage),
-        ])
+        CagingEngine::standard(sandbox, true, true)
     }
 
-    // T-CG-004
-    #[test]
-    fn spec_cage_passes_complete() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ExecuteTask { spec_complete: true },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed);
+    fn goal(action: CageAction) -> CageContext {
+        CageContext::goal("main", action)
     }
 
-    // T-CG-005
-    #[test]
-    fn spec_cage_blocks_incomplete() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ExecuteTask { spec_complete: false },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "specification");
+    fn blocked_by(result: &CagingResult) -> &str {
+        &result.block.as_ref().expect("should be blocked").0
     }
 
-    // T-CG-006
     #[test]
-    fn memory_cage_owner_write() {
+    fn standard_order() {
+        assert_eq!(test_engine().names(), ["specification", "memory", "meta", "action", "verification"]);
+        let sandbox = SandboxGuard::new(PathBuf::from("/p"), vec![]);
+        assert_eq!(CagingEngine::standard(sandbox, false, false).names(), ["memory", "meta", "action"]);
+    }
+
+    #[test]
+    fn spec_cage_gates_task_start() {
         let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::MemoryWrite {
-                key: "key1".into(),
-                owner: "main".into(),
-                level: "L2".into(),
-                is_user_command: false,
-            },
-            goal_mode: true,
-        };
+        assert!(engine.check(&goal(CageAction::ExecuteTask { spec_complete: true })).allowed);
+        let result = engine.check(&goal(CageAction::ExecuteTask { spec_complete: false }));
+        assert_eq!(blocked_by(&result), "specification");
+    }
+
+    #[test]
+    fn spec_cage_blocks_changes_while_goal_has_open_questions() {
+        let engine = test_engine();
+        let write = CageAction::FileWrite { path: PathBuf::from("/projects/myapp/src/main.rs") };
+        let mut ctx = goal(write.clone());
+        ctx.spec_complete = false;
+        assert_eq!(blocked_by(&engine.check(&ctx)), "specification");
+
+        ctx.action = CageAction::ShellExec { command: "cargo test".into() };
+        assert_eq!(blocked_by(&engine.check(&ctx)), "specification");
+
+        // Reads and memory notes are still fine: the agent may investigate.
+        ctx.action = CageAction::FileRead { path: PathBuf::from("/projects/myapp/src/main.rs") };
         assert!(engine.check(&ctx).allowed);
+
+        // A complete spec lifts the gate; conversation mode never has it.
+        assert!(engine.check(&goal(write.clone())).allowed);
+        let mut conv = CageContext::conversation("main", write);
+        conv.spec_complete = false;
+        assert!(engine.check(&conv).allowed);
     }
 
-    // T-CG-007
     #[test]
-    fn memory_cage_non_owner_blocked() {
+    fn memory_cage_ownership_and_levels() {
         let engine = test_engine();
-        let ctx = CageContext {
-            agent: "worker".into(),
+        let write = |agent: &str, owner: &str, level: &str, user: bool, goal_mode: bool| CageContext {
+            agent: agent.into(),
             action: CageAction::MemoryWrite {
-                key: "key1".into(),
-                owner: "main".into(),
-                level: "L2".into(),
-                is_user_command: false,
+                key: "k".into(),
+                owner: owner.into(),
+                level: level.into(),
+                is_user_command: user,
             },
-            goal_mode: true,
+            goal_mode,
+            spec_complete: true,
         };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "memory");
-    }
-
-    // T-CG-008
-    #[test]
-    fn memory_cage_any_read() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "worker".into(),
-            action: CageAction::FileRead {
-                path: PathBuf::from("/projects/myapp/src/main.rs"),
-            },
-            goal_mode: true,
-        };
-        assert!(engine.check(&ctx).allowed);
-    }
-
-    // T-CG-015
-    #[test]
-    fn verify_cage_no_verification() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ClaimComplete { verified: false },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "verification");
-    }
-
-    // T-CG-016
-    #[test]
-    fn verify_cage_after_verification() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ClaimComplete { verified: true },
-            goal_mode: true,
-        };
-        assert!(engine.check(&ctx).allowed);
-    }
-
-    // T-CG-017
-    #[test]
-    fn meta_cage_constitution_change() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ModifyRule {
-                rule_name: "constitution.article_1".into(),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "meta");
-    }
-
-    // T-CG-018
-    #[test]
-    fn meta_cage_rule_change() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ModifyRule {
-                rule_name: "sandbox.root".into(),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-    }
-
-    // Sandbox via engine
-    #[test]
-    fn action_cage_write_outside() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "worker".into(),
-            action: CageAction::FileWrite {
-                path: PathBuf::from("/etc/passwd"),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "action");
-    }
-
-    #[test]
-    fn action_cage_write_protected() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::FileWrite {
-                path: PathBuf::from("/projects/myapp/.terra/constitution.toml"),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "action");
-    }
-
-    // Warn flows through engine (T-CG-002)
-    #[test]
-    fn warn_logs_allows_action() {
-        // Create engine with a cage that warns
-        struct WarnCage;
-        impl Cage for WarnCage {
-            fn name(&self) -> &str { "warn_test" }
-            fn check(&self, _ctx: &CageContext) -> CageCheckResult {
-                CageCheckResult::Warn("proceed with caution".into())
-            }
-        }
-
-        let engine = CagingEngine::new(vec![
-            Box::new(WarnCage),
-            Box::new(SpecificationCage),
-        ]);
-
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ExecuteTask { spec_complete: true },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed, "warn should not block");
-        assert_eq!(result.warnings.len(), 1);
-        assert_eq!(result.warnings[0].0, "warn_test");
-        assert!(result.warnings[0].1.contains("caution"));
-    }
-
-    // Short-circuit: first block wins
-    #[test]
-    fn first_block_short_circuits() {
-        let engine = test_engine();
-        // Incomplete spec AND non-owner write — spec cage blocks first
-        let ctx = CageContext {
-            agent: "worker".into(),
-            action: CageAction::ExecuteTask { spec_complete: false },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "specification");
-    }
-
-    // T-CG-020: convergence_stops_after_accepted
-    #[test]
-    fn convergence_warns_after_accepted() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ExploreAfterAccepted {
-                path_id: "solution_v2".into(),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        // Convergence cage warns, does not block
-        assert!(result.allowed, "convergence should warn, not block");
-        assert!(
-            result.warnings.iter().any(|w| w.0 == "convergence"),
-            "should have convergence warning"
-        );
-    }
-
-    // Knowledge cage: low-authority contradicted by higher → blocked
-    #[test]
-    fn knowledge_cage_blocks_contradicted() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "worker".into(),
-            action: CageAction::KnowledgeClaim {
-                source: KnowledgeSource::Assumption,
-                contradicted_by_higher: true,
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "knowledge");
-    }
-
-    // Knowledge cage: assumption without contradiction → warn
-    #[test]
-    fn knowledge_cage_warns_assumption() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::KnowledgeClaim {
-                source: KnowledgeSource::Assumption,
-                contradicted_by_higher: false,
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed, "uncontradicted assumption should pass with warning");
-        assert!(result.warnings.iter().any(|w| w.0 == "knowledge"));
-    }
-
-    // Knowledge cage: code source, no contradiction → pass clean
-    #[test]
-    fn knowledge_cage_passes_code_source() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::KnowledgeClaim {
-                source: KnowledgeSource::Code,
-                contradicted_by_higher: false,
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed);
-        assert!(result.warnings.is_empty());
-    }
-
-    // Knowledge source ordering
-    #[test]
-    fn knowledge_source_ordering() {
-        assert!(KnowledgeSource::Assumption < KnowledgeSource::Memory);
-        assert!(KnowledgeSource::Memory < KnowledgeSource::Documentation);
-        assert!(KnowledgeSource::Documentation < KnowledgeSource::Code);
-    }
-
-    // T-DM-004: goal_mode_cages_active
-    #[test]
-    fn goal_mode_cages_active() {
-        let engine = test_engine();
-        // In Goal Mode, SpecificationCage blocks incomplete specs
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ExecuteTask { spec_complete: false },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed, "spec cage should block in goal mode");
-        assert_eq!(result.block.as_ref().unwrap().0, "specification");
-    }
-
-    // T-DM-005: conversation_cages_minimal
-    #[test]
-    fn conversation_cages_minimal() {
-        let engine = test_engine();
-        // In Conversation Mode, SpecificationCage is skipped
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ExecuteTask { spec_complete: false },
-            goal_mode: false,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed, "spec cage should be skipped in conversation mode");
-    }
-
-    // T-DM-006: conversation_no_spec_required
-    #[test]
-    fn conversation_no_spec_required() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ClaimComplete { verified: false },
-            goal_mode: false,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed, "verification cage should be skipped in conversation mode");
-
-        let ctx_meta = CageContext {
-            agent: "main".into(),
-            action: CageAction::ModifyRule { rule_name: "test".into() },
-            goal_mode: false,
-        };
-        let result_meta = engine.check(&ctx_meta);
-        assert!(!result_meta.allowed, "meta cage should still block in conversation mode");
-    }
-
-    // --- Memory Write Permission Tests (T-MW) ---
-
-    // T-MW-001: L0 write blocked always
-    #[test]
-    fn l0_write_blocked_always() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::MemoryWrite {
-                key: "const".into(), owner: "main".into(),
-                level: "L0".into(), is_user_command: false,
-            },
-            goal_mode: true,
-        };
-        assert!(!engine.check(&ctx).allowed);
-
-        // Even user command cannot write L0
-        let ctx_user = CageContext {
-            agent: "user".into(),
-            action: CageAction::MemoryWrite {
-                key: "const".into(), owner: "user".into(),
-                level: "L0".into(), is_user_command: true,
-            },
-            goal_mode: true,
-        };
-        assert!(!engine.check(&ctx_user).allowed);
-    }
-
-    // T-MW-002: L1 direct write blocked for agent
-    #[test]
-    fn l1_direct_write_blocked() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "worker".into(),
-            action: CageAction::MemoryWrite {
-                key: "knowledge".into(), owner: "worker".into(),
-                level: "L1".into(), is_user_command: false,
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert!(result.block.unwrap().1.contains("L1"));
-    }
-
-    // T-MW-003: L1 user /remember allowed
-    #[test]
-    fn l1_user_remember_allowed() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "user".into(),
-            action: CageAction::MemoryWrite {
-                key: "knowledge".into(), owner: "user".into(),
-                level: "L1".into(), is_user_command: true,
-            },
-            goal_mode: false,
-        };
-        assert!(engine.check(&ctx).allowed);
-    }
-
-    // T-MW-004: L2 write allowed both modes
-    #[test]
-    fn l2_write_allowed_both_modes() {
-        let engine = test_engine();
-        for goal_mode in [true, false] {
-            let ctx = CageContext {
-                agent: "main".into(),
-                action: CageAction::MemoryWrite {
-                    key: "task_data".into(), owner: "main".into(),
-                    level: "L2".into(), is_user_command: false,
-                },
-                goal_mode,
-            };
-            assert!(engine.check(&ctx).allowed, "L2 should be writable in goal_mode={}", goal_mode);
+        assert!(engine.check(&write("main", "main", "L2", false, true)).allowed);
+        assert_eq!(blocked_by(&engine.check(&write("worker", "main", "L2", false, true))), "memory");
+        assert!(!engine.check(&write("main", "main", "L0", false, true)).allowed);
+        assert!(!engine.check(&write("user", "user", "L0", true, true)).allowed, "even the user cannot write L0");
+        assert!(!engine.check(&write("worker", "worker", "L1", false, true)).allowed);
+        assert!(engine.check(&write("user", "user", "L1", true, false)).allowed);
+        assert!(!engine.check(&write("main", "main", "L3", false, false)).allowed);
+        assert!(engine.check(&write("main", "main", "L3", false, true)).allowed);
+        for level in ["L2", "L4", "L5", "L6"] {
+            assert!(engine.check(&write("main", "main", level, false, false)).allowed, "{level}");
         }
     }
 
-    // T-MW-005: L3 write goal only
     #[test]
-    fn l3_write_goal_only() {
+    fn action_cage_sandbox_and_shell_patterns() {
         let engine = test_engine();
-        // Conversation mode → blocked
-        let ctx_conv = CageContext {
-            agent: "main".into(),
-            action: CageAction::MemoryWrite {
-                key: "path".into(), owner: "main".into(),
-                level: "L3".into(), is_user_command: false,
-            },
-            goal_mode: false,
-        };
-        assert!(!engine.check(&ctx_conv).allowed);
-
-        // Goal mode → allowed
-        let ctx_goal = CageContext {
-            agent: "main".into(),
-            action: CageAction::MemoryWrite {
-                key: "path".into(), owner: "main".into(),
-                level: "L3".into(), is_user_command: false,
-            },
-            goal_mode: true,
-        };
-        assert!(engine.check(&ctx_goal).allowed);
+        let outside = engine.check(&goal(CageAction::FileWrite { path: PathBuf::from("/etc/passwd") }));
+        assert_eq!(blocked_by(&outside), "action");
+        assert!(engine.check(&goal(CageAction::FileRead { path: PathBuf::from("/etc/hosts") })).allowed);
+        assert!(engine.check(&goal(CageAction::ShellExec { command: "cargo test".into() })).allowed);
+        for cmd in ["rm -rf /", "sudo mkfs.ext4 /dev/sda", "echo x > /dev/sda", "dd if=/dev/zero of=/dev/sda"] {
+            let result = engine.check(&goal(CageAction::ShellExec { command: cmd.into() }));
+            assert_eq!(blocked_by(&result), "action", "{cmd}");
+        }
     }
 
-    // T-CG-001: pass_allows_action
     #[test]
-    fn pass_allows_action() {
+    fn verification_cage_blocks_unverified_claims_in_goal_mode_only() {
         let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::FileRead {
-                path: PathBuf::from("/projects/myapp/src/main.rs"),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(result.allowed);
-        assert!(result.block.is_none());
+        assert_eq!(blocked_by(&engine.check(&goal(CageAction::ClaimComplete { verified: false }))), "verification");
+        assert!(engine.check(&goal(CageAction::ClaimComplete { verified: true })).allowed);
+        assert!(engine.check(&CageContext::conversation("main", CageAction::ClaimComplete { verified: false })).allowed);
     }
 
-    // T-CG-003: block_prevents_action
     #[test]
-    fn block_prevents_action() {
+    fn meta_cage_blocks_rule_changes_in_every_mode() {
         let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::FileWrite {
-                path: PathBuf::from("/etc/passwd"),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert!(result.block.is_some());
+        let rule = CageAction::ModifyRule { rule_name: "sandbox.root".into() };
+        assert_eq!(blocked_by(&engine.check(&goal(rule.clone()))), "meta");
+        assert_eq!(blocked_by(&engine.check(&CageContext::conversation("main", rule))), "meta");
+        let write = CageAction::FileWrite { path: PathBuf::from("/projects/myapp/.terra/constitution.toml") };
+        assert_eq!(blocked_by(&engine.check(&goal(write))), "meta", "meta runs before action");
     }
 
     fn meta_check(action: CageAction) -> CageCheckResult {
-        MetaCage.check(&CageContext { agent: "main".into(), action, goal_mode: false })
+        MetaCage.check(&CageContext::conversation("main", action))
     }
 
-    // Writes and deletes that land on the constitution are rule changes, even
-    // when the sandbox does not list the constitution as protected.
     #[test]
-    fn meta_cage_blocks_writes_and_deletes_of_the_constitution() {
+    fn meta_cage_resolves_dots_and_case() {
         for path in [
             "/projects/myapp/.terra/constitution.toml",
             "/projects/myapp/.terra/../.terra/constitution.toml",
@@ -834,27 +365,17 @@ mod tests {
             ".terra/constitution.toml",
         ] {
             let path = PathBuf::from(path);
-            let write = meta_check(CageAction::FileWrite { path: path.clone() });
-            assert!(write.is_blocked(), "write to {} should be blocked: {:?}", path.display(), write);
-            let delete = meta_check(CageAction::FileDelete { path: path.clone() });
-            assert!(delete.is_blocked(), "delete of {} should be blocked: {:?}", path.display(), delete);
+            assert!(meta_check(CageAction::FileWrite { path: path.clone() }).is_blocked(), "{}", path.display());
+            assert!(meta_check(CageAction::FileDelete { path }).is_blocked());
         }
-    }
-
-    #[test]
-    fn meta_cage_allows_other_files() {
         for path in [
             "/projects/myapp/.terra/prompt.md",
             "/projects/myapp/.terra/constitution.toml.bak",
             "/projects/myapp/src/constitution.toml",
-            "/projects/myapp/terra/constitution.toml",
         ] {
-            let result = meta_check(CageAction::FileWrite { path: PathBuf::from(path) });
-            assert!(result.is_pass(), "{} should pass: {:?}", path, result);
+            assert!(meta_check(CageAction::FileWrite { path: PathBuf::from(path) }).is_pass(), "{path}");
         }
-        assert!(meta_check(CageAction::FileRead {
-            path: PathBuf::from("/projects/myapp/.terra/constitution.toml"),
-        }).is_pass(), "reading the constitution is not a rule change");
+        assert!(meta_check(CageAction::FileRead { path: PathBuf::from("/projects/myapp/.terra/constitution.toml") }).is_pass());
     }
 
     #[cfg(unix)]
@@ -865,23 +386,27 @@ mod tests {
         std::fs::write(dir.path().join(".terra/constitution.toml"), "[meta]\nversion = 1\n").unwrap();
         let link = dir.path().join("rules.toml");
         std::os::unix::fs::symlink(dir.path().join(".terra/constitution.toml"), &link).unwrap();
-
         assert!(meta_check(CageAction::FileWrite { path: link }).is_blocked());
     }
 
-    // T-CG-019: meta_cage_rule_change_blocks
     #[test]
-    fn meta_cage_rule_change_blocks() {
-        let engine = test_engine();
-        let ctx = CageContext {
-            agent: "main".into(),
-            action: CageAction::ModifyRule {
-                rule_name: "cage.memory.ownership".into(),
-            },
-            goal_mode: true,
-        };
-        let result = engine.check(&ctx);
-        assert!(!result.allowed);
-        assert_eq!(result.block.as_ref().unwrap().0, "meta");
+    fn warnings_do_not_block_and_first_block_wins() {
+        struct WarnCage;
+        impl Cage for WarnCage {
+            fn name(&self) -> &str {
+                "warn_test"
+            }
+            fn check(&self, _ctx: &CageContext) -> CageCheckResult {
+                CageCheckResult::Warn("proceed with caution".into())
+            }
+        }
+        let engine = CagingEngine::new(vec![Box::new(WarnCage), Box::new(SpecificationCage), Box::new(VerificationCage)]);
+        let ok = engine.check(&goal(CageAction::ExecuteTask { spec_complete: true }));
+        assert!(ok.allowed);
+        assert_eq!(ok.warnings, vec![("warn_test".to_string(), "proceed with caution".to_string())]);
+
+        let mut ctx = goal(CageAction::ExecuteTask { spec_complete: false });
+        ctx.spec_complete = false;
+        assert_eq!(blocked_by(&engine.check(&ctx)), "specification");
     }
 }

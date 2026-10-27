@@ -1,12 +1,8 @@
-//! Terra Provider Dispatch
-//!
-//! LLM provider adapter with capability detection,
-//! dispatch policy, retry/backoff, and dry_run mode.
+//! LLM providers: the `ProviderAdapter` trait, an OpenAI-compatible
+//! implementation on `async-openai`, and a keyless dry-run stub.
 
 pub mod adapter;
-pub mod dispatch;
 pub mod openai;
 
-pub use adapter::{ProviderAdapter, ProviderCapability, StreamChunk, StreamEvent};
-pub use dispatch::{DispatchResult, DispatchMode, dispatch};
+pub use adapter::{CompletionRequest, CompletionResponse, DryRunAdapter, Message, ProviderAdapter, ProviderCapability, ToolCall, ToolDef};
 pub use openai::OpenAICompatibleAdapter;

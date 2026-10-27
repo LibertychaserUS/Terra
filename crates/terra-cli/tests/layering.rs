@@ -6,17 +6,14 @@ use std::path::Path;
 /// Layer of every workspace crate. New crates must be added here.
 const LAYERS: &[(&str, u8)] = &[
     ("terra-types", 0),
-    ("terra-core", 0),
     ("terra-memory", 0),
     ("terra-providers", 0),
-    ("terra-protocol", 1),
-    ("terra-trace", 2),
-    ("terra-compile", 2),
-    ("terra-caging", 2),
-    ("terra-executor", 3),
+    ("terra-caging", 0),
+    ("terra-trace", 1),
+    ("terra-executor", 2),
+    ("terra-mcp", 3),
     ("terra-agents", 4),
-    ("terra-mcp", 5),
-    ("terra-cli", 6),
+    ("terra-cli", 5),
 ];
 
 fn layer_of(name: &str) -> u8 {

@@ -98,9 +98,8 @@ pub struct MemoryEntry {
     pub scope: Scope,
     pub level: Level,
     pub owner: String,
-    pub content: Vec<u8>, // MessagePack blob
+    pub content: String,
     pub version: u64,
-    pub ref_count: u64,
     pub alive: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

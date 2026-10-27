@@ -1,10 +1,6 @@
-//! Terra Audit Trail
-//!
-//! Command audit logging with both in-memory and SQLite persistence.
-//! Every command executed by agents is recorded.
+//! The audit trail: append-only, hash-chained, persisted in SQLite.
 
 pub mod audit;
 pub mod persistent;
 
-pub use audit::{AuditLog, AuditEntry};
-pub use persistent::PersistentAuditLog;
+pub use audit::{op_summary, verify_events, AuditEntry, AuditEvent, AuditLog, ChainVerdict, EventKind, GENESIS_HASH};

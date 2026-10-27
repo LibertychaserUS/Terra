@@ -5,15 +5,12 @@ edition.workspace = true
 
 [dependencies]
 terra-types = { path = "../terra-types" }
-terra-protocol = { path = "../terra-protocol" }
 serde.workspace = true
 serde_json.workspace = true
-rmp-serde.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-chrono.workspace = true
 rusqlite.workspace = true
+chrono.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

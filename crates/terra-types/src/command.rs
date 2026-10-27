@@ -4,8 +4,9 @@ use uuid::Uuid;
 
 /// A command from an agent to the Command Executor.
 ///
-/// Agents never write database code directly. They issue commands
-/// from this fixed set, and the executor handles all I/O.
+/// Agents never touch the file system, the memory store or the shell
+/// directly. They issue commands from this fixed set, and the executor
+/// audits them, runs the cages and performs the I/O.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     pub id: String,
@@ -14,7 +15,7 @@ pub struct Command {
     pub op: CommandOp,
 }
 
-/// The fixed set of operations (~15 commands covering all interactions).
+/// The fixed set of operations an agent can request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum CommandOp {
@@ -31,32 +32,20 @@ pub enum CommandOp {
         query: String,
         top_k: u32,
     },
-    ArtifactSave {
-        artifact_type: String,
-        content: serde_json::Value,
-    },
-    ArtifactLoad {
-        artifact_type: String,
-        version: Option<u32>,
-    },
+    /// A structured note in the audit log (mode switches, verdicts, ...).
     TraceEvent {
         event_type: String,
         data: serde_json::Value,
     },
-    TraceCheckpoint {
-        title: String,
-        summary: String,
-    },
+    /// A one-shot model call made through the executor, so it is audited.
+    /// `json` asks the model for a JSON object (structured output).
     ProviderCall {
         system_prompt: String,
         user_prompt: String,
         max_tokens: Option<u32>,
         temperature: Option<f32>,
-        /// Optional output contract name. When set, the contract's format
-        /// instruction is appended to system_prompt, and the response is
-        /// parsed against the contract. Violations → Error.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        output_contract: Option<String>,
+        #[serde(default)]
+        json: bool,
     },
     /// Read a file from the filesystem.
     FileRead {
@@ -93,6 +82,33 @@ pub enum CommandOp {
     },
 }
 
+impl CommandOp {
+    /// The operation's name as it appears in tool lists and the audit log.
+    pub fn name(&self) -> &'static str {
+        match self {
+            CommandOp::MemWrite { .. } => "MemWrite",
+            CommandOp::MemRead { .. } => "MemRead",
+            CommandOp::MemSearch { .. } => "MemSearch",
+            CommandOp::TraceEvent { .. } => "TraceEvent",
+            CommandOp::ProviderCall { .. } => "ProviderCall",
+            CommandOp::FileRead { .. } => "FileRead",
+            CommandOp::FileWrite { .. } => "FileWrite",
+            CommandOp::FileDelete { .. } => "FileDelete",
+            CommandOp::ShellExec { .. } => "ShellExec",
+            CommandOp::ExecuteTask { .. } => "ExecuteTask",
+            CommandOp::ClaimComplete { .. } => "ClaimComplete",
+        }
+    }
+
+    /// Whether the operation can change the project (file system or shell).
+    pub fn mutates(&self) -> bool {
+        matches!(
+            self,
+            CommandOp::FileWrite { .. } | CommandOp::FileDelete { .. } | CommandOp::ShellExec { .. }
+        )
+    }
+}
+
 /// Result of executing a command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
@@ -100,8 +116,7 @@ pub struct CommandResult {
     pub status: CommandStatus,
     pub data: Option<serde_json::Value>,
     pub error: Option<String>,
-    /// Program-generated notification for user display (e.g., auto-record alerts).
-    /// Not LLM-generated. Format: `[Terra] Recorded → L{n}: "{summary}"`
+    /// Program-generated note for the user (not model output).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification: Option<String>,
 }
@@ -146,6 +161,16 @@ impl CommandResult {
             notification: None,
         }
     }
+
+    pub fn denied(command_id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            command_id: command_id.into(),
+            status: CommandStatus::PermissionDenied,
+            data: None,
+            error: Some(reason.into()),
+            notification: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +189,7 @@ mod tests {
             },
         );
         assert_eq!(cmd.agent, "main");
+        assert_eq!(cmd.op.name(), "MemWrite");
         if let CommandOp::MemWrite { ref key, ref scope, ref level, .. } = cmd.op {
             assert_eq!(key, "auth_pattern");
             assert_eq!(scope, "project");
@@ -174,76 +200,26 @@ mod tests {
     }
 
     #[test]
-    fn command_mem_read() {
-        let cmd = Command::new("worker", CommandOp::MemRead { key: "config".into() });
-        if let CommandOp::MemRead { ref key } = cmd.op {
-            assert_eq!(key, "config");
-        } else {
-            panic!("expected MemRead");
-        }
+    fn mutating_ops() {
+        assert!(CommandOp::FileWrite { path: "a".into(), content: String::new() }.mutates());
+        assert!(CommandOp::ShellExec { command: "ls".into(), workdir: None, timeout_ms: None }.mutates());
+        assert!(!CommandOp::FileRead { path: "a".into() }.mutates());
+        assert!(!CommandOp::MemRead { key: "k".into() }.mutates());
     }
 
     #[test]
-    fn command_mem_search() {
-        let cmd = Command::new(
-            "main",
-            CommandOp::MemSearch { query: "auth bug".into(), top_k: 5 },
-        );
-        if let CommandOp::MemSearch { ref query, top_k } = cmd.op {
-            assert_eq!(query, "auth bug");
-            assert_eq!(top_k, 5);
-        } else {
-            panic!("expected MemSearch");
-        }
+    fn json_roundtrip_keeps_tag() {
+        let cmd = Command::new("main", CommandOp::MemSearch { query: "auth bug".into(), top_k: 5 });
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"cmd\":\"mem_search\""));
+        let back: Command = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, cmd.id);
     }
 
     #[test]
-    fn command_artifact_save() {
-        let cmd = Command::new(
-            "main",
-            CommandOp::ArtifactSave {
-                artifact_type: "plan".into(),
-                content: serde_json::json!({"steps": ["step1", "step2"]}),
-            },
-        );
-        if let CommandOp::ArtifactSave { ref artifact_type, ref content } = cmd.op {
-            assert_eq!(artifact_type, "plan");
-            assert!(content.get("steps").is_some());
-        } else {
-            panic!("expected ArtifactSave");
-        }
-    }
-
-    #[test]
-    fn command_trace_checkpoint() {
-        let cmd = Command::new(
-            "main",
-            CommandOp::TraceCheckpoint {
-                title: "MVP done".into(),
-                summary: "All tests pass".into(),
-            },
-        );
-        if let CommandOp::TraceCheckpoint { ref title, ref summary } = cmd.op {
-            assert_eq!(title, "MVP done");
-            assert_eq!(summary, "All tests pass");
-        } else {
-            panic!("expected TraceCheckpoint");
-        }
-    }
-
-    #[test]
-    fn command_result_ok() {
-        let result = CommandResult::ok("cmd-1", Some(serde_json::json!({"count": 3})));
-        assert_eq!(result.status, CommandStatus::Ok);
-        assert!(result.data.is_some());
-        assert!(result.error.is_none());
-    }
-
-    #[test]
-    fn command_result_error() {
-        let result = CommandResult::err("cmd-2", "not found");
-        assert_eq!(result.status, CommandStatus::Error);
-        assert!(result.data.is_none());
-        assert_eq!(result.error.as_deref(), Some("not found"));
+    fn command_result_constructors() {
+        assert_eq!(CommandResult::ok("c", None).status, CommandStatus::Ok);
+        assert_eq!(CommandResult::err("c", "boom").error.as_deref(), Some("boom"));
+        assert_eq!(CommandResult::denied("c", "no").status, CommandStatus::PermissionDenied);
     }
 }

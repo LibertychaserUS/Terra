@@ -1,70 +1,81 @@
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use tracing::{info, warn};
 
 use terra_caging::cage::{CageAction, CageContext};
 use terra_caging::engine::CagingEngine;
-use terra_memory::{MemoryDatabase, ArtifactStore, VectorIndex};
-use terra_protocol::command::{Command, CommandOp, CommandResult, CommandStatus};
+use terra_memory::MemoryDatabase;
+use terra_providers::adapter::ProviderAdapter;
 use terra_trace::AuditLog;
+use terra_types::command::{Command, CommandOp, CommandResult};
 
+use crate::isolation::Isolation;
 use crate::router;
 
-/// Generate a short status text for a CommandOp (for Event Bus).
+/// What the cages need to know about the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionMode {
+    pub goal: bool,
+    /// Whether the active goal's spec has no open questions.
+    pub spec_complete: bool,
+}
+
+impl SessionMode {
+    pub const CONVERSATION: SessionMode = SessionMode { goal: false, spec_complete: true };
+}
+
+/// Generate a short status text for a CommandOp (for the event bus).
 fn status_text(op: &CommandOp) -> String {
+    let base = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     match op {
-        CommandOp::FileRead { path } => format!("Reading {}", path.rsplit('/').next().unwrap_or(path)),
-        CommandOp::FileWrite { path, .. } => format!("Writing {}", path.rsplit('/').next().unwrap_or(path)),
-        CommandOp::FileDelete { path } => format!("Deleting {}", path.rsplit('/').next().unwrap_or(path)),
-        CommandOp::ShellExec { command, .. } => {
-            format!("Running: {}", terra_types::text::truncate_ellipsis(command, 30))
-        }
+        CommandOp::FileRead { path } => format!("Reading {}", base(path)),
+        CommandOp::FileWrite { path, .. } => format!("Writing {}", base(path)),
+        CommandOp::FileDelete { path } => format!("Deleting {}", base(path)),
+        CommandOp::ShellExec { command, .. } => format!("Running: {}", terra_types::text::truncate_ellipsis(command, 40)),
         CommandOp::ProviderCall { .. } => "Thinking...".into(),
         CommandOp::MemRead { key } => format!("Reading memory '{}'", key),
         CommandOp::MemWrite { key, .. } => format!("Writing memory '{}'", key),
         CommandOp::MemSearch { .. } => "Searching memory...".into(),
-        CommandOp::ArtifactSave { artifact_type, .. } => format!("Saving {}", artifact_type),
-        CommandOp::ArtifactLoad { artifact_type, .. } => format!("Loading {}", artifact_type),
         CommandOp::TraceEvent { event_type, .. } => format!("Event: {}", event_type),
-        CommandOp::TraceCheckpoint { title, .. } => format!("Checkpoint: {}", title),
         CommandOp::ExecuteTask { .. } => "Checking the task spec".into(),
         CommandOp::ClaimComplete { .. } => "Checking the completion claim".into(),
     }
 }
 
-/// The Command Executor — single gateway for all agent-system interactions.
+/// The single gateway between agents and the world.
 ///
-/// Pipeline for every command:
-/// 1. Record command in audit log (before execution)
-/// 2. Run CagingEngine.check() on the action
-/// 3. If cage passes: execute via router
-/// 4. Record result in audit log (after execution, with duration)
-///
-/// If cage blocks: return PermissionDenied without executing.
+/// Every command: audit (before) → cages → execute → audit (after).
+/// A blocked command is audited and returns `PermissionDenied` without
+/// running.
 pub struct CommandExecutor {
     memory: Arc<MemoryDatabase>,
-    artifacts: Arc<ArtifactStore>,
-    search_index: std::sync::Mutex<VectorIndex>,
     audit: Arc<AuditLog>,
     caging: Arc<CagingEngine>,
-    provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
+    provider: Arc<dyn ProviderAdapter>,
     event_bus: Arc<dyn terra_types::EventBus>,
+    mode: RwLock<SessionMode>,
+    isolation: Isolation,
+    project_root: PathBuf,
 }
 
 impl CommandExecutor {
     pub fn new(
         memory: Arc<MemoryDatabase>,
-        artifacts: Arc<ArtifactStore>,
         audit: Arc<AuditLog>,
         caging: Arc<CagingEngine>,
-        provider: Arc<dyn terra_providers::adapter::ProviderAdapter>,
+        provider: Arc<dyn ProviderAdapter>,
     ) -> Self {
         Self {
-            memory, artifacts,
-            search_index: std::sync::Mutex::new(VectorIndex::new()),
-            audit, caging, provider,
+            memory,
+            audit,
+            caging,
+            provider,
             event_bus: Arc::new(terra_types::NullBus),
+            mode: RwLock::new(SessionMode::CONVERSATION),
+            isolation: Isolation::None,
+            project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 
@@ -74,35 +85,45 @@ impl CommandExecutor {
         self
     }
 
-    /// Expose the provider adapter for direct calls (used by REPL agent loop).
-    ///
-    /// The REPL needs direct provider access for the tool-call loop because
-    /// `CompletionRequest` carries tools/tool_results fields that `CommandOp::ProviderCall`
-    /// does not support. Individual tool executions still go through `execute()` with
-    /// full cage checking and audit.
-    pub fn provider(&self) -> &Arc<dyn terra_providers::adapter::ProviderAdapter> {
+    /// Confine shell commands with this isolation.
+    pub fn with_isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
+        self
+    }
+
+    /// Working directory for shell commands and relative paths.
+    pub fn with_project_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.project_root = root.into();
+        self
+    }
+
+    pub fn provider(&self) -> &Arc<dyn ProviderAdapter> {
         &self.provider
     }
 
-    /// Clean up memory entries for a given scope (lifecycle boundary).
-    /// Called by SessionManager when a goal/session ends.
-    /// The audit trail this executor records into.
     pub fn audit(&self) -> &Arc<AuditLog> {
         &self.audit
     }
 
-    pub fn cleanup_memory_scope(&self, scope: terra_memory::types::Scope) -> usize {
-        self.memory.cleanup_scope(scope).unwrap_or(0)
+    pub fn memory(&self) -> &Arc<MemoryDatabase> {
+        &self.memory
     }
 
-    /// Increment ref_count for a memory entry (pointer registered).
-    pub fn increment_memory_ref(&self, key: &str) {
-        let _ = self.memory.increment_ref(key);
+    pub fn isolation(&self) -> &Isolation {
+        &self.isolation
     }
 
-    /// Decrement ref_count for a memory entry (pointer unregistered).
-    pub fn decrement_memory_ref(&self, key: &str) {
-        let _ = self.memory.decrement_ref(key);
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// Tell the cages which mode the session is in.
+    pub fn set_mode(&self, mode: SessionMode) {
+        *self.mode.write().unwrap_or_else(|e| e.into_inner()) = mode;
+    }
+
+    pub fn mode(&self) -> SessionMode {
+        *self.mode.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Execute a command through the full pipeline.
@@ -111,146 +132,96 @@ impl CommandExecutor {
         let agent = cmd.agent.clone();
         let cmd_id = cmd.id.clone();
 
-        // 1. Audit: record before execution
+        // 1. Audit before execution
         let seq = self.audit.record_command(cmd.clone());
 
-        // 2. Cage check
-        let cage_context = self.command_to_cage_context(&cmd.op, &agent);
-        let cage_result = self.caging.check(&cage_context);
-
-        if !cage_result.allowed {
-            let (cage_name, reason) = cage_result.block.unwrap_or(("unknown".into(), "blocked".into()));
-            // Gates (task start, completion claim) report their outcome to the
-            // user themselves, so a block there is routine, not a warning.
+        // 2. Cages
+        let context = self.cage_context(&cmd.op, &agent);
+        let verdict = self.caging.check(&context);
+        if !verdict.allowed {
+            let (cage, reason) = verdict.block.unwrap_or(("unknown".into(), "blocked".into()));
             if matches!(cmd.op, CommandOp::ExecuteTask { .. } | CommandOp::ClaimComplete { .. }) {
-                info!(agent = %agent, cage = %cage_name, reason = %reason, "gate blocked by cage");
+                info!(agent = %agent, cage = %cage, reason = %reason, "gate blocked by cage");
             } else {
-                warn!(
-                    agent = %agent,
-                    cage = %cage_name,
-                    reason = %reason,
-                    "command blocked by cage"
-                );
+                warn!(agent = %agent, cage = %cage, reason = %reason, "command blocked by cage");
             }
-
-            let result = CommandResult {
-                command_id: cmd_id,
-                status: CommandStatus::PermissionDenied,
-                data: None,
-                error: Some(format!("cage '{}' blocked: {}", cage_name, reason)),
-                notification: None,
-            };
-
-            let elapsed = start.elapsed().as_micros() as u64;
-            self.audit.record_result(seq, result.clone(), elapsed);
+            let result = CommandResult::denied(cmd_id, format!("cage '{}' blocked: {}", cage, reason));
+            self.audit.record_result(seq, result.clone(), start.elapsed().as_micros() as u64);
             return result;
         }
-
-        // Log any warnings
-        for (cage_name, warning) in &cage_result.warnings {
-            // Expected for every shell call; logged, not shown in the chat.
-            info!(cage = %cage_name, warning = %warning, "cage warning");
+        for (cage, warning) in &verdict.warnings {
+            info!(cage = %cage, warning = %warning, "cage warning");
         }
 
-        // 3. Emit start event
-        self.event_bus.emit(terra_types::StreamEvent::step_start(
-            &format!("{:?}", std::mem::discriminant(&cmd.op)),
-            &status_text(&cmd.op),
-        ));
-
-        // 4. Execute via router
-        let mut result = router::route(
-            &cmd.op, &agent, &self.memory, &self.artifacts,
-            &self.search_index, &self.provider,
-        ).await;
+        // 3. Execute
+        self.event_bus.emit(terra_types::StreamEvent::step_start(cmd.op.name(), &status_text(&cmd.op)));
+        let mut result = router::route(&cmd.op, &agent, self).await;
         result.command_id = cmd_id.clone();
 
-        // 3.5. Output Cage: inspect ProviderCall responses
+        // 4. Output cage on model answers
         if matches!(cmd.op, CommandOp::ProviderCall { .. }) {
-            if let Some(ref data) = result.data {
-                if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
-                    match terra_caging::check_output(content) {
-                        terra_caging::OutputCheckResult::Pass => {}
-                        terra_caging::OutputCheckResult::Warn(reason) => {
-                            warn!(agent = %agent, reason = %reason, "output cage warning");
-                        }
-                        terra_caging::OutputCheckResult::Block(reason) => {
-                            warn!(agent = %agent, reason = %reason, "output cage BLOCKED response");
-                            result = CommandResult {
-                                command_id: cmd_id,
-                                status: CommandStatus::PermissionDenied,
-                                data: None,
-                                error: Some(format!("output cage blocked: {}", reason)),
-                                notification: None,
-                            };
-                        }
+            if let Some(content) = result.data.as_ref().and_then(|d| d.get("content")).and_then(|c| c.as_str()) {
+                match terra_caging::check_output(content) {
+                    terra_caging::OutputCheckResult::Pass => {}
+                    terra_caging::OutputCheckResult::Warn(reason) => {
+                        warn!(agent = %agent, reason = %reason, "output cage warning");
+                    }
+                    terra_caging::OutputCheckResult::Block(reason) => {
+                        warn!(agent = %agent, reason = %reason, "output cage blocked response");
+                        result = CommandResult::denied(cmd_id, format!("output cage blocked: {}", reason));
                     }
                 }
             }
         }
 
-        // 5. Audit: record result with duration
+        // 5. Audit after execution
         let elapsed = start.elapsed().as_micros() as u64;
         self.audit.record_result(seq, result.clone(), elapsed);
-
-        // 6. Emit complete event
-        self.event_bus.emit(terra_types::StreamEvent::step_complete(
-            &format!("{:?}", std::mem::discriminant(&cmd.op)),
-        ));
-
-        info!(
-            agent = %agent,
-            seq = seq,
-            status = ?result.status,
-            duration_us = elapsed,
-            "command executed"
-        );
-
+        self.event_bus.emit(terra_types::StreamEvent::step_complete(cmd.op.name()));
+        info!(agent = %agent, seq, status = ?result.status, duration_us = elapsed, "command executed");
         result
     }
 
-    /// Record an LLM call in the audit trail without going through cage/router.
-    ///
-    /// The REPL agent loop calls provider.complete() directly (needs tools/tool_results
-    /// fields that CommandOp::ProviderCall doesn't support). This method ensures those
-    /// calls are still audited.
-    pub fn audit_llm_call(
-        &self,
-        agent: &str,
-        prompt_tokens: u32,
-        completion_tokens: u32,
-        tool_calls_count: usize,
-        iteration: u32,
-    ) {
-        let cmd = Command::new(agent, CommandOp::ProviderCall {
-            system_prompt: format!("[agent_loop iter={}]", iteration),
-            user_prompt: format!("[{} tool_calls]", tool_calls_count),
-            max_tokens: None,
-            temperature: None,
-            output_contract: None,
-        });
+    /// Record a command the user declined at the confirmation prompt. It
+    /// never ran, but the attempt is part of the record.
+    pub fn record_declined(&self, cmd: Command) -> CommandResult {
+        let seq = self.audit.record_command(cmd.clone());
+        let result = CommandResult::denied(cmd.id, "declined by user at the confirmation prompt");
+        self.audit.record_result(seq, result.clone(), 0);
+        result
+    }
+
+    /// Record a model call the agent loop made directly (it needs tools, which
+    /// `ProviderCall` does not carry), so every call is in the audit log.
+    pub fn audit_llm_call(&self, agent: &str, prompt_tokens: u32, completion_tokens: u32, tool_calls: usize, iteration: u32) {
+        let cmd = Command::new(
+            agent,
+            CommandOp::ProviderCall {
+                system_prompt: format!("[agent_loop iter={}]", iteration),
+                user_prompt: format!("[{} tool_calls]", tool_calls),
+                max_tokens: None,
+                temperature: None,
+                json: false,
+            },
+        );
         let seq = self.audit.record_command(cmd);
-        let result = CommandResult::ok("", Some(serde_json::json!({
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "tool_calls": tool_calls_count,
-            "iteration": iteration,
-            "source": "agent_loop",
-        })));
+        let result = CommandResult::ok(
+            "",
+            Some(serde_json::json!({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "tool_calls": tool_calls,
+                "iteration": iteration,
+                "source": "agent_loop",
+            })),
+        );
         self.audit.record_result(seq, result, 0);
     }
 
-    /// Map a CommandOp to a CageContext for cage checking.
-    fn command_to_cage_context(&self, op: &CommandOp, agent: &str) -> CageContext {
+    fn cage_context(&self, op: &CommandOp, agent: &str) -> CageContext {
         let action = match op {
             CommandOp::MemWrite { key, level, .. } => {
-                // Check if agent is owner of existing key
-                let owner = self.memory.read(key)
-                    .ok()
-                    .flatten()
-                    .map(|e| e.owner.clone())
-                    .unwrap_or_else(|| agent.to_string());
-
+                let owner = self.memory.owner_of(key).ok().flatten().unwrap_or_else(|| agent.to_string());
                 CageAction::MemoryWrite {
                     key: key.clone(),
                     owner,
@@ -258,68 +229,27 @@ impl CommandExecutor {
                     is_user_command: agent == "user",
                 }
             }
-            CommandOp::MemRead { .. } => {
-                CageAction::FileRead {
-                    path: std::path::PathBuf::from("memory://read"),
-                }
+            CommandOp::MemRead { .. } | CommandOp::MemSearch { .. } | CommandOp::TraceEvent { .. } | CommandOp::ProviderCall { .. } => {
+                CageAction::Internal
             }
-            CommandOp::MemSearch { .. } => {
-                CageAction::FileRead {
-                    path: std::path::PathBuf::from("memory://search"),
-                }
-            }
-            CommandOp::ArtifactSave { .. } => {
-                CageAction::FileWrite {
-                    path: std::path::PathBuf::from("artifact://save"),
-                }
-            }
-            CommandOp::ArtifactLoad { .. } => {
-                CageAction::FileRead {
-                    path: std::path::PathBuf::from("artifact://load"),
-                }
-            }
-            CommandOp::TraceEvent { .. } | CommandOp::TraceCheckpoint { .. } => {
-                // Trace operations are always allowed
-                CageAction::ExecuteTask { spec_complete: true }
-            }
-            CommandOp::ProviderCall { .. } => {
-                // Provider calls are allowed (they go through the pipeline)
-                CageAction::ExecuteTask { spec_complete: true }
-            }
-            CommandOp::FileRead { path } => {
-                CageAction::FileRead {
-                    path: std::path::PathBuf::from(path),
-                }
-            }
-            CommandOp::FileWrite { path, .. } => {
-                CageAction::FileWrite {
-                    path: std::path::PathBuf::from(path),
-                }
-            }
-            CommandOp::FileDelete { path } => {
-                CageAction::FileDelete {
-                    path: std::path::PathBuf::from(path),
-                }
-            }
-            CommandOp::ShellExec { command, .. } => {
-                CageAction::ShellExec {
-                    command: command.clone(),
-                }
-            }
-            CommandOp::ExecuteTask { open_questions, .. } => {
-                CageAction::ExecuteTask {
-                    spec_complete: open_questions.is_empty(),
-                }
-            }
-            CommandOp::ClaimComplete { verified, .. } => {
-                CageAction::ClaimComplete { verified: *verified }
-            }
+            CommandOp::FileRead { path } => CageAction::FileRead { path: self.absolute(path) },
+            CommandOp::FileWrite { path, .. } => CageAction::FileWrite { path: self.absolute(path) },
+            CommandOp::FileDelete { path } => CageAction::FileDelete { path: self.absolute(path) },
+            CommandOp::ShellExec { command, .. } => CageAction::ShellExec { command: command.clone() },
+            CommandOp::ExecuteTask { open_questions, .. } => CageAction::ExecuteTask { spec_complete: open_questions.is_empty() },
+            CommandOp::ClaimComplete { verified, .. } => CageAction::ClaimComplete { verified: *verified },
         };
+        let mode = self.mode();
+        CageContext { agent: agent.to_string(), action, goal_mode: mode.goal, spec_complete: mode.spec_complete }
+    }
 
-        CageContext {
-            agent: agent.to_string(),
-            action,
-            goal_mode: true, // TODO: receive mode from session manager
+    /// Resolve a path the way the router will open it.
+    pub(crate) fn absolute(&self, path: &str) -> PathBuf {
+        let p = Path::new(path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.project_root.join(p)
         }
     }
 }
@@ -327,45 +257,27 @@ impl CommandExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    use terra_caging::engine::*;
     use terra_caging::sandbox::SandboxGuard;
+    use terra_types::command::CommandStatus;
     use terra_providers::adapter::DryRunAdapter;
 
     fn test_executor() -> (CommandExecutor, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".terra")).unwrap();
         let memory = Arc::new(MemoryDatabase::open_in_memory().unwrap());
-        let artifacts = Arc::new(ArtifactStore::new(dir.path().to_path_buf()));
         let audit = Arc::new(AuditLog::new());
-        let provider: Arc<dyn terra_providers::adapter::ProviderAdapter> =
-            Arc::new(DryRunAdapter::new());
-
-        let sandbox = SandboxGuard::new(
-            dir.path().to_path_buf(),
-            vec![dir.path().join(".terra/constitution.toml")],
-        );
-
-        let caging = Arc::new(CagingEngine::new(vec![
-            Box::new(SpecificationCage),
-            Box::new(MemoryCage),
-            Box::new(ActionCage::new(sandbox)),
-            Box::new(VerificationCage),
-            Box::new(MetaCage),
-        ]));
-
-        let exec = CommandExecutor::new(memory, artifacts, audit, caging, provider);
+        let provider: Arc<dyn ProviderAdapter> = Arc::new(DryRunAdapter::new());
+        let sandbox = SandboxGuard::new(root.clone(), vec![root.join(".terra/constitution.toml")]);
+        let caging = Arc::new(CagingEngine::standard(sandbox, true, true));
+        let exec = CommandExecutor::new(memory, audit, caging, provider).with_project_root(root);
         (exec, dir)
     }
 
     fn write_cmd(key: &str, agent: &str) -> Command {
         Command::new(
             agent,
-            CommandOp::MemWrite {
-                key: key.into(),
-                content: "test data".into(),
-                scope: "project".into(),
-                level: "L2".into(),
-            },
+            CommandOp::MemWrite { key: key.into(), content: "test data".into(), scope: "project".into(), level: "L2".into() },
         )
     }
 
@@ -374,255 +286,143 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audit_before_execute() {
+    async fn audit_before_and_after_execute() {
         let (exec, _dir) = test_executor();
         exec.execute(write_cmd("key1", "main")).await;
-
         let entries = exec.audit.entries();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].duration_us.is_some());
-    }
-
-    #[tokio::test]
-    async fn cage_check_before_execute() {
-        let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("owned_key", "main")).await;
-        let result = exec.execute(write_cmd("owned_key", "attacker")).await;
-        assert_eq!(result.status, CommandStatus::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn cage_block_prevents_write() {
-        let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("protected", "main")).await;
-        let result = exec.execute(write_cmd("protected", "hacker")).await;
-        assert_eq!(result.status, CommandStatus::PermissionDenied);
-
-        let read_result = exec.execute(read_cmd("protected")).await;
-        assert_eq!(read_result.status, CommandStatus::Ok);
-        assert_eq!(read_result.data.unwrap()["owner"], "main");
-    }
-
-    #[tokio::test]
-    async fn routes_mem_to_memory() {
-        let (exec, _dir) = test_executor();
-        let result = exec.execute(write_cmd("routed", "main")).await;
-        assert_eq!(result.status, CommandStatus::Ok);
-
-        let read = exec.execute(read_cmd("routed")).await;
-        assert_eq!(read.status, CommandStatus::Ok);
-        assert_eq!(read.data.unwrap()["key"], "routed");
-    }
-
-    #[tokio::test]
-    async fn routes_trace_to_audit() {
-        let (exec, _dir) = test_executor();
-        let cmd = Command::new(
-            "main",
-            CommandOp::TraceCheckpoint {
-                title: "test checkpoint".into(),
-                summary: "testing routing".into(),
-            },
-        );
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Ok);
-        assert!(!exec.audit.is_empty());
-    }
-
-    #[tokio::test]
-    async fn result_has_duration() {
-        let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("timed", "main")).await;
-
-        let entries = exec.audit.entries();
-        assert!(entries[0].duration_us.is_some());
-    }
-
-    #[tokio::test]
-    async fn permission_denied_on_block() {
-        let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("owned", "alice")).await;
-
-        let result = exec.execute(write_cmd("owned", "bob")).await;
-        assert_eq!(result.status, CommandStatus::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn audit_records_command_and_result() {
-        let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("audited", "main")).await;
-
-        let entries = exec.audit.entries();
-        assert_eq!(entries.len(), 1);
-        assert!(entries[0].result.is_some());
         assert_eq!(entries[0].result.as_ref().unwrap().status, CommandStatus::Ok);
     }
 
     #[tokio::test]
-    async fn multiple_commands_sequential() {
+    async fn memory_ownership_enforced_and_blocked_commands_audited() {
         let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("a", "main")).await;
-        exec.execute(write_cmd("b", "main")).await;
-        exec.execute(write_cmd("c", "main")).await;
-
+        exec.execute(write_cmd("owned_key", "main")).await;
+        let result = exec.execute(write_cmd("owned_key", "attacker")).await;
+        assert_eq!(result.status, CommandStatus::PermissionDenied);
+        let read = exec.execute(read_cmd("owned_key")).await;
+        assert_eq!(read.data.unwrap()["owner"], "main");
         let entries = exec.audit.entries();
         assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].result.as_ref().unwrap().status, CommandStatus::PermissionDenied);
     }
 
     #[tokio::test]
-    async fn blocked_command_audited() {
+    async fn file_write_read_delete_inside_project() {
+        let (exec, dir) = test_executor();
+        let result = exec
+            .execute(Command::new("main", CommandOp::FileWrite { path: "notes/test_file.txt".into(), content: "hello terra".into() }))
+            .await;
+        assert_eq!(result.status, CommandStatus::Ok, "{:?}", result.error);
+        assert_eq!(result.data.as_ref().unwrap()["bytes_written"], 11);
+        assert!(dir.path().join("notes/test_file.txt").exists(), "relative paths resolve against the project root");
+
+        let read = exec.execute(Command::new("main", CommandOp::FileRead { path: "notes/test_file.txt".into() })).await;
+        assert_eq!(read.data.unwrap()["content"], "hello terra");
+
+        let del = exec.execute(Command::new("main", CommandOp::FileDelete { path: "notes/test_file.txt".into() })).await;
+        assert_eq!(del.status, CommandStatus::Ok);
+        assert!(!dir.path().join("notes/test_file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn writes_outside_and_to_the_constitution_are_blocked() {
+        let (exec, dir) = test_executor();
+        let outside = dir.path().parent().unwrap().join("terra_exec_escape.txt");
+        let result = exec
+            .execute(Command::new("main", CommandOp::FileWrite { path: outside.to_string_lossy().into(), content: "x".into() }))
+            .await;
+        assert_eq!(result.status, CommandStatus::PermissionDenied);
+        assert!(result.error.unwrap().contains("cage 'action'"));
+        assert!(!outside.exists());
+
+        let result = exec
+            .execute(Command::new("main", CommandOp::FileWrite { path: ".terra/constitution.toml".into(), content: "x".into() }))
+            .await;
+        assert!(result.error.unwrap().contains("cage 'meta'"));
+    }
+
+    #[tokio::test]
+    async fn file_read_nonexistent_is_an_error() {
         let (exec, _dir) = test_executor();
-        exec.execute(write_cmd("x", "owner")).await;
-        exec.execute(write_cmd("x", "attacker")).await;
-
-        let entries = exec.audit.entries();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(
-            entries[1].result.as_ref().unwrap().status,
-            CommandStatus::PermissionDenied
-        );
+        let result = exec.execute(Command::new("main", CommandOp::FileRead { path: "/nonexistent/path/file.txt".into() })).await;
+        assert_eq!(result.status, CommandStatus::Error);
     }
 
-    // NEW: ProviderCall through executor
     #[tokio::test]
-    async fn provider_call_through_executor() {
+    async fn shell_exec_runs_in_project_root_and_reports_exit() {
+        let (exec, dir) = test_executor();
+        let result = exec
+            .execute(Command::new("main", CommandOp::ShellExec { command: "pwd && echo hello".into(), workdir: None, timeout_ms: Some(5000) }))
+            .await;
+        assert_eq!(result.status, CommandStatus::Ok, "{:?}", result.error);
+        let data = result.data.unwrap();
+        let stdout = data["stdout"].as_str().unwrap();
+        assert!(stdout.contains("hello"));
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        assert!(stdout.contains(cwd.to_str().unwrap()), "stdout: {stdout}");
+        assert_eq!(data["isolation"], "none");
+
+        let fail = exec.execute(Command::new("main", CommandOp::ShellExec { command: "exit 1".into(), workdir: None, timeout_ms: None })).await;
+        assert_eq!(fail.status, CommandStatus::Error);
+
+        let slow = exec
+            .execute(Command::new("main", CommandOp::ShellExec { command: "sleep 10".into(), workdir: None, timeout_ms: Some(200) }))
+            .await;
+        assert_eq!(slow.status, CommandStatus::Error);
+        assert!(slow.error.unwrap().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn goal_mode_without_spec_blocks_changes_until_complete() {
+        let (exec, _dir) = test_executor();
+        exec.set_mode(SessionMode { goal: true, spec_complete: false });
+        let write = || Command::new("main", CommandOp::FileWrite { path: "a.txt".into(), content: "x".into() });
+        let blocked = exec.execute(write()).await;
+        assert!(blocked.error.unwrap().contains("cage 'specification'"));
+        let read = exec.execute(Command::new("main", CommandOp::FileRead { path: "Cargo.toml".into() })).await;
+        assert_ne!(read.status, CommandStatus::PermissionDenied, "reads are allowed while specifying");
+
+        exec.set_mode(SessionMode { goal: true, spec_complete: true });
+        assert_eq!(exec.execute(write()).await.status, CommandStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn completion_claims_go_through_the_verification_cage() {
+        let (exec, _dir) = test_executor();
+        let claim = |verified: bool| Command::new("session", CommandOp::ClaimComplete { goal: "g".into(), verified, evidence: "e".into() });
+        exec.set_mode(SessionMode { goal: true, spec_complete: true });
+        assert_eq!(exec.execute(claim(false)).await.status, CommandStatus::PermissionDenied);
+        assert_eq!(exec.execute(claim(true)).await.status, CommandStatus::Ok);
+        exec.set_mode(SessionMode::CONVERSATION);
+        assert_eq!(exec.execute(claim(false)).await.status, CommandStatus::Ok, "goal-only cage is off in conversation");
+    }
+
+    #[tokio::test]
+    async fn provider_call_and_declined_commands_are_audited() {
         let (exec, _dir) = test_executor();
         let cmd = Command::new(
             "main",
-            CommandOp::ProviderCall {
-                system_prompt: "You are helpful.".into(),
-                user_prompt: "What is 2+2?".into(),
-                max_tokens: Some(50),
-                temperature: None,
-                output_contract: None,
-            },
+            CommandOp::ProviderCall { system_prompt: "You are helpful.".into(), user_prompt: "What is 2+2?".into(), max_tokens: Some(50), temperature: None, json: false },
         );
         let result = exec.execute(cmd).await;
         assert_eq!(result.status, CommandStatus::Ok);
-        let data = result.data.unwrap();
-        assert!(data["content"].as_str().unwrap().contains("DRY_RUN"));
-
-        // Audit recorded the provider call
-        let entries = exec.audit.entries();
-        assert_eq!(entries.len(), 1);
-        assert!(entries[0].result.is_some());
-    }
-
-    // --- FileOps syscall tests ---
-
-    #[tokio::test]
-    async fn file_write_and_read() {
-        let (exec, dir) = test_executor();
-        let file_path = dir.path().join("test_file.txt");
-
-        // Write
-        let cmd = Command::new("main", CommandOp::FileWrite {
-            path: file_path.to_string_lossy().to_string(),
-            content: "hello terra".into(),
-        });
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Ok);
-        assert_eq!(result.data.as_ref().unwrap()["bytes_written"], 11);
-
-        // Read back
-        let cmd = Command::new("main", CommandOp::FileRead {
-            path: file_path.to_string_lossy().to_string(),
-        });
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Ok);
-        assert_eq!(result.data.as_ref().unwrap()["content"], "hello terra");
-    }
-
-    #[tokio::test]
-    async fn file_delete() {
-        let (exec, dir) = test_executor();
-        let file_path = dir.path().join("to_delete.txt");
-        std::fs::write(&file_path, "temp").unwrap();
-
-        let cmd = Command::new("main", CommandOp::FileDelete {
-            path: file_path.to_string_lossy().to_string(),
-        });
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Ok);
-        assert!(!file_path.exists());
-    }
-
-    #[tokio::test]
-    async fn file_read_nonexistent() {
-        let (exec, _dir) = test_executor();
-        let cmd = Command::new("main", CommandOp::FileRead {
-            path: "/nonexistent/path/file.txt".into(),
-        });
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Error);
-    }
-
-    #[tokio::test]
-    async fn shell_exec_simple() {
-        let (exec, _dir) = test_executor();
-        let cmd = Command::new("main", CommandOp::ShellExec {
-            command: "echo hello".into(),
-            workdir: None,
-            timeout_ms: Some(5000),
-        });
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Ok);
-        let stdout = result.data.as_ref().unwrap()["stdout"].as_str().unwrap();
-        assert!(stdout.contains("hello"));
-    }
-
-    #[tokio::test]
-    async fn shell_exec_failure() {
-        let (exec, _dir) = test_executor();
-        let cmd = Command::new("main", CommandOp::ShellExec {
-            command: "exit 1".into(),
-            workdir: None,
-            timeout_ms: None,
-        });
-        let result = exec.execute(cmd).await;
-        assert_eq!(result.status, CommandStatus::Error);
-    }
-
-    #[tokio::test]
-    async fn file_ops_audited() {
-        let (exec, dir) = test_executor();
-        let file_path = dir.path().join("audit_test.txt");
-
-        exec.execute(Command::new("main", CommandOp::FileWrite {
-            path: file_path.to_string_lossy().to_string(),
-            content: "audit me".into(),
-        })).await;
-
-        exec.execute(Command::new("main", CommandOp::FileRead {
-            path: file_path.to_string_lossy().to_string(),
-        })).await;
-
-        let entries = exec.audit.entries();
-        assert_eq!(entries.len(), 2, "both file ops should be audited");
-    }
-
-    #[tokio::test]
-    async fn audit_llm_call_records() {
-        let (exec, _dir) = test_executor();
-        assert_eq!(exec.audit.len(), 0);
+        assert!(result.data.unwrap()["content"].as_str().unwrap().contains("DRY_RUN"));
 
         exec.audit_llm_call("main", 100, 50, 2, 1);
-
-        assert_eq!(exec.audit.len(), 1, "audit_llm_call should create one entry");
+        let declined = exec.record_declined(Command::new("main", CommandOp::ShellExec { command: "rm x".into(), workdir: None, timeout_ms: None }));
+        assert_eq!(declined.status, CommandStatus::PermissionDenied);
+        let entries = exec.audit.entries();
+        assert_eq!(entries.len(), 3);
+        assert!(entries[2].result.as_ref().unwrap().error.as_ref().unwrap().contains("declined"));
     }
 
     #[tokio::test]
-    async fn shell_exec_timeout_via_executor() {
+    async fn mem_search_goes_through_the_database() {
         let (exec, _dir) = test_executor();
-        let cmd = Command::new("main", CommandOp::ShellExec {
-            command: "sleep 10".into(),
-            workdir: None,
-            timeout_ms: Some(200),
-        });
-        let result = exec.execute(cmd).await;
-        // Should be blocked by cage (ShellExec is warned but allowed) or timeout
-        // The cage may block or allow depending on configuration
-        // Either way it should not hang
-        assert!(result.status == CommandStatus::Error || result.status == CommandStatus::PermissionDenied);
+        exec.execute(Command::new("main", CommandOp::MemWrite { key: "jwt".into(), content: "auth uses JWT tokens".into(), scope: "project".into(), level: "L2".into() })).await;
+        let found = exec.execute(Command::new("main", CommandOp::MemSearch { query: "JWT".into(), top_k: 5 })).await;
+        assert_eq!(found.data.unwrap()["results"][0]["key"], "jwt");
     }
 }

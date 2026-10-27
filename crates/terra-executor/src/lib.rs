@@ -1,14 +1,11 @@
-//! Terra Command Executor
-//!
-//! The single gateway through which all agents interact with system resources.
-//! Enforces: audit → caging → execute → record.
-//!
-//! No agent may directly access MemoryDatabase, ProviderAdapter, or filesystem.
-//! All operations are Command objects routed through this executor.
+//! The command executor: the one place where an agent's intent becomes an
+//! effect. Audit → cages → execute → audit, for every command.
 
 pub mod executor;
+pub mod isolation;
 pub mod router;
-pub mod error;
+pub mod tools;
 
-pub use executor::CommandExecutor;
-pub use error::ExecutorError;
+pub use executor::{CommandExecutor, SessionMode};
+pub use isolation::Isolation;
+pub use tools::{builtin_tools, is_dangerous, parse_tool_call, ToolSpec};

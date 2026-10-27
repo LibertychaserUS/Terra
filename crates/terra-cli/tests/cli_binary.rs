@@ -1,12 +1,12 @@
-//! CLI binary tests — T-CLI-001 to T-CLI-010, plus .terra/.gitignore checks.
+//! The `terra` binary in an isolated project and HOME, without an API key.
 
 use std::path::Path;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-/// An isolated environment: temp project dir, temp HOME (so ~/.terra of the
-/// developer is never read or written) and no provider keys (no real LLM calls).
+/// Temp project dir, temp HOME (the developer's ~/.terra is never touched)
+/// and no provider keys (no real LLM calls).
 struct TestEnv {
     project: tempfile::TempDir,
     home: tempfile::TempDir,
@@ -29,89 +29,62 @@ impl TestEnv {
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(self.project.path())
-            .output()
-            .unwrap();
+        let out = std::process::Command::new("git").args(args).current_dir(self.project.path()).output().unwrap();
         String::from_utf8_lossy(&out.stdout).to_string()
     }
 }
 
-// T-CLI-001: no args shows banner
 #[test]
-fn no_args_shows_banner() {
-    TestEnv::new().terra()
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Terra"))
-        .stdout(predicate::str::contains("Agent OS"));
+fn chat_without_input_prints_banner_and_exits() {
+    TestEnv::new().terra().write_stdin("").assert().success().stdout(predicate::str::contains("Terra"));
 }
 
-// T-CLI-002: doctor shows status
 #[test]
 fn doctor_shows_status() {
-    TestEnv::new().terra()
+    TestEnv::new()
+        .terra()
         .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains("Status:       dry-run only"))
-        .stdout(predicate::str::contains("not initialized"));
+        .stdout(predicate::str::contains("not initialized"))
+        .stdout(predicate::str::contains("Shell:        isolation"));
 }
 
-// T-CLI-003: doctor --as-json outputs valid JSON
 #[test]
 fn doctor_as_json() {
-    let output = TestEnv::new().terra()
-        .args(["doctor", "--as-json"])
-        .output()
-        .unwrap();
+    let output = TestEnv::new().terra().args(["doctor", "--as-json"]).output().unwrap();
     assert!(output.status.success());
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("should output valid JSON");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
     assert!(json.get("os").is_some());
     assert!(json.get("terra_version").is_some());
+    assert!(json.get("shell_isolation").is_some());
 }
 
-// T-CLI-004: run with task completes
 #[test]
 fn run_with_task() {
-    TestEnv::new().terra()
+    TestEnv::new()
+        .terra()
         .args(["run", "--task", "add a test to src/lib.rs"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("complete"));
+        .stdout(predicate::str::contains("Terra run complete"))
+        .stdout(predicate::str::contains("nothing was written"));
 }
 
-// T-CLI-005: run --as-json outputs valid JSON
-#[test]
-fn run_as_json() {
-    let output = TestEnv::new().terra()
-        .args(["run", "--task", "add a test to src/lib.rs", "--as-json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("should output valid JSON");
-    assert!(json.get("spec_id").is_some());
-}
-
-// T-CLI-006: run JSON has required fields
 #[test]
 fn run_json_has_required_fields() {
-    let output = TestEnv::new().terra()
-        .args(["run", "--task", "fix src/lib.rs", "--as-json"])
-        .output()
-        .unwrap();
+    let output = TestEnv::new().terra().args(["run", "--task", "fix src/lib.rs", "--as-json"]).output().unwrap();
+    assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json.get("spec_id").is_some(), "missing spec_id");
-    assert!(json.get("intent").is_some(), "missing intent");
-    assert!(json.get("worker_response").is_some(), "missing worker_response");
-    assert!(json.get("ic_rules_applied").is_some(), "missing ic_rules_applied");
-    assert!(json.get("audit_entries").is_some(), "missing audit_entries");
+    for field in ["status", "spec_id", "intent", "response", "provider", "verification", "audit_entries"] {
+        assert!(json.get(field).is_some(), "missing {field}: {json}");
+    }
+    assert_eq!(json["status"], "complete");
+    assert_eq!(json["provider"], "dry_run");
 }
 
-// The specification cage stops a task with open questions before the worker runs.
+// The specification cage stops a task with open questions before the model is called.
 #[test]
 fn run_with_open_questions_is_blocked() {
     let env = TestEnv::new();
@@ -137,29 +110,35 @@ fn constitution_can_turn_off_the_spec_gate() {
     let path = env.project.path().join(".terra/constitution.toml");
     let rules = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, rules.replace("require_spec_complete = true", "require_spec_complete = false")).unwrap();
-
-    env.terra()
-        .args(["run", "--task", "test task"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Terra run complete"));
+    env.terra().args(["run", "--task", "test task"]).assert().success().stdout(predicate::str::contains("Terra run complete"));
 }
 
-/// Send one MCP `FileWrite` call to `terra mcp` and return the JSON-RPC response.
+/// Drive `terra mcp` over stdio: initialize, then one `FileWrite` call.
+/// Returns the JSON-RPC response to the call.
 fn mcp_file_write(env: &TestEnv, path: &str, content: &str) -> serde_json::Value {
-    let request = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "0" } }
+    });
+    let initialized = serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "FileWrite", "arguments": { "path": path, "content": content } },
     });
-    let out = env.terra().arg("mcp").write_stdin(format!("{}\n", request)).output().unwrap();
+    let stdin = format!("{init}\n{initialized}\n{call}\n");
+    let out = env.terra().arg("mcp").write_stdin(stdin).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(stdout.lines().next().expect("one response line")).unwrap()
+    stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no response to the call; stdout: {stdout}; stderr: {}", String::from_utf8_lossy(&out.stderr)))
 }
 
 // The meta cage keeps the agent from writing the rules that cage it, also in a
 // project with no constitution yet (where no path is listed as protected).
 #[test]
-fn agent_cannot_write_the_constitution() {
+fn agent_cannot_write_the_constitution_over_mcp() {
     let env = TestEnv::new();
     let wider_sandbox = "[meta]\nversion = 1\n[sandbox]\nroot = \"/\"\n";
     let constitution = env.project.path().join(".terra/constitution.toml");
@@ -174,15 +153,15 @@ fn agent_cannot_write_the_constitution() {
     assert!(resp["error"]["message"].as_str().unwrap().contains("cage 'meta' blocked"), "{}", resp);
     assert_eq!(std::fs::read_to_string(&constitution).unwrap(), original);
 
-    // Other files in the project are still writable.
     let resp = mcp_file_write(&env, "notes.md", "hello");
     assert!(resp["error"].is_null(), "{}", resp);
+    assert_eq!(std::fs::read_to_string(env.project.path().join("notes.md")).unwrap(), "hello");
 }
 
-// T-CLI-007: help flag
 #[test]
 fn help_flag() {
-    TestEnv::new().terra()
+    TestEnv::new()
+        .terra()
         .arg("--help")
         .assert()
         .success()
@@ -191,36 +170,20 @@ fn help_flag() {
         .stdout(predicate::str::contains("config"));
 }
 
-// T-CLI-008: unknown command error
 #[test]
 fn unknown_command_error() {
-    TestEnv::new().terra()
-        .arg("nonexistent-command")
-        .assert()
-        .failure();
+    TestEnv::new().terra().arg("nonexistent-command").assert().failure();
 }
 
-// T-CLI-009: config show displays config
 #[test]
 fn config_show_displays() {
-    TestEnv::new().terra()
+    TestEnv::new()
+        .terra()
         .args(["config", "show"])
         .assert()
         .success()
         .stdout(predicate::str::contains("provider"))
-        .stdout(predicate::str::contains("model"));
-}
-
-// T-CLI-010: config set then show
-#[test]
-fn config_set_and_show() {
-    // Note: config set writes to ~/.terra/config.toml by default.
-    // We test that the subcommand at least parses correctly.
-    // Full persistence test is in config.rs unit tests (T-CF-005).
-    TestEnv::new().terra()
-        .args(["config", "show"])
-        .assert()
-        .success()
+        .stdout(predicate::str::contains("model"))
         .stdout(predicate::str::contains("base_url"));
 }
 
@@ -238,12 +201,13 @@ fn assert_only_shareable_terra_files(visible: &[String]) {
         let name = Path::new(path).file_name().unwrap().to_str().unwrap();
         assert!(
             matches!(name, ".gitignore" | "constitution.toml" | "prompt.md"),
-            "runtime file {} would be committed; visible: {:?}", path, visible
+            "runtime file {} would be committed; visible: {:?}",
+            path,
+            visible
         );
     }
 }
 
-// `/commit` stages everything, so Terra's own databases must be git-ignored.
 #[test]
 fn init_keeps_runtime_data_out_of_git() {
     let env = TestEnv::new();
@@ -251,6 +215,7 @@ fn init_keeps_runtime_data_out_of_git() {
     env.terra().arg("init").assert().success();
     env.terra().args(["run", "--task", "touch notes.md"]).assert().success();
     assert!(env.project.path().join(".terra/memory.db").exists());
+    assert!(env.project.path().join(".terra/audit.db").exists());
     assert_only_shareable_terra_files(&terra_files_visible_to_git(&env));
 }
 
@@ -286,10 +251,11 @@ fn spawn_stub_llm(reply: &'static str) -> String {
             let mut body = vec![0; content_length];
             reader.read_exact(&mut body).ok();
             let json = serde_json::json!({
-                "id": "stub", "model": "stub-model",
+                "id": "stub", "object": "chat.completion", "created": 0, "model": "stub-model",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-            }).to_string();
+            })
+            .to_string();
             let mut stream = reader.into_inner();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", json.len(), json).ok();
         }
@@ -297,7 +263,9 @@ fn spawn_stub_llm(reply: &'static str) -> String {
     format!("http://{}", addr)
 }
 
-// `terra config set` used to write a file nothing read; the runtime now uses it.
+// Project config drives the provider; with a real provider the spec is
+// written by the model (here: a stub that answers prose, so the heuristic
+// takes over) and the answer comes from the configured endpoint.
 #[test]
 fn project_config_drives_the_provider() {
     let env = TestEnv::new();
@@ -307,8 +275,7 @@ fn project_config_drives_the_provider() {
         env.terra().args(["config", "set", key, value, "--project"]).assert().success();
     }
 
-    let report: serde_json::Value =
-        serde_json::from_slice(&env.terra().args(["doctor", "--as-json"]).output().unwrap().stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&env.terra().args(["doctor", "--as-json"]).output().unwrap().stdout).unwrap();
     assert_eq!(report["provider_configured"], true);
     assert_eq!(report["provider_source"], ".terra/config.toml");
     assert_eq!(report["model"], "stub-model");
@@ -317,12 +284,13 @@ fn project_config_drives_the_provider() {
     let out = env.terra().args(["run", "--task", "say hi in hello.txt", "--as-json"]).output().unwrap();
     let run: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(run["provider"], "stub-model", "dry-run would report dry_run");
-    assert!(run["worker_response"].as_str().unwrap().contains("reply from the configured provider"));
+    assert!(run["response"].as_str().unwrap().contains("reply from the configured provider"), "{run}");
 }
 
 #[test]
 fn config_set_rejects_keys_the_runtime_ignores() {
-    TestEnv::new().terra()
+    TestEnv::new()
+        .terra()
         .args(["config", "set", "memory.cache_capacity", "5"])
         .assert()
         .failure()
@@ -331,7 +299,8 @@ fn config_set_rejects_keys_the_runtime_ignores() {
 
 #[test]
 fn config_set_does_not_echo_api_key() {
-    TestEnv::new().terra()
+    TestEnv::new()
+        .terra()
         .args(["config", "set", "provider.api_key", "sk-very-secret"])
         .assert()
         .success()
@@ -339,7 +308,7 @@ fn config_set_does_not_echo_api_key() {
 }
 
 #[test]
-fn trace_reports_missing_log_then_lists_entries() {
+fn trace_reports_missing_log_then_lists_entries_and_verifies_the_chain() {
     let env = TestEnv::new();
     env.terra().arg("trace").assert().success().stdout(predicate::str::contains("No audit log here yet"));
     env.terra().arg("init").assert().success();
@@ -349,10 +318,31 @@ fn trace_reports_missing_log_then_lists_entries() {
         .assert()
         .success()
         .stdout(predicate::str::contains("entries, showing"))
-        .stdout(predicate::str::contains("ProviderCall"));
+        .stdout(predicate::str::contains("ProviderCall"))
+        .stdout(predicate::str::contains("ClaimComplete"));
     let out = env.terra().args(["trace", "--as-json", "-n", "2"]).output().unwrap();
     let entries: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(entries.as_array().unwrap().len(), 2);
+    env.terra().args(["trace", "--verify"]).assert().success().stdout(predicate::str::contains("Audit chain intact"));
+}
+
+// An audit log edited behind Terra's back is refused, not silently reused.
+#[test]
+fn tampered_audit_log_is_refused() {
+    let env = TestEnv::new();
+    env.terra().arg("init").assert().success();
+    env.terra().args(["run", "--task", "note it in notes.md"]).assert().success();
+    let db = env.project.path().join(".terra/audit.db");
+    let status = std::process::Command::new("sqlite3")
+        .arg(&db)
+        .arg("UPDATE audit_events SET payload = replace(payload, '\"ok\"', '\"error\"') WHERE kind = 'result';")
+        .status();
+    if !matches!(status, Ok(s) if s.success()) {
+        eprintln!("sqlite3 not available; skipping");
+        return;
+    }
+    env.terra().args(["trace", "--verify"]).assert().code(1).stderr(predicate::str::contains("hash chain breaks"));
+    env.terra().args(["run", "--task", "touch notes.md"]).assert().failure().stderr(predicate::str::contains("append-only"));
 }
 
 #[test]
@@ -362,21 +352,17 @@ fn piped_output_has_no_color_codes() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains('\x1b'));
     let out = env.terra().arg("chat").write_stdin("/help\nhello\n/quit\n").output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(!text.contains('\x1b'), "escape codes in piped chat output");
+    assert!(!text.contains('\x1b'), "escape codes in piped chat output: {text}");
     assert!(!text.contains("Thinking"), "spinner in piped chat output");
+    assert!(text.contains("DRY_RUN response to: hello"), "{text}");
 }
 
-// `terra init` used to write explicit defaults that shadowed ~/.terra/config.toml.
 #[test]
 fn global_settings_apply_after_init() {
     let env = TestEnv::new();
     env.terra().arg("init").assert().success();
     env.terra().args(["config", "set", "provider.model", "gpt-4o"]).assert().success();
-    env.terra()
-        .args(["config", "show"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("model = \"gpt-4o\""));
+    env.terra().args(["config", "show"]).assert().success().stdout(predicate::str::contains("model = \"gpt-4o\""));
 }
 
 #[test]
@@ -384,12 +370,7 @@ fn empty_api_key_means_dry_run() {
     let env = TestEnv::new();
     env.terra().arg("init").assert().success();
     env.terra().args(["config", "set", "provider.api_key", "", "--project"]).assert().success();
-    env.terra()
-        .arg("doctor")
-        .env("TERRA_PROVIDER_API_KEY", "")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("dry-run only"));
+    env.terra().arg("doctor").env("TERRA_PROVIDER_API_KEY", "").assert().success().stdout(predicate::str::contains("dry-run only"));
 }
 
 // `terra trace | head -1` used to panic with "failed printing to stdout: Broken pipe".
@@ -407,7 +388,7 @@ fn closed_stdout_does_not_panic() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    drop(child.stdout.take()); // reader goes away before terra writes
+    drop(child.stdout.take());
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panicked"), "{}", stderr);

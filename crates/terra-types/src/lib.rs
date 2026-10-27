@@ -1,14 +1,10 @@
-//! Terra Shared Types (L0)
-//!
-//! Command protocol types used across all layers.
-//! This crate sits at L0 — any layer may depend on it.
-//! It has no dependencies on other Terra crates.
+//! Terra shared types: the command protocol between agents and the executor,
+//! streaming events, and UTF-8 safe text helpers. No other Terra crate is a
+//! dependency of this one.
 
 pub mod command;
-pub mod contract;
 pub mod event;
 pub mod text;
 
 pub use command::{Command, CommandOp, CommandResult, CommandStatus};
-pub use contract::{OutputContract, ContractParseResult};
-pub use event::{StreamEvent, EventType, TokenTracker, EventBus, NullBus, CollectorBus, ChannelBus};
+pub use event::{ChannelBus, CollectorBus, EventBus, EventType, NullBus, StreamEvent, TokenTracker};

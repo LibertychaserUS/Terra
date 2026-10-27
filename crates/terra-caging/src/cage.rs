@@ -19,11 +19,10 @@ impl CageCheckResult {
     }
 }
 
-/// Trait for all cage implementations.
+/// A cage: a predicate on the action an agent proposes.
 ///
-/// Each cage checks a specific aspect of agent behavior.
-/// The CagingEngine runs all cages in sequence; the first
-/// Block short-circuits and prevents the action.
+/// Cages never change the action or choose another one. The engine runs
+/// them in order; the first `Block` stops the action.
 pub trait Cage: Send + Sync {
     /// Human-readable name of this cage.
     fn name(&self) -> &str;
@@ -32,73 +31,70 @@ pub trait Cage: Send + Sync {
     fn check(&self, context: &CageContext) -> CageCheckResult;
 
     /// Whether this cage only activates in Goal Mode.
-    /// Default: false (always active).
     fn goal_only(&self) -> bool {
         false
     }
 }
 
-/// Context passed to cage checks.
-///
-/// Contains all information a cage might need to make a decision.
+/// What the cages know when they judge an action.
 #[derive(Debug, Clone)]
 pub struct CageContext {
     pub agent: String,
     pub action: CageAction,
-    /// Whether the session is in Goal Mode.
-    /// Goal-only cages skip when this is false.
+    /// Whether the session is in Goal Mode. Goal-only cages skip otherwise.
     pub goal_mode: bool,
+    /// Whether the active goal's specification has no open questions.
+    /// Meaningless outside Goal Mode.
+    pub spec_complete: bool,
 }
 
-/// The action being checked by the caging engine.
+impl CageContext {
+    /// A context outside Goal Mode.
+    pub fn conversation(agent: impl Into<String>, action: CageAction) -> Self {
+        Self { agent: agent.into(), action, goal_mode: false, spec_complete: true }
+    }
+
+    /// A context in Goal Mode with a complete specification.
+    pub fn goal(agent: impl Into<String>, action: CageAction) -> Self {
+        Self { agent: agent.into(), action, goal_mode: true, spec_complete: true }
+    }
+}
+
+/// The action being checked.
 #[derive(Debug, Clone)]
 pub enum CageAction {
-    /// Agent wants to execute a task with this spec completeness.
+    /// The agent wants to start a task whose spec is this complete.
     ExecuteTask { spec_complete: bool },
-    /// Agent wants to write/delete a file at this path.
+    /// Write a file at this path.
     FileWrite { path: std::path::PathBuf },
-    /// Agent wants to read a file at this path.
+    /// Read a file at this path.
     FileRead { path: std::path::PathBuf },
-    /// Agent wants to delete a file at this path.
+    /// Delete a file at this path.
     FileDelete { path: std::path::PathBuf },
-    /// Agent wants to write memory.
+    /// Write memory.
     MemoryWrite {
         key: String,
         owner: String,
         /// Target memory level (L0-L6)
         level: String,
-        /// Whether this write originates from a user command (/remember)
+        /// Whether this write originates from a user command (/remember, /accept)
         is_user_command: bool,
     },
-    /// Agent claims task is complete.
+    /// Claim the task is complete.
     ClaimComplete { verified: bool },
-    /// Agent attempts to modify a protected rule.
+    /// Modify a protected rule.
     ModifyRule { rule_name: String },
-    /// Agent wants to execute a shell command.
+    /// Execute a shell command.
     ShellExec { command: String },
-    /// Agent wants to continue exploring after path was accepted.
-    ExploreAfterAccepted { path_id: String },
-    /// Agent makes a knowledge claim. Authority ranking determines trust.
-    KnowledgeClaim {
-        /// The source of this knowledge
-        source: KnowledgeSource,
-        /// Whether a higher-authority source contradicts this claim
-        contradicted_by_higher: bool,
-    },
+    /// Anything else the executor routes (trace notes, provider calls).
+    Internal,
 }
 
-/// Authority ranking for knowledge claims (FR-073).
-/// Higher rank = higher authority. Lower never overrides higher.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum KnowledgeSource {
-    /// Rank 0 (lowest): Agent assumption / inference
-    Assumption,
-    /// Rank 1: From memory database (L1-L6)
-    Memory,
-    /// Rank 2: From project documentation
-    Documentation,
-    /// Rank 3 (highest): From current source code
-    Code,
+impl CageAction {
+    /// Whether the action can change the project (file system or shell).
+    pub fn mutates(&self) -> bool {
+        matches!(self, CageAction::FileWrite { .. } | CageAction::FileDelete { .. } | CageAction::ShellExec { .. })
+    }
 }
 
 #[cfg(test)]
@@ -106,23 +102,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cage_check_result_pass() {
-        let r = CageCheckResult::Pass;
-        assert!(r.is_pass());
-        assert!(!r.is_blocked());
+    fn cage_check_result_predicates() {
+        assert!(CageCheckResult::Pass.is_pass());
+        assert!(!CageCheckResult::Warn("careful".into()).is_blocked());
+        assert!(CageCheckResult::Block("denied".into()).is_blocked());
     }
 
     #[test]
-    fn cage_check_result_warn() {
-        let r = CageCheckResult::Warn("careful".into());
-        assert!(!r.is_pass());
-        assert!(!r.is_blocked());
-    }
-
-    #[test]
-    fn cage_check_result_block() {
-        let r = CageCheckResult::Block("denied".into());
-        assert!(r.is_blocked());
-        assert!(!r.is_pass());
+    fn mutating_actions() {
+        assert!(CageAction::ShellExec { command: "ls".into() }.mutates());
+        assert!(!CageAction::FileRead { path: "x".into() }.mutates());
+        assert!(!CageAction::Internal.mutates());
     }
 }

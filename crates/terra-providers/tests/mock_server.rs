@@ -1,7 +1,4 @@
-//! Mock server tests for OpenAI-compatible adapter.
-//! T-PV-010: retry on 429
-//! T-PV-011: timeout
-//! T-PV-012: streaming (placeholder)
+//! The adapter against a mock HTTP server: retries, timeouts, tool calls.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -12,29 +9,17 @@ use terra_providers::adapter::{CompletionRequest, ProviderAdapter};
 use terra_providers::openai::OpenAICompatibleAdapter;
 
 fn test_request() -> CompletionRequest {
-    CompletionRequest {
-        system_prompt: "test".into(),
-        user_prompt: "test".into(),
-        max_tokens: Some(10),
-        temperature: None,
-        tools: None,
-        tool_rounds: vec![],
-    }
+    CompletionRequest::simple("test", "test")
 }
 
-/// Custom responder that returns 429 for the first N calls, then 200.
+fn adapter(uri: String, timeout: u64) -> OpenAICompatibleAdapter {
+    OpenAICompatibleAdapter::new("test-key".into(), uri, "test-model".into(), timeout).unwrap()
+}
+
+/// Returns 429 for the first N calls, then 200.
 struct RetryResponder {
     fail_count: AtomicU32,
     fail_until: u32,
-}
-
-impl RetryResponder {
-    fn new(fail_until: u32) -> Self {
-        Self {
-            fail_count: AtomicU32::new(0),
-            fail_until,
-        }
-    }
 }
 
 impl wiremock::Respond for RetryResponder {
@@ -42,86 +27,85 @@ impl wiremock::Respond for RetryResponder {
         let current = self.fail_count.fetch_add(1, Ordering::SeqCst);
         if current < self.fail_until {
             ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "error": {"message": "rate limited", "type": "rate_limit"}
+                "error": {"message": "rate limited", "type": "rate_limit_error"}
             }))
         } else {
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{"message": {"content": "ok", "role": "assistant"}}],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+                "id": "x", "object": "chat.completion", "created": 0,
+                "choices": [{"index": 0, "message": {"content": "ok", "role": "assistant"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
                 "model": "test-model"
             }))
         }
     }
 }
 
-// T-PV-010: retry on 429
 #[tokio::test]
-async fn openai_retry_on_429() {
-    let mock_server = MockServer::start().await;
-
-    // First 2 calls return 429, third returns 200
-    let responder = RetryResponder::new(2);
+async fn retries_on_429() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(responder)
-        .expect(3) // exactly 3 calls: 2 retries + 1 success
-        .mount(&mock_server)
+        .respond_with(RetryResponder { fail_count: AtomicU32::new(0), fail_until: 2 })
+        .expect(3)
+        .mount(&server)
         .await;
 
-    let adapter = OpenAICompatibleAdapter::new(
-        "test-key".into(),
-        mock_server.uri(),
-        "test-model".into(),
-        30,
-    )
-    .unwrap();
-
-    let result = adapter.complete(test_request()).await;
+    let result = adapter(server.uri(), 30).complete(test_request()).await;
     assert!(result.is_ok(), "should succeed after retries: {:?}", result.err());
-    assert_eq!(result.unwrap().content, "ok");
+    let resp = result.unwrap();
+    assert_eq!(resp.content, "ok");
+    assert_eq!(resp.usage_prompt_tokens, 5);
 }
 
-// T-PV-011: timeout
 #[tokio::test]
-async fn openai_timeout() {
-    let mock_server = MockServer::start().await;
-
-    // Server delays 5 seconds, adapter timeout is 2 seconds
+async fn times_out() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(5)))
-        .mount(&mock_server)
+        .mount(&server)
         .await;
 
-    let adapter = OpenAICompatibleAdapter::new(
-        "test-key".into(),
-        mock_server.uri(),
-        "test-model".into(),
-        2, // 2 second timeout
-    )
-    .unwrap();
-
-    let result = adapter.complete(test_request()).await;
-    assert!(result.is_err(), "should timeout");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("timeout") || err.contains("retries"),
-        "error should mention timeout: {}",
-        err
-    );
+    let result = adapter(server.uri(), 1).complete(test_request()).await;
+    assert!(result.is_err(), "should time out");
 }
 
-// T-PV-012: streaming placeholder
 #[tokio::test]
-async fn openai_streaming_placeholder() {
-    // Streaming is a future feature. This test documents the intent
-    // and verifies the capability flag is set correctly.
-    let adapter = match OpenAICompatibleAdapter::from_env() {
-        Ok(a) => a,
-        Err(_) => return, // skip if no env
-    };
-    assert!(
-        adapter.capabilities().supports_streaming,
-        "adapter should report streaming support"
-    );
+async fn parses_tool_calls() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "x", "object": "chat.completion", "created": 0, "model": "test-model",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{"id": "call_1", "type": "function",
+                    "function": {"name": "FileRead", "arguments": "{\"path\": \"src/lib.rs\"}"}}]
+            }}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        })))
+        .mount(&server)
+        .await;
+
+    let resp = adapter(server.uri(), 30).complete(test_request()).await.unwrap();
+    assert_eq!(resp.content, "");
+    assert_eq!(resp.tool_calls.len(), 1);
+    assert_eq!(resp.tool_calls[0].name, "FileRead");
+    assert_eq!(resp.tool_calls[0].arguments["path"], "src/lib.rs");
+}
+
+#[tokio::test]
+async fn non_retryable_error_is_reported_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": {"message": "bad key", "type": "invalid_request_error"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = adapter(server.uri(), 30).complete(test_request()).await.unwrap_err();
+    assert!(err.to_string().contains("provider call failed"), "{err}");
 }

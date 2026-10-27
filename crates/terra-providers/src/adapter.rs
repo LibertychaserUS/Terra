@@ -1,160 +1,137 @@
-use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+//! The provider abstraction: a chat completion over a standard message list,
+//! with native tool calling and optional JSON output.
 
-/// Capabilities a provider/model supports.
+use serde::{Deserialize, Serialize};
+
+/// What a provider can do; the loop adapts to it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCapability {
     pub provider_id: String,
     pub model_id: String,
-    pub supports_structured_output: bool,
-    pub supports_streaming: bool,
+    pub supports_json_output: bool,
     pub supports_function_calling: bool,
     pub max_context_tokens: u32,
-    pub latency_class: LatencyClass,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LatencyClass {
-    Fast,
-    Medium,
-    Slow,
-}
-
-/// A streaming chunk from the provider.
-#[derive(Debug, Clone)]
-pub struct StreamChunk {
-    /// Incremental text content.
-    pub text: String,
-    /// True if this is the final chunk.
-    pub done: bool,
-}
-
-/// Stream events emitted during streaming completion via mpsc channel.
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    /// Stream has started.
-    Start,
-    /// A token delta arrived.
-    Delta(String),
-    /// Stream completed with usage stats.
-    End {
-        prompt_tokens: u32,
-        completion_tokens: u32,
-        total_tokens: u32,
-    },
-}
-
-/// A tool definition for function calling.
+/// A tool the model may call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
-    /// Tool name (e.g., "FileRead", "MemSearch", "PointerQuery").
     pub name: String,
-    /// Short description for the LLM.
     pub description: String,
-    /// JSON Schema for the tool's parameters.
+    /// JSON Schema of the arguments.
     pub parameters: serde_json::Value,
 }
 
-/// A tool call requested by the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A tool call requested by the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
-    /// Unique ID for this call (provider-assigned).
     pub id: String,
-    /// Tool name.
     pub name: String,
-    /// Arguments as JSON.
     pub arguments: serde_json::Value,
 }
 
-/// A tool result to send back to the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    /// Matches the tool_call ID.
-    pub tool_call_id: String,
-    /// Result content (stringified).
-    pub content: String,
+/// One message in the conversation, in the shape every chat API uses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum Message {
+    System { content: String },
+    User { content: String },
+    Assistant {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ToolCall>,
+    },
+    Tool { tool_call_id: String, content: String },
 }
 
-/// Trait for LLM provider adapters.
-///
-/// Terra is provider-agnostic. Any OpenAI-compatible endpoint
-/// implements this trait.
-#[async_trait::async_trait]
-pub trait ProviderAdapter: Send + Sync {
-    /// Send a prompt and get a complete response (buffered).
-    async fn complete(&self, request: CompletionRequest) -> anyhow::Result<CompletionResponse>;
-
-    /// Send a prompt and get a streaming response.
-    /// Returns a Vec of chunks (simplified stream — real impl would use async channel).
-    /// Default: falls back to complete() and returns single chunk.
-    async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<Vec<StreamChunk>> {
-        let response = self.complete(request).await?;
-        Ok(vec![StreamChunk {
-            text: response.content,
-            done: true,
-        }])
+impl Message {
+    pub fn system(content: impl Into<String>) -> Self {
+        Message::System { content: content.into() }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Message::User { content: content.into() }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Message::Assistant { content: content.into(), tool_calls: Vec::new() }
+    }
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Message::Tool { tool_call_id: tool_call_id.into(), content: content.into() }
     }
 
-    /// Start streaming completion, sending events to the channel.
-    /// Default falls back to complete() and emits Start + Delta(full_content) + End.
-    async fn complete_streaming(
-        &self,
-        request: CompletionRequest,
-        tx: mpsc::UnboundedSender<StreamEvent>,
-    ) -> anyhow::Result<CompletionResponse> {
-        let response = self.complete(request).await?;
-        let _ = tx.send(StreamEvent::Start);
-        let _ = tx.send(StreamEvent::Delta(response.content.clone()));
-        let _ = tx.send(StreamEvent::End {
-            prompt_tokens: response.usage_prompt_tokens,
-            completion_tokens: response.usage_completion_tokens,
-            total_tokens: response.usage_prompt_tokens + response.usage_completion_tokens,
-        });
-        Ok(response)
+    /// The text of the message (empty for pure tool-call messages).
+    pub fn text(&self) -> &str {
+        match self {
+            Message::System { content } | Message::User { content } | Message::Tool { content, .. } => content,
+            Message::Assistant { content, .. } => content,
+        }
     }
-
-    /// Get the capabilities of this provider.
-    fn capabilities(&self) -> &ProviderCapability;
 }
 
-/// A completion request to an LLM.
+/// A completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
-    pub system_prompt: String,
-    pub user_prompt: String,
+    pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDef>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-    /// Tool definitions for function calling (optional).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ToolDef>>,
-    /// Earlier tool calls and their results in this turn, oldest first.
-    /// Each round is replayed after the user message so the model sees the
-    /// whole chain, not just the latest result.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_rounds: Vec<ToolRound>,
+    /// Ask for a JSON object instead of prose (structured output).
+    #[serde(default)]
+    pub json: bool,
 }
 
-/// One assistant tool-call message and the results sent back for it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolRound {
-    pub calls: Vec<ToolCall>,
-    pub results: Vec<ToolResult>,
+impl CompletionRequest {
+    /// A plain system + user call with no tools.
+    pub fn simple(system: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            messages: vec![Message::system(system), Message::user(user)],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            json: false,
+        }
+    }
+
+    /// The last user message, if any (used by test doubles and dry-run).
+    pub fn last_user_text(&self) -> &str {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .unwrap_or("")
+    }
 }
 
-/// A completion response from an LLM.
+/// A completion response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub content: String,
     pub usage_prompt_tokens: u32,
     pub usage_completion_tokens: u32,
     pub model: String,
-    /// Tool calls requested by the LLM (if any).
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
 }
 
-/// A dry-run adapter that returns deterministic responses without calling any API.
+impl CompletionResponse {
+    /// The assistant message to append to the conversation.
+    pub fn as_message(&self) -> Message {
+        Message::Assistant { content: self.content.clone(), tool_calls: self.tool_calls.clone() }
+    }
+}
+
+/// An LLM provider. Any OpenAI-compatible endpoint implements this.
+#[async_trait::async_trait]
+pub trait ProviderAdapter: Send + Sync {
+    async fn complete(&self, request: CompletionRequest) -> anyhow::Result<CompletionResponse>;
+    fn capabilities(&self) -> &ProviderCapability;
+}
+
+/// A provider that answers without any network: echoes the last user message.
+/// Terra runs on it when no API key is configured.
 pub struct DryRunAdapter {
     capability: ProviderCapability,
 }
@@ -171,11 +148,9 @@ impl DryRunAdapter {
             capability: ProviderCapability {
                 provider_id: "dry_run".into(),
                 model_id: "dry_run".into(),
-                supports_structured_output: true,
-                supports_streaming: false,
+                supports_json_output: false,
                 supports_function_calling: false,
                 max_context_tokens: 128_000,
-                latency_class: LatencyClass::Fast,
             },
         }
     }
@@ -184,11 +159,9 @@ impl DryRunAdapter {
 #[async_trait::async_trait]
 impl ProviderAdapter for DryRunAdapter {
     async fn complete(&self, request: CompletionRequest) -> anyhow::Result<CompletionResponse> {
+        let echo: String = request.last_user_text().chars().take(100).collect();
         Ok(CompletionResponse {
-            content: format!(
-                "DRY_RUN response to: {}",
-                request.user_prompt.chars().take(100).collect::<String>()
-            ),
+            content: format!("DRY_RUN response to: {}", echo),
             usage_prompt_tokens: 0,
             usage_completion_tokens: 0,
             model: "dry_run".into(),
@@ -196,25 +169,30 @@ impl ProviderAdapter for DryRunAdapter {
         })
     }
 
-    async fn complete_stream(&self, request: CompletionRequest) -> anyhow::Result<Vec<StreamChunk>> {
-        let full = format!(
-            "DRY_RUN response to: {}",
-            request.user_prompt.chars().take(100).collect::<String>()
-        );
-        // Emit word by word to simulate streaming
-        let words: Vec<&str> = full.split_whitespace().collect();
-        let mut chunks = Vec::new();
-        for (i, word) in words.iter().enumerate() {
-            let is_last = i == words.len() - 1;
-            chunks.push(StreamChunk {
-                text: if i == 0 { word.to_string() } else { format!(" {}", word) },
-                done: is_last,
-            });
-        }
-        Ok(chunks)
-    }
-
     fn capabilities(&self) -> &ProviderCapability {
         &self.capability
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dry_run_echoes_last_user_message() {
+        let mut req = CompletionRequest::simple("sys", "first");
+        req.messages.push(Message::assistant("ok"));
+        req.messages.push(Message::user("second question"));
+        let resp = DryRunAdapter::new().complete(req).await.unwrap();
+        assert_eq!(resp.content, "DRY_RUN response to: second question");
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn message_json_uses_role_tag() {
+        let json = serde_json::to_string(&Message::tool("c1", "done")).unwrap();
+        assert!(json.contains("\"role\":\"tool\""));
+        let json = serde_json::to_string(&Message::assistant("hi")).unwrap();
+        assert!(!json.contains("tool_calls"), "empty tool_calls are omitted: {json}");
     }
 }

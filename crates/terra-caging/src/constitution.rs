@@ -47,6 +47,19 @@ pub struct ConstitutionConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub rules: RulesConfig,
+    /// External MCP tool servers the agent may use. Their tools go through
+    /// the same confirmation and audit as Terra's own.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// An MCP server started over stdio.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +92,14 @@ pub struct RulesConfig {
     pub require_spec_complete: bool,
     #[serde(default = "default_true")]
     pub require_verification: bool,
+    /// How shell commands are confined: "auto" (sandbox-exec on macOS,
+    /// bwrap on Linux when installed) or "none".
+    #[serde(default = "default_isolation")]
+    pub shell_isolation: String,
+}
+
+fn default_isolation() -> String {
+    "auto".into()
 }
 
 fn default_true() -> bool {
@@ -91,6 +112,7 @@ impl Default for RulesConfig {
             allow_external_writes: false,
             require_spec_complete: true,
             require_verification: true,
+            shell_isolation: default_isolation(),
         }
     }
 }
@@ -191,6 +213,16 @@ impl Constitution {
 
     pub fn allow_external_writes(&self) -> bool {
         self.config.rules.allow_external_writes
+    }
+
+    /// Whether shell commands run without OS-level isolation.
+    pub fn shell_isolation_off(&self) -> bool {
+        self.config.rules.shell_isolation.eq_ignore_ascii_case("none")
+    }
+
+    /// External MCP servers declared by the project.
+    pub fn mcp_servers(&self) -> &[McpServerConfig] {
+        &self.config.mcp_servers
     }
 
     /// Build a SandboxGuard from this constitution.
